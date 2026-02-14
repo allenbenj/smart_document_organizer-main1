@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 
+type StepStatusItem = {
+  name: string
+  status: string
+  updated_at?: string
+}
+
 type JobStatus = {
   job_id: string
   workflow: string
@@ -8,6 +14,8 @@ type JobStatus = {
   progress: number
   draft_state: string
   updated_at?: string
+  stepper?: StepStatusItem[]
+  metadata?: Record<string, any>
 }
 
 type ProposalRow = {
@@ -120,7 +128,9 @@ export function App() {
   useEffect(() => {
     const existing = localStorage.getItem('workflowJobId')
     if (existing) {
-      refreshJob(existing).catch(() => setError('Failed to resume previous workflow job'))
+      refreshJob(existing)
+        .then(() => setStatusMsg(`Resumed persisted job ${existing}`))
+        .catch(() => setError('Failed to resume previous workflow job'))
     }
   }, [])
 
@@ -130,9 +140,15 @@ export function App() {
         <h2>Workflow v2</h2>
         <p className="sub">Memory-first stepper</p>
         <ol>
-          {steps.map((step) => (
-            <li key={step}>{step}</li>
-          ))}
+          {steps.map((step) => {
+            const stepState = job?.stepper?.find((s) => s.name === step)?.status || 'not_started'
+            const active = job?.current_step === step
+            return (
+              <li key={step} style={{ fontWeight: active ? 700 : 400 }}>
+                {step} <small>[{stepState}]</small>
+              </li>
+            )
+          })}
         </ol>
       </aside>
 
@@ -140,6 +156,7 @@ export function App() {
         <section className="healthStrip">
           <strong>Status:</strong>
           <span>{job ? `${job.status} (${progressPct}%)` : 'no job'}</span>
+          <span>Step: {job?.current_step || 'n/a'}</span>
           <span>Draft: {job?.draft_state || 'n/a'}</span>
           <span>{statusMsg}</span>
         </section>

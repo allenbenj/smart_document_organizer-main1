@@ -89,3 +89,125 @@ def test_workflow_proposals_results_pagination_contract(client, tmp_path):
     assert "confidence" in item_payload
     assert "draft_state" in item_payload
     assert body["result"]["pagination"]["count"] == 2
+
+
+def test_workflow_index_extract_and_summarize_persist_resume_state(client, tmp_path):
+    db = _with_test_db(client, tmp_path)
+    with db.get_connection() as conn:
+        conn.execute("DELETE FROM workflow_jobs")
+        conn.execute("DELETE FROM workflow_idempotency_keys")
+        conn.commit()
+
+    fid = db.upsert_indexed_file(
+        display_name="sample_receipt.pdf",
+        original_path="/tmp/sample_receipt.pdf",
+        normalized_path="/tmp/sample_receipt.pdf",
+        file_size=200,
+        mtime=2.0,
+        mime_type="application/pdf",
+        mime_source="pytest",
+        sha256=None,
+        ext=".pdf",
+        status="ready",
+    )
+    db.organization_add_proposal(
+        {
+            "run_id": None,
+            "file_id": fid,
+            "current_path": "/tmp/sample_receipt.pdf",
+            "proposed_folder": "Finance/Billing",
+            "proposed_filename": "sample_receipt.pdf",
+            "confidence": 0.88,
+            "rationale": "Heuristic classification",
+            "alternatives": ["Inbox/Review"],
+            "provider": "xai",
+            "model": "grok-test",
+            "status": "proposed",
+            "metadata": {"decision_source": "heuristic"},
+        }
+    )
+
+    job_id = client.post("/api/workflow/jobs", json={"workflow": "memory_first_v2"}).json()["job"]["job_id"]
+
+    ex1 = client.post(
+        f"/api/workflow/jobs/{job_id}/steps/index_extract/execute",
+        json={"payload": {"mode": "watched", "max_files": 50}},
+    )
+    assert ex1.status_code == 200
+    assert ex1.json()["success"] is True
+
+    ex2 = client.post(
+        f"/api/workflow/jobs/{job_id}/steps/summarize/execute",
+        json={"payload": {"limit": 100}},
+    )
+    assert ex2.status_code == 200
+    assert ex2.json()["success"] is True
+
+    status = client.get(f"/api/workflow/jobs/{job_id}/status")
+    body = status.json()["job"]
+    assert "index_extract" in body["metadata"].get("completed_steps", [])
+    assert "summarize" in body["metadata"].get("completed_steps", [])
+    assert body["metadata"].get("last_result_by_step", {}).get("summarize") is not None
+    assert body.get("current_step") == "summarize"
+
+    rs = client.get(f"/api/workflow/jobs/{job_id}/results?step=summarize")
+    assert rs.status_code == 200
+    assert rs.json()["result"]["pagination"]["count"] == 1
+
+
+def test_workflow_draft_state_uses_feedback_history(client, tmp_path):
+    db = _with_test_db(client, tmp_path)
+    with db.get_connection() as conn:
+        conn.execute("DELETE FROM organization_feedback")
+        conn.execute("DELETE FROM organization_actions")
+        conn.execute("DELETE FROM organization_proposals")
+        conn.execute("DELETE FROM files_index")
+        conn.execute("DELETE FROM workflow_jobs")
+        conn.commit()
+
+    fid = db.upsert_indexed_file(
+        display_name="contract_1.pdf",
+        original_path="/tmp/contract_1.pdf",
+        normalized_path="/tmp/contract_1.pdf",
+        file_size=100,
+        mtime=1.0,
+        mime_type="application/pdf",
+        mime_source="pytest",
+        sha256=None,
+        ext=".pdf",
+        status="ready",
+    )
+
+    pid = db.organization_add_proposal(
+        {
+            "run_id": None,
+            "file_id": fid,
+            "current_path": "/tmp/contract_1.pdf",
+            "proposed_folder": "Legal/Contracts",
+            "proposed_filename": "contract_1.pdf",
+            "confidence": 0.7,
+            "rationale": "Initial proposal",
+            "alternatives": ["Inbox/Review"],
+            "provider": "xai",
+            "model": "grok-test",
+            "status": "approved",
+            "metadata": {"decision_source": "heuristic"},
+        }
+    )
+
+    db.organization_add_feedback(
+        {
+            "proposal_id": pid,
+            "file_id": fid,
+            "action": "edit",
+            "original": {"proposed_folder": "Legal/Contracts"},
+            "final": {"proposed_folder": "Legal/Litigation"},
+            "note": "manual correction",
+        }
+    )
+
+    job_id = client.post("/api/workflow/jobs", json={"workflow": "memory_first_v2"}).json()["job"]["job_id"]
+    r = client.get(f"/api/workflow/jobs/{job_id}/results?step=proposals&limit=10&offset=0")
+    assert r.status_code == 200
+    payload = r.json()["result"]["items"][0]["payload"]
+    assert payload["draft_state"] == "human_edited"
