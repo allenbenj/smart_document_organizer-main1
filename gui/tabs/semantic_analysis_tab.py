@@ -174,6 +174,10 @@ class SemanticAnalysisTab(QWidget):
         deep_analysis = self.deep_analysis.isChecked()
 
         try:
+            if self.worker is not None and self.worker.isRunning():
+                self.status.warn("Analysis already running. Please wait for completion.")
+                return
+
             self.results_text.clear()
             self.results_text.append(f"Starting {analysis_type.lower()}...")
             self.job_status.set_status("running", f"{analysis_type} in progress")

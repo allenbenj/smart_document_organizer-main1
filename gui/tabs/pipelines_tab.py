@@ -235,6 +235,10 @@ class PipelinesTab(QWidget):
                 opts = s.get("options", {})
                 opts.update({"model": self.ov_emb_model.currentText()})
                 s["options"] = opts
+        if getattr(self, "_worker", None) is not None and self._worker.isRunning():
+            self.status.warn("Pipeline already running. Please wait for completion.")
+            return
+
         modified = dict(preset)
         modified["steps"] = steps
         self.results_text.setPlainText("Running pipeline...")

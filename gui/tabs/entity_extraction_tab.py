@@ -219,6 +219,10 @@ class EntityExtractionTab(QWidget):
             if selected != "All":
                 entity_types = [selected]
 
+        if self.worker is not None and self.worker.isRunning():
+            self.status.warn("Extraction already running. Please wait for completion.")
+            return
+
         # Show progress
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate progress

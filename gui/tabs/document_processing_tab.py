@@ -366,6 +366,10 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
             "generate_summary": self.generate_summary_checkbox.isChecked(),
         }
 
+        if self.worker is not None and self.worker.isRunning():
+            self.status.warn("Processing already running. Please wait for completion.")
+            return
+
         # Show progress
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, 0)  # Indeterminate progress
