@@ -1,9 +1,14 @@
 # CONTRACTS V2 — JobStatus + ResultSchema
 **Date:** 2026-02-14
-**Status:** Draft kickoff contract for additive API
+**Status:** Phase C baseline contract (implemented surface + forward-compatible fields)
 
 ## 1) Goals
 Define stable v2 contracts for workflow execution and resume-safe polling.
+
+**Implementation note (Phase C):**
+- Core workflow routes are implemented.
+- Proposal bulk action + proposal ontology patch routes are implemented.
+- Some fields in examples are forward-compatible placeholders; callers should rely on currently populated fields in live responses/tests.
 
 ## 2) JobStatus Contract
 ```json
@@ -93,10 +98,13 @@ Define stable v2 contracts for workflow execution and resume-safe polling.
 ```
 
 ## 4) API Additions (Additive, Non-Breaking)
+Implemented in Phase C:
 - `POST /api/workflow/jobs` — create workflow job.
 - `GET /api/workflow/jobs/{job_id}/status` — poll status.
 - `POST /api/workflow/jobs/{job_id}/steps/{step_name}/execute` — execute/advance step.
 - `GET /api/workflow/jobs/{job_id}/results` — paginated step/job results.
+- `POST /api/workflow/jobs/{job_id}/proposals/bulk` — bulk approve/reject proposals.
+- `PATCH /api/workflow/jobs/{job_id}/proposals/{proposal_id}/ontology` — patch proposal ontology-facing fields.
 
 ## 5) Idempotency Requirements
 Mutation endpoints include:

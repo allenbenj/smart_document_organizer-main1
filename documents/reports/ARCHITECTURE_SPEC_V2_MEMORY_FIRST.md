@@ -1,6 +1,6 @@
 # ARCHITECTURE SPEC V2 — Memory-First Web Workflow
 **Date:** 2026-02-14
-**Status:** Phase C quality pass complete (v2 rebuild in progress)
+**Status:** Phase C documentation aligned to implemented v2 surface (v2 rebuild in progress)
 **Primary UI:** React + TypeScript web app (`frontend/`)
 **Backend:** Existing FastAPI service (non-breaking extension)
 
@@ -42,14 +42,21 @@ Conflict strategy:
 - Per-entity `version` and `etag` in payloads.
 - Reject stale write with conflict object + server snapshot.
 
-## 5) Bulk Ops + Granular Ontology Edits
-### Bulk operations
-- Approve/reject/edit multiple proposals in one action.
-- Batch payload includes `idempotency_key` and operation fingerprint.
+## 5) Bulk Ops + Ontology Patch (Implemented in Phase C)
+### Bulk operations (implemented)
+- Approve/reject multiple proposals in one action via:
+  - `POST /api/workflow/jobs/{job_id}/proposals/bulk`
+- Current bulk action enum: `approve | reject`.
 
-### Granular ontology edits
-- Node-level/class-level/property-level updates.
-- Inline patch model (`add/remove/replace`) and optional semantic validation.
+### Ontology patch in proposal review (implemented)
+- Inline patch of proposal-facing ontology fields via:
+  - `PATCH /api/workflow/jobs/{job_id}/proposals/{proposal_id}/ontology`
+- Current patchable fields: `proposed_folder`, `proposed_filename`, `confidence`, `rationale`, `note`.
+- Current behavior auto-approves the proposal when patch succeeds.
+
+### Not in Phase C scope
+- Node/class/property graph mutation APIs.
+- JSON Patch (`add/remove/replace`) semantics across arbitrary ontology objects.
 
 ## 6) Undo Stack and Audit
 - Session-level undo stack for reversible actions (client + server acknowledged).
@@ -66,16 +73,15 @@ Conflict strategy:
   - last processed entity offsets
 - Resume on refresh/session restart via `GET /api/workflow/jobs/{job_id}/status`.
 
-## 8) Webhook Callback Support
+## 8) Webhook Callback Support (Implemented)
 - Optional callback URL per job.
-- Delivery events:
-  - `step.started`
+- Currently emitted events from workflow routes:
+  - `job.created`
   - `step.completed`
   - `step.failed`
-  - `job.completed`
-  - `job.failed`
-- Signed callback payload (`X-Workflow-Signature` HMAC).
-- Retry policy: exponential backoff + dead-letter record after max attempts.
+- Signed callback payload (`X-Workflow-Signature` HMAC) when `WORKFLOW_WEBHOOK_SECRET` is configured.
+- Retry policy: retries for transport failures, `429`, and `5xx`; no retry for other `4xx`.
+- Backoff is linear (`retry_backoff_seconds * attempt_index`), with DLQ JSONL write on terminal failure.
 
 ## 9) Pagination Strategy
 List-bearing endpoints use cursor-capable pagination with offset fallback:
@@ -106,10 +112,13 @@ Mutation endpoints accept `idempotency_key`:
 - No websocket/SSE requirement in kickoff (polling-friendly contracts).
 
 ## 13) Phase C Quality Pass (Current)
-Completed smoke coverage now validates the v2 workflow surface expected by the web UI:
-- Frontend-facing workflow contract path (`create job` -> `status` -> `execute proposals` -> `results`).
-- Organization Console static serving and proxy failure envelopes (GET + POST).
-- PySide migration safety checks for guarded fallback tabs and legacy-fallback doc guarantees.
+Current tests validate the implemented v2 workflow surface used by the web UI:
+- workflow route flow (`create job` -> `status` -> `execute` -> `results`)
+- bulk proposal action endpoint contract
+- proposal ontology patch endpoint contract
+- webhook retries/signing/DLQ behavior
+- Organization Console static serving and proxy failure envelopes (GET + POST)
+- PySide migration safety checks for guarded fallback tabs and legacy-fallback doc guarantees
 
-This keeps web-first v2 delivery confidence high while PySide remains in maintenance-mode fallback.
+This keeps web-first v2 delivery confidence grounded in current behavior while PySide remains in maintenance-mode fallback.
 

@@ -1,6 +1,6 @@
 # Architecture Tracking Board
 
-**Last Updated:** 2026-02-09  
+**Last Updated:** 2026-02-14  
 **Source Inputs:** `ARCHITECTURE_REVIEW.md`, `ARCHITECTURAL_RECOMMENDATIONS_AND_PLAN.md`
 
 ## Status Legend
@@ -134,7 +134,20 @@ If you want, I can next do a strict sweep of all *.py to enforce one consistent 
 - Startup and shutdown service lifecycle is deterministic
 
 ## v2 Web Rebuild Acceptance Checklist (Current)
-- [x] Frontend workflow route smoke coverage validates create/status/execute/results flow.
+- [x] Core workflow route smoke coverage validates create/status/execute/results flow.
+- [x] Proposal review mutations are implemented and covered by tests:
+  - bulk approve/reject: `POST /api/workflow/jobs/{job_id}/proposals/bulk`
+  - inline ontology patch: `PATCH /api/workflow/jobs/{job_id}/proposals/{proposal_id}/ontology`
+- [x] Webhook hardening behavior is implemented and documented (signature, retry policy, DLQ, replay helpers).
 - [x] Organization Console static asset serving and proxy failure envelopes covered by smoke tests.
 - [x] PySide migration safety checks exist for guarded imports and legacy fallback policy in docs.
-- [x] Architecture spec and launch guide reflect current Phase C status.
+- [x] Launch guide lists currently implemented v2 endpoints and points to webhook behavior doc.
+
+## What remains (Phase C closeout)
+No known code blockers for the documented Phase C scope.
+
+Small closeout tasks still pending:
+1. Keep contracts/spec wording aligned with shipped behavior (avoid aspirational wording in webhook/proposal-edit sections).
+2. Keep acceptance checklist tied to concrete tests so “done” remains evidence-backed as routes evolve.
+3. If Phase D expands mutation semantics (true multi-edit bulk patching, richer ontology operations), document those as new scope instead of retrofitting Phase C claims.
+
