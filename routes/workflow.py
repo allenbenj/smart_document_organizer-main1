@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Body, Depends, Header, Query
 
 from app.contracts.workflow import (
     CreateJobRequest,
@@ -65,15 +65,9 @@ async def create_workflow_job(
         job.webhook.url = payload.webhook_url
 
     save_job(db, job)
-    deliver_workflow_callback(
-        db,
-        job=job,
-        event_type="job.created",
-        payload={"metadata": payload.metadata},
-    )
+    deliver_workflow_callback(db, job=job, event_type="job.created", payload={"metadata": payload.metadata})
     body = JobStatusResponse(success=True, job=job)
-    body_dict = body.model_dump(mode="json")
-    write_idempotent_response(db, scope, key, body_dict)
+    write_idempotent_response(db, scope, key, body.model_dump(mode="json"))
     return body
 
 
@@ -178,12 +172,7 @@ async def execute_workflow_step(
         save_job(db, job)
         response = ResultResponse(success=False, job_id=job_id, step=step_name, result=result, errors=[str(e)])
         write_idempotent_response(db, scope, key, response.model_dump(mode="json"))
-        deliver_workflow_callback(
-            db,
-            job=job,
-            event_type="step.failed",
-            payload={"step": step_name, "errors": [str(e)]},
-        )
+        deliver_workflow_callback(db, job=job, event_type="step.failed", payload={"step": step_name, "errors": [str(e)]})
         return response
 
     update_step_status(job, step_name, "complete")
@@ -209,25 +198,27 @@ async def workflow_bulk_proposal_action(
     db=Depends(get_database_manager_strict_dep),
 ) -> WorkflowMutationResponse:
     svc = OrganizationService(db)
-    items = []
-    errors = []
     applied = 0
     failed = 0
+    errors: list[str] = []
+    items: list[Dict[str, Any]] = []
 
-    for proposal_id in payload.proposal_ids:
+    for raw_id in payload.proposal_ids:
+        pid = int(raw_id)
         if payload.action == "approve":
-            out = svc.approve_proposal(int(proposal_id))
+            out = svc.approve_proposal(pid)
         else:
-            out = svc.reject_proposal(int(proposal_id), note=payload.note)
+            out = svc.reject_proposal(pid, note=payload.note)
+
         if out.get("success"):
             applied += 1
         else:
             failed += 1
-            errors.append(f"proposal_id={proposal_id}:{out.get('error', 'unknown_error')}")
+            errors.append(f"proposal_id={pid}:{out.get('error') or 'operation_failed'}")
         items.append(out)
 
     return WorkflowMutationResponse(
-        success=(failed == 0),
+        success=failed == 0,
         job_id=job_id,
         step="proposals",
         applied=applied,
@@ -237,33 +228,31 @@ async def workflow_bulk_proposal_action(
     )
 
 
-@router.patch("/workflow/jobs/{job_id}/proposals/{proposal_id}/ontology", response_model=WorkflowMutationResponse)
-async def workflow_edit_proposal_ontology(
+@router.patch("/workflow/jobs/{job_id}/proposals/{proposal_id}/ontology")
+async def workflow_patch_proposal_ontology(
     job_id: str,
     proposal_id: int,
-    payload: WorkflowOntologyEditRequest,
+    payload: Dict[str, Any] = Body(...),
     db=Depends(get_database_manager_strict_dep),
-) -> WorkflowMutationResponse:
+) -> Dict[str, Any]:
+    _ = job_id
     svc = OrganizationService(db)
     out = svc.edit_proposal_fields(
         proposal_id,
-        proposed_folder=payload.proposed_folder,
-        proposed_filename=payload.proposed_filename,
-        confidence=payload.confidence,
-        rationale=payload.rationale,
-        note=payload.note,
+        proposed_folder=payload.get("proposed_folder"),
+        proposed_filename=payload.get("proposed_filename"),
+        confidence=payload.get("confidence"),
+        rationale=payload.get("rationale"),
+        note=str(payload.get("note") or "ontology_patch"),
         auto_approve=True,
     )
-    success = bool(out.get("success"))
-    return WorkflowMutationResponse(
-        success=success,
-        job_id=job_id,
-        step="proposals",
-        applied=1 if success else 0,
-        failed=0 if success else 1,
-        items=[out],
-        errors=[] if success else [str(out.get("error") or "update_failed")],
-    )
+    return {
+        "success": bool(out.get("success")),
+        "applied": 1 if out.get("success") else 0,
+        "proposal_id": proposal_id,
+        "item": out.get("item"),
+        "error": out.get("error"),
+    }
 
 
 @router.get("/workflow/jobs/{job_id}/results", response_model=ResultResponse)
@@ -356,69 +345,3 @@ async def get_workflow_results(
         pagination=PaginationMeta(count=0, has_more=False, next_cursor=None),
     )
     return ResultResponse(success=True, job_id=job_id, step=step, result=result, errors=[])
-
-
-@router.post("/workflow/jobs/{job_id}/proposals/bulk")
-async def workflow_bulk_proposal_action(
-    job_id: str,
-    payload: Dict[str, Any] = Body(...),
-    db=Depends(get_database_manager_strict_dep),
-) -> Dict[str, Any]:
-    _ = job_id  # reserved for future job-level auditing
-    ids = payload.get("proposal_ids") or []
-    action = str(payload.get("action") or "").strip().lower()
-
-    svc = OrganizationService(db)
-    applied = 0
-    failed = 0
-    errors: list[Dict[str, Any]] = []
-
-    for raw_id in ids:
-        try:
-            pid = int(raw_id)
-        except Exception:
-            failed += 1
-            errors.append({"proposal_id": raw_id, "error": "invalid_proposal_id"})
-            continue
-
-        if action == "approve":
-            out = svc.approve_proposal(pid)
-        elif action == "reject":
-            out = svc.reject_proposal(pid, note=str(payload.get("note") or "bulk_action"))
-        else:
-            return {"success": False, "applied": 0, "failed": len(ids), "errors": [{"error": "invalid_action"}]}
-
-        if out.get("success"):
-            applied += 1
-        else:
-            failed += 1
-            errors.append({"proposal_id": pid, "error": out.get("error") or "operation_failed"})
-
-    return {"success": failed == 0, "applied": applied, "failed": failed, "errors": errors}
-
-
-@router.patch("/workflow/jobs/{job_id}/proposals/{proposal_id}/ontology")
-async def workflow_patch_proposal_ontology(
-    job_id: str,
-    proposal_id: int,
-    payload: Dict[str, Any] = Body(...),
-    db=Depends(get_database_manager_strict_dep),
-) -> Dict[str, Any]:
-    _ = job_id  # reserved for future job-level auditing
-    svc = OrganizationService(db)
-    out = svc.edit_proposal_fields(
-        proposal_id,
-        proposed_folder=payload.get("proposed_folder"),
-        proposed_filename=payload.get("proposed_filename"),
-        confidence=payload.get("confidence"),
-        rationale=payload.get("rationale"),
-        note=str(payload.get("note") or "ontology_patch"),
-        auto_approve=True,
-    )
-    return {
-        "success": bool(out.get("success")),
-        "applied": 1 if out.get("success") else 0,
-        "proposal_id": proposal_id,
-        "item": out.get("item"),
-        "error": out.get("error"),
-    }
