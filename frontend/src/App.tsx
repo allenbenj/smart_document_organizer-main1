@@ -67,6 +67,7 @@ export function App() {
 
   const refreshJob = async (jobId: string) => {
     const data = await api<{ success: boolean; job: JobStatus }>(`/api/workflow/jobs/${jobId}/status`)
+    if (!data.success || !data.job) throw new Error('Invalid API response')
     setJob(data.job)
     localStorage.setItem('workflowJobId', data.job.job_id)
   }
@@ -86,6 +87,7 @@ export function App() {
           headers: { 'Idempotency-Key': key },
           body: JSON.stringify({ workflow: 'memory_first_v2' }),
         })
+        if (!data.success || !data.job) throw new Error('Invalid API response')
         setJob(data.job)
         localStorage.setItem('workflowJobId', data.job.job_id)
         setStatusMsg(`Created job ${data.job.job_id}`)
@@ -124,7 +126,9 @@ export function App() {
     setError(null)
     try {
       const data = await api<any>(`/api/workflow/jobs/${job.job_id}/results?step=proposals&limit=10&offset=${nextOffset}`)
-      const rows: ProposalRow[] = (data?.result?.items || []).map((x: any) => x.payload || {})
+      const items = data?.result?.items
+      if (!Array.isArray(items)) throw new Error('Invalid proposals data')
+      const rows: ProposalRow[] = items.map((x: any) => x.payload || {})
       setProposals(rows)
       setOffset(nextOffset)
       setSelectedIds([])
@@ -199,9 +203,11 @@ export function App() {
   useEffect(() => {
     const existing = localStorage.getItem('workflowJobId')
     if (existing) {
+      setLoading(true)
       refreshJob(existing)
         .then(() => setStatusMsg(`Resumed persisted job ${existing}`))
-        .catch(() => setError('Failed to resume previous workflow job'))
+        .catch((e: any) => setError(`Failed to resume previous workflow job: ${e.message}`))
+        .finally(() => setLoading(false))
     }
   }, [])
 
