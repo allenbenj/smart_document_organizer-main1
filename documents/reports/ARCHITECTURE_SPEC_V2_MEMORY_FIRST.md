@@ -1,6 +1,6 @@
 # ARCHITECTURE SPEC V2 — Memory-First Web Workflow
 **Date:** 2026-02-14
-**Status:** Kickoff (v2 Rebuild)
+**Status:** Phase C quality pass complete (v2 rebuild in progress)
 **Primary UI:** React + TypeScript web app (`frontend/`)
 **Backend:** Existing FastAPI service (non-breaking extension)
 
@@ -104,4 +104,12 @@ Mutation endpoints accept `idempotency_key`:
 - No removal/refactor of legacy PySide tabs.
 - No breaking change to existing `/api/taskmaster/*` and `/api/organization/*` behavior.
 - No websocket/SSE requirement in kickoff (polling-friendly contracts).
+
+## 13) Phase C Quality Pass (Current)
+Completed smoke coverage now validates the v2 workflow surface expected by the web UI:
+- Frontend-facing workflow contract path (`create job` -> `status` -> `execute proposals` -> `results`).
+- Organization Console static serving and proxy failure envelopes (GET + POST).
+- PySide migration safety checks for guarded fallback tabs and legacy-fallback doc guarantees.
+
+This keeps web-first v2 delivery confidence high while PySide remains in maintenance-mode fallback.
 

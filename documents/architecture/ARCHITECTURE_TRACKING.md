@@ -132,3 +132,9 @@ If you want, I can next do a strict sweep of all *.py to enforce one consistent 
 - DI container is authoritative dependency source
 - Data access routed through repositories
 - Startup and shutdown service lifecycle is deterministic
+
+## v2 Web Rebuild Acceptance Checklist (Current)
+- [x] Frontend workflow route smoke coverage validates create/status/execute/results flow.
+- [x] Organization Console static asset serving and proxy failure envelopes covered by smoke tests.
+- [x] PySide migration safety checks exist for guarded imports and legacy fallback policy in docs.
+- [x] Architecture spec and launch guide reflect current Phase C status.
