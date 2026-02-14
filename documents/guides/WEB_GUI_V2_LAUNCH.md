@@ -20,6 +20,8 @@ npm install
 npm run dev
 ```
 
+Build prerequisite: do not run a production-only install for the frontend build step (for example `--omit=dev`) unless your package manifest includes build tools in runtime deps. This project now includes the TypeScript/Vite build toolchain in `dependencies` so `npm run build` works in restricted install environments as well.
+
 Vite default: `http://127.0.0.1:5173`
 
 ## Optional build check
