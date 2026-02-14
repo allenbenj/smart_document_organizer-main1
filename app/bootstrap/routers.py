@@ -28,6 +28,7 @@ def include_default_routers(
         ("ontology_alias", "routes.ontology", "router", "/api", True),
         ("experts", "routes.experts", "router", "/api/experts", True),
         ("organization", "routes.organization", "router", "/api", True),
+        ("workflow", "routes.workflow", "router", "/api", True),
     ]
 
     for name, module_name, attr_name, prefix, needs_auth in router_specs:

@@ -1,0 +1,13 @@
+:root { color-scheme: dark; font-family: Inter, Segoe UI, Arial, sans-serif; }
+body { margin: 0; background: #0d1117; color: #e6edf3; }
+.layout { display: grid; grid-template-columns: 260px 1fr 320px; min-height: 100vh; }
+.leftRail, .consolePanel { border-right: 1px solid #30363d; padding: 16px; background: #111827; }
+.consolePanel { border-left: 1px solid #30363d; border-right: 0; }
+.sub { color: #9ca3af; margin-top: -6px; }
+.leftRail ol { padding-left: 18px; }
+.leftRail li { margin: 8px 0; }
+.mainPanel { padding: 16px; }
+.healthStrip { display: flex; gap: 12px; align-items: center; padding: 10px; border: 1px solid #30363d; border-radius: 8px; margin-bottom: 16px; background: #161b22; }
+.stepCards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.card { border: 1px solid #30363d; border-radius: 8px; padding: 12px; background: #161b22; }
+pre { background: #0b1220; border: 1px solid #30363d; border-radius: 8px; padding: 10px; white-space: pre-wrap; }
