@@ -43,7 +43,7 @@ if __package__:
     from .tabs.vector_search_tab import VectorSearchTab
     from .violations_tab import ViolationsTab
     from .services import api_client
-    from .ui import RunConsolePanel, SystemHealthStrip, log_run_event
+    from .ui import RunConsolePanel, SystemHealthStrip
 else:
     # Running as script: `python gui/gui_dashboard.py`
     _here = os.path.dirname(__file__)
@@ -65,7 +65,7 @@ else:
     from gui.tabs.vector_search_tab import VectorSearchTab
     from gui.violations_tab import ViolationsTab
     from gui.services import api_client
-    from gui.ui import RunConsolePanel, SystemHealthStrip, log_run_event
+    from gui.ui import RunConsolePanel, SystemHealthStrip
 
 logger = logging.getLogger(__name__)
 

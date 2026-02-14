@@ -42,7 +42,7 @@ except ImportError:
 
 from .status_presenter import TabStatusPresenter  # noqa: E402
 from ..ui import JobStatusWidget, ResultsSummaryBox  # noqa: E402
-from .workers import LegalReasoningWorker, LegalReasoningDetailsDialog  # noqa: E402
+from .workers import LegalReasoningWorker  # noqa: E402
 
 
 class LegalReasoningTab(QWidget):

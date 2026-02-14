@@ -106,10 +106,13 @@ class SemanticAnalysisTab(QWidget):
         actions_layout = QHBoxLayout()
 
         self.analyze_btn = QPushButton("Analyze Document")
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setEnabled(False)
         self.clear_btn = QPushButton("Clear Results")
         self.export_btn = QPushButton("Export Results")
 
         actions_layout.addWidget(self.analyze_btn)
+        actions_layout.addWidget(self.cancel_btn)
         actions_layout.addWidget(self.clear_btn)
         actions_layout.addWidget(self.export_btn)
         actions_group.setLayout(actions_layout)
@@ -144,6 +147,7 @@ class SemanticAnalysisTab(QWidget):
 
         # Connect signals
         self.analyze_btn.clicked.connect(self.analyze_document)
+        self.cancel_btn.clicked.connect(self.cancel_analysis)
         self.clear_btn.clicked.connect(self.clear_results)
         self.export_btn.clicked.connect(self.export_results)
 
@@ -182,6 +186,7 @@ class SemanticAnalysisTab(QWidget):
             self.results_text.append(f"Starting {analysis_type.lower()}...")
             self.job_status.set_status("running", f"{analysis_type} in progress")
             self.status.loading(f"Running {analysis_type.lower()}...")
+            self.cancel_btn.setEnabled(True)
 
             # Create worker thread (store on self to avoid premature GC/thread destruction)
             self.worker = SemanticAnalysisWorker(
@@ -198,6 +203,7 @@ class SemanticAnalysisTab(QWidget):
             self.worker.start()
 
         except Exception as e:
+            self.cancel_btn.setEnabled(False)
             self.job_status.set_status("failed", "Failed to start")
             self.results_summary.set_summary(
                 "Failed to start semantic analysis",
@@ -208,6 +214,7 @@ class SemanticAnalysisTab(QWidget):
 
     def clear_results(self):
         """Clear all results and inputs."""
+        self.cancel_btn.setEnabled(False)
         self.results_text.clear()
         self.text_input.clear()
         self.file_path.clear()
@@ -233,9 +240,17 @@ class SemanticAnalysisTab(QWidget):
                     self, "Error", f"Failed to export results: {str(e)}"
                 )
 
+    def cancel_analysis(self):
+        """Cancel the ongoing analysis."""
+        if self.worker and self.worker.isRunning():
+            self.worker.requestInterruption()
+            self.status.warn("Analysis cancelled")
+            self.cancel_btn.setEnabled(False)
+
     def on_analysis_result(self, result):
         """Handle analysis results."""
         self.worker = None
+        self.cancel_btn.setEnabled(False)
         self.results_text.clear()
         self.results_text.append("Analysis Results:")
         self.results_text.append("-" * 50)
@@ -256,6 +271,7 @@ class SemanticAnalysisTab(QWidget):
     def on_analysis_error(self, error_msg):
         """Handle analysis errors."""
         self.worker = None
+        self.cancel_btn.setEnabled(False)
         self.results_text.clear()
         self.results_text.append(f"Error: {error_msg}")
         self.job_status.set_status("failed", "Analysis failed")

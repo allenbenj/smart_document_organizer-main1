@@ -10,7 +10,7 @@ import os
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
-from PySide6.QtWidgets import QDialog, QLabel, QTextEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QLabel, QTextEdit, QVBoxLayout
 
 try:
     import requests
@@ -30,6 +30,8 @@ class UploadFileWorker(QThread):
 
     def run(self):  # noqa: C901
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             mt, _ = mimetypes.guess_type(self.path)
@@ -63,6 +65,8 @@ class UploadFolderWorker(QThread):
 
     def run(self):  # noqa: C901
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             # Collect all files in folder
@@ -107,6 +111,8 @@ class UploadManyFilesWorker(QThread):
 
     def run(self):  # noqa: C901
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             files = []
@@ -148,6 +154,8 @@ class KGImportFromTextWorker(QThread):
 
     def run(self):  # noqa: C901
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             r = requests.post(
@@ -274,6 +282,8 @@ class SemanticAnalysisWorker(QThread):
     def run(self):  # noqa: C901
         """Execute semantic analysis via API (and document processor when needed)."""
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             # Determine text to analyze
@@ -303,6 +313,8 @@ class SemanticAnalysisWorker(QThread):
                 )
             if not content:
                 raise RuntimeError("No content to analyze")
+            if self.isInterruptionRequested():
+                return
             # Call semantic endpoint
             resp = requests.post(
                 f"{api_client.base_url}/api/agents/semantic",
@@ -341,6 +353,8 @@ class EntityExtractionWorker(QThread):
     def run(self):  # noqa: C901
         """Execute entity extraction via API."""
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             # Determine text to extract from
@@ -370,6 +384,8 @@ class EntityExtractionWorker(QThread):
                 )
             if not content:
                 raise RuntimeError("No content to analyze")
+            if self.isInterruptionRequested():
+                return
             # Call entity extraction endpoint
             resp = requests.post(
                 f"{api_client.base_url}/api/agents/entities",
@@ -407,6 +423,8 @@ class LegalReasoningWorker(QThread):
     def run(self):  # noqa: C901
         """Execute legal reasoning via API."""
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             # Determine text to reason about
@@ -436,6 +454,8 @@ class LegalReasoningWorker(QThread):
                 )
             if not content:
                 raise RuntimeError("No content to analyze")
+            if self.isInterruptionRequested():
+                return
             # Call legal reasoning endpoint
             resp = requests.post(
                 f"{api_client.base_url}/api/agents/legal-reasoning",
@@ -472,6 +492,8 @@ class EmbeddingWorker(QThread):
     def run(self):  # noqa: C901
         """Execute embedding generation via API."""
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             # Call embedding endpoint
@@ -504,6 +526,8 @@ class DocumentOrganizationWorker(QThread):
     def run(self):  # noqa: C901
         """Execute document organization via API."""
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             # Determine text to organize
@@ -533,6 +557,8 @@ class DocumentOrganizationWorker(QThread):
                 )
             if not content:
                 raise RuntimeError("No content to organize")
+            if self.isInterruptionRequested():
+                return
             # Call document organization endpoint
             resp = requests.post(
                 f"{api_client.base_url}/api/agents/organize",
@@ -562,6 +588,8 @@ class VectorIndexWorker(QThread):
     def run(self):  # noqa: C901
         """Execute vector indexing via API."""
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             # Determine text to index
@@ -591,6 +619,8 @@ class VectorIndexWorker(QThread):
                 )
             if not content:
                 raise RuntimeError("No content to index")
+            if self.isInterruptionRequested():
+                return
             # Call vector index endpoint
             resp = requests.post(
                 f"{api_client.base_url}/api/vector/index",
@@ -616,7 +646,11 @@ class KGFromFilesWorker(QThread):
 
     def run(self):
         try:
+            if self.isInterruptionRequested():
+                return
             for i, file_path in enumerate(self.files):
+                if self.isInterruptionRequested():
+                    return
                 self.progress_update.emit(i, "processing")
                 # Process file to extract KG
                 # Placeholder for KG extraction logic
@@ -637,6 +671,8 @@ class PipelineRunnerWorker(QThread):
 
     def run(self):  # noqa: C901
         try:
+            if self.isInterruptionRequested():
+                return
             if not requests:
                 raise RuntimeError("requests not available")
             payload = {

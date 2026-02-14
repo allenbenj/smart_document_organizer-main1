@@ -683,4 +683,3 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
             QMessageBox.critical(self, "Export Error", f"Failed to export text: {e}")
 
 # Import workers
-from .workers import DocumentOrganizationWorker, ProcessedDocDetailsDialog  # noqa: E402
