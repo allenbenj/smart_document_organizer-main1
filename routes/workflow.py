@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Query
 
 from app.contracts.workflow import (
     CreateJobRequest,
@@ -228,31 +228,33 @@ async def workflow_bulk_proposal_action(
     )
 
 
-@router.patch("/workflow/jobs/{job_id}/proposals/{proposal_id}/ontology")
+@router.patch("/workflow/jobs/{job_id}/proposals/{proposal_id}/ontology", response_model=WorkflowMutationResponse)
 async def workflow_patch_proposal_ontology(
     job_id: str,
     proposal_id: int,
-    payload: Dict[str, Any] = Body(...),
+    payload: WorkflowOntologyEditRequest,
     db=Depends(get_database_manager_strict_dep),
-) -> Dict[str, Any]:
-    _ = job_id
+) -> WorkflowMutationResponse:
     svc = OrganizationService(db)
     out = svc.edit_proposal_fields(
         proposal_id,
-        proposed_folder=payload.get("proposed_folder"),
-        proposed_filename=payload.get("proposed_filename"),
-        confidence=payload.get("confidence"),
-        rationale=payload.get("rationale"),
-        note=str(payload.get("note") or "ontology_patch"),
+        proposed_folder=payload.proposed_folder,
+        proposed_filename=payload.proposed_filename,
+        confidence=payload.confidence,
+        rationale=payload.rationale,
+        note=payload.note,
         auto_approve=True,
     )
-    return {
-        "success": bool(out.get("success")),
-        "applied": 1 if out.get("success") else 0,
-        "proposal_id": proposal_id,
-        "item": out.get("item"),
-        "error": out.get("error"),
-    }
+    success = bool(out.get("success"))
+    return WorkflowMutationResponse(
+        success=success,
+        job_id=job_id,
+        step="proposals",
+        applied=1 if success else 0,
+        failed=0 if success else 1,
+        items=[out],
+        errors=[] if success else [str(out.get("error") or "operation_failed")],
+    )
 
 
 @router.get("/workflow/jobs/{job_id}/results", response_model=ResultResponse)

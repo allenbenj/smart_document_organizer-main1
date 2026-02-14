@@ -93,3 +93,27 @@ class CreateJobRequest(BaseModel):
     idempotency_key: Optional[str] = None
     webhook_url: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkflowBulkActionRequest(BaseModel):
+    proposal_ids: List[int] = Field(default_factory=list)
+    action: Literal["approve", "reject"]
+    note: Optional[str] = None
+
+
+class WorkflowOntologyEditRequest(BaseModel):
+    proposed_folder: Optional[str] = None
+    proposed_filename: Optional[str] = None
+    confidence: Optional[float] = None
+    rationale: Optional[str] = None
+    note: Optional[str] = None
+
+
+class WorkflowMutationResponse(BaseModel):
+    success: bool = True
+    job_id: str
+    step: StepName = "proposals"
+    applied: int = 0
+    failed: int = 0
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)

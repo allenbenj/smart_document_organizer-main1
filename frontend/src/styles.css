@@ -13,8 +13,9 @@ body { margin: 0; background: #0d1117; color: #e6edf3; }
 .controls { display: flex; gap: 8px; margin-bottom: 12px; }
 button { background: #1f6feb; color: #fff; border: 0; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
+input { background: #0b1220; color: #e6edf3; border: 1px solid #30363d; border-radius: 4px; padding: 4px 6px; width: 100%; }
 .errorBox { border: 1px solid #f85149; color: #ffb4af; background: #2d1113; border-radius: 8px; padding: 10px; margin-bottom: 12px; }
 .resultsTable { width: 100%; border-collapse: collapse; font-size: 13px; }
-.resultsTable th, .resultsTable td { border-bottom: 1px solid #30363d; text-align: left; padding: 6px; }
+.resultsTable th, .resultsTable td { border-bottom: 1px solid #30363d; text-align: left; padding: 6px; vertical-align: top; }
 .pager { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
 pre { background: #0b1220; border: 1px solid #30363d; border-radius: 8px; padding: 10px; white-space: pre-wrap; }

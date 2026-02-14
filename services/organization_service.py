@@ -307,18 +307,44 @@ class OrganizationService:
         return {"success": True, "proposal_id": proposal_id, "status": "rejected"}
 
     def edit_proposal(self, proposal_id: int, *, proposed_folder: str, proposed_filename: str, note: Optional[str] = None) -> Dict[str, Any]:
+        return self.edit_proposal_fields(
+            proposal_id,
+            proposed_folder=proposed_folder,
+            proposed_filename=proposed_filename,
+            confidence=0.99,
+            rationale="User edited and approved",
+            note=note,
+            auto_approve=True,
+        )
+
+    def edit_proposal_fields(
+        self,
+        proposal_id: int,
+        *,
+        proposed_folder: Optional[str] = None,
+        proposed_filename: Optional[str] = None,
+        confidence: Optional[float] = None,
+        rationale: Optional[str] = None,
+        note: Optional[str] = None,
+        auto_approve: bool = True,
+    ) -> Dict[str, Any]:
         p = self.db.organization_get_proposal(proposal_id)
         if not p:
             return {"success": False, "error": "proposal_not_found"}
-        safe_folder, safe_name = self._sanitize_path_parts(proposed_folder, proposed_filename)
+
+        next_folder = proposed_folder if proposed_folder is not None else str(p.get("proposed_folder") or "Inbox/Review")
+        next_filename = proposed_filename if proposed_filename is not None else str(p.get("proposed_filename") or "document")
+        safe_folder, safe_name = self._sanitize_path_parts(next_folder, next_filename)
+
         self.db.organization_update_proposal(
             proposal_id,
-            status="approved",
+            status="approved" if auto_approve else None,
             proposed_folder=safe_folder,
             proposed_filename=safe_name,
-            confidence=0.99,
-            rationale="User edited and approved",
+            confidence=confidence,
+            rationale=rationale,
         )
+
         updated = self.db.organization_get_proposal(proposal_id) or {}
         self.db.organization_add_feedback(
             {
@@ -330,7 +356,12 @@ class OrganizationService:
                 "note": note,
             }
         )
-        return {"success": True, "proposal_id": proposal_id, "status": "approved", "item": updated}
+        return {
+            "success": True,
+            "proposal_id": proposal_id,
+            "status": str(updated.get("status") or ("approved" if auto_approve else "proposed")),
+            "item": updated,
+        }
 
     def apply_approved(self, *, limit: int = 200, dry_run: bool = True) -> Dict[str, Any]:
         items = self.db.organization_list_proposals(status="approved", limit=limit, offset=0)
