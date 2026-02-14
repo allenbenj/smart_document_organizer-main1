@@ -6,7 +6,7 @@ import functools
 import inspect
 import logging
 from enum import Enum
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict
 
 
 class LogCategory(str, Enum):

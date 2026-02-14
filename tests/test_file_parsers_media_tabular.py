@@ -1,5 +1,4 @@
 import zipfile
-from pathlib import Path
 
 from services.file_parsers import CsvXlsxParser, MediaTagsParser
 

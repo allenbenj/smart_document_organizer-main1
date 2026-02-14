@@ -8,7 +8,7 @@ import os
 import tempfile
 from pathlib import Path
 from datetime import datetime
-from typing import List, Optional, Dict, Any, Union
+from typing import List, Optional, Dict, Any
 
 from fastapi import UploadFile, HTTPException
 

@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 
 from config.configuration_manager import create_configuration_manager, ConfigurationManager
 from mem_db.database import get_database_manager, DatabaseManager

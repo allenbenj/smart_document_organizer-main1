@@ -2,7 +2,6 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request  # noqa: E402
 
-from mem_db.database import DatabaseManager  # noqa: E402
 from services.dependencies import (
     get_database_manager_strict_dep,
     get_vector_store_strict_dep,
@@ -16,11 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 # Dependency Injection (strict container-backed)
-from services.dependencies import (
-    get_database_manager_strict_dep,
-    get_vector_store_strict_dep,
-    get_knowledge_manager_strict_dep,
-)
 
 async def get_search_service(request: Request) -> SearchService:
     """Strict DI-backed dependency to get SearchService instance."""

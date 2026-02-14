@@ -281,7 +281,6 @@ class IracAnalyzerAgent(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
             )
 
             return {
-                "success": True,
                 "analysis": irac_analysis.to_dict(),
                 "collective_intelligence": {
                     "similar_analyses_found": len(similar_analyses),

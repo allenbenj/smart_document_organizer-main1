@@ -1,4 +1,3 @@
-import sqlite3
 
 from mem_db.database import DatabaseManager
 

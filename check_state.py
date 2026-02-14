@@ -1,5 +1,4 @@
 import requests
-import json
 import sys
 
 # Set UTF-8 output

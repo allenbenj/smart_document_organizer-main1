@@ -2,11 +2,20 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+from utils.models import DocumentCreate
 
 
 def test_sqlite_contention_stress_api_and_scheduler_writes(temp_db_manager):
     """Stress concurrent writes from API-like organization writes and scheduler-like writes."""
     db = temp_db_manager
+
+    dummy_file_id = db.file_index_repo.upsert_indexed_file(
+        display_name="stress-dummy.txt",
+        original_path="/tmp/stress-dummy.txt",
+        normalized_path="/tmp/stress-dummy.txt",
+        status="ready"
+    )
+
     loops = 80
     workers = 4
     gate = Barrier(workers)
@@ -18,7 +27,7 @@ def test_sqlite_contention_stress_api_and_scheduler_writes(temp_db_manager):
             pid = db.organization_add_proposal(
                 {
                     "run_id": None,
-                    "file_id": None,
+                    "file_id": dummy_file_id,
                     "current_path": f"/tmp/in/{idx}-{i}.txt",
                     "proposed_folder": "Inbox",
                     "proposed_filename": f"doc-{idx}-{i}.txt",

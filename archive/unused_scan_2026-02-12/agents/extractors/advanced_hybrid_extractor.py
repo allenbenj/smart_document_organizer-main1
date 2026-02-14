@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple  # noqa: E402
 from config.core.service_container import ServiceContainer  # noqa: E402
 
 # Production imports
-from agents.base.base_agent import AgentStatus, BaseAgent  # noqa: E402
+from agents.base.base_agent import BaseAgent  # noqa: E402
 from agents.core.models import AgentResult  # noqa: E402
 
 # Optional ML dependencies with fallbacks

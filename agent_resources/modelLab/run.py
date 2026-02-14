@@ -87,7 +87,7 @@ def main():
 
         output = olive.workflows.run(oliveJson)
         if output is None or not output.has_output_model():
-            error = f"Model file is not generated"
+            error = "Model file is not generated"
             logger.error(error)
             raise Exception(error)
 

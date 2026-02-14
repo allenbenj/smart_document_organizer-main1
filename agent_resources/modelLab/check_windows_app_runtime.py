@@ -69,12 +69,12 @@ def is_windows_app_runtime_installed():
                             print(f"[SUCCESS] Found valid WindowsAppRuntime version: {version}")
                             return True
 
-            print(f"[ERROR] No valid WindowsAppRuntime version found.")
+            print("[ERROR] No valid WindowsAppRuntime version found.")
             return False
     except Exception as e:
         print(f"Error checking for WindowsAppRuntime: {e}")
 
-    print(f"[ERROR] WindowsAppRuntime not found")
+    print("[ERROR] WindowsAppRuntime not found")
     return False
 
 
@@ -138,7 +138,7 @@ def install_windows_app_runtime(installer_path):
                 continue
         
         # If all silent methods fail, show the original error
-        print(f"All installation methods failed. Original error:")
+        print("All installation methods failed. Original error:")
         print(f"Installation failed with return code {e.returncode}")
         if e.stderr:
             print(f"Error output: {e.stderr}")

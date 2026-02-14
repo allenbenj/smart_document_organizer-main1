@@ -99,7 +99,10 @@ def deliver_workflow_callback(
         webhook_meta["last_delivery"] = deliveries[-1]
         job.metadata["webhook"] = webhook_meta
         save_job(db, job)
-    except Exception:
+    except Exception as e:
+        # Log the error but don't fail the workflow
+        import logging
+        logging.getLogger(__name__).warning(f"Failed to deliver workflow callback: {e}")
         return
 
 
@@ -107,7 +110,10 @@ def execute_index_extract(db: Any, payload: Dict[str, Any]) -> ResultSchema:
     indexer = FileIndexService(db)
 
     mode = str(payload.get("mode") or "auto").strip().lower()
-    max_files = int(payload.get("max_files", 5000))
+    try:
+        max_files = int(payload.get("max_files", 5000))
+    except (ValueError, TypeError):
+        max_files = 5000
 
     if mode == "watched":
         out = indexer.run_watched_index(max_files_per_watch=max_files)
@@ -148,7 +154,10 @@ def execute_index_extract(db: Any, payload: Dict[str, Any]) -> ResultSchema:
 
 
 def execute_summarize(db: Any, payload: Dict[str, Any]) -> ResultSchema:
-    limit = int(payload.get("limit", 500))
+    try:
+        limit = int(payload.get("limit", 500))
+    except (ValueError, TypeError):
+        limit = 500
     files, _total = db.list_indexed_files(limit=limit, offset=0, status="ready")
     svc = OrganizationService(db)
     proposals = svc.list_proposals(limit=min(1000, max(50, limit)), offset=0).get("items", [])

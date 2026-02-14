@@ -898,7 +898,6 @@ class FileIndexService:
             snippet_meta = self._preview_snippet(parser_meta, norm_meta)
             rule_meta = self._rule_tags(p, parser_meta, norm_meta)
             parser_meta = {**parser_meta, **rule_meta}
-            class_meta = self._evidence_class_flags(p, ext, mime, parser_meta)
             self.db.upsert_indexed_file(
                 display_name=row.get("display_name") or p.name,
                 original_path=row.get("original_path") or str(p),

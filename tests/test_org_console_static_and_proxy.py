@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import threading
-import urllib.error
 from contextlib import contextmanager
 from http.server import ThreadingHTTPServer
 

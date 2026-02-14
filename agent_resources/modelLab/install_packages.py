@@ -1,5 +1,4 @@
 from enum import Enum
-import sys
 from pathlib import Path
 import argparse
 from typing import Any

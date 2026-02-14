@@ -28,7 +28,6 @@ class ONNXTaskModel(ABC):
         '''
         Run inference on a sample input and show the results.
         '''
-        import io
         import onnxruntime as ort
         import numpy as np
 

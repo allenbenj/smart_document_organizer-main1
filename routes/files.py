@@ -643,7 +643,6 @@ async def file_relationships(
     items = db.list_all_indexed_files()
     target_path = str(rec.get("normalized_path") or "")
     parent = target_path.rsplit("/", 1)[0] if "/" in target_path else ""
-    name = str(rec.get("display_name") or "")
 
     siblings = []
     parent_children = []

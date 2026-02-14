@@ -124,20 +124,31 @@ async def execute_workflow_step(
             job.metadata["summary_artifact"] = result.items[0].payload if result.items else {}
         elif step_name == "proposals":
             svc = OrganizationService(db)
+            try:
+                limit_val = int(payload.payload.get("limit", 50))
+            except (ValueError, TypeError):
+                limit_val = 50
             generate_out = svc.generate_proposals(
                 run_id=payload.payload.get("run_id"),
-                limit=int(payload.payload.get("limit", 50)),
+                limit=limit_val,
                 provider=payload.payload.get("provider"),
                 model=payload.payload.get("model"),
                 root_prefix=payload.payload.get("root_prefix"),
             )
-            created = int(generate_out.get("created", 0))
+            try:
+                created = int(generate_out.get("created", 0))
+            except (ValueError, TypeError):
+                created = 0
             result.summary = f"Generated {created} proposal(s)"
             result.pagination = PaginationMeta(count=created, has_more=False, next_cursor=None)
         elif step_name == "apply":
             svc = OrganizationService(db)
             dry_run = bool(payload.payload.get("dry_run", True))
-            out = svc.apply_approved(limit=int(payload.payload.get("limit", 200)), dry_run=dry_run)
+            try:
+                apply_limit = int(payload.payload.get("limit", 200))
+            except (ValueError, TypeError):
+                apply_limit = 200
+            out = svc.apply_approved(limit=apply_limit, dry_run=dry_run)
             undo_token = str(out.get("rollback_group") or uuid4().hex)
             undo_entry = {
                 "undo_token": undo_token,

@@ -7,15 +7,11 @@ legal reasoning, and document organization.
 """
 
 import asyncio
-import importlib.util
 import json
 import hashlib
 import logging
 import os  # noqa: E402
-import shutil
-import socket
 import sqlite3
-import subprocess
 import sys  # noqa: E402
 import time
 import traceback
@@ -327,11 +323,7 @@ async def _startup_services():
     step_config = _start_step("config_load")
     try:
         from agents import get_agent_manager  # noqa: E402
-        from config.configuration_manager import ConfigurationManager  # noqa: E402
         from core.container.service_container_impl import ProductionServiceContainer  # noqa: E402
-        from core.llm_providers import LLMManager  # noqa: E402
-        from mem_db.database import DatabaseManager, get_database_manager  # noqa: E402
-        from services.memory_service import MemoryService  # noqa: E402
 
         _finish_step(step_config)
     except Exception as e:

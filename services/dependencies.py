@@ -10,8 +10,6 @@ from agents import get_agent_manager
 from agents.production_agent_manager import ProductionAgentManager
 from config.configuration_manager import ConfigurationManager
 from mem_db.database import DatabaseManager, get_database_manager
-from mem_db.knowledge import get_knowledge_manager
-from mem_db.vector_store import get_vector_store
 from services.memory_service import MemoryService
 
 try:

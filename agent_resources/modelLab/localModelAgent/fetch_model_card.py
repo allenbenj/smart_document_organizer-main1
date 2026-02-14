@@ -46,13 +46,13 @@ def fetch_model_card(model_id: str, output_dir: str) -> dict:
             dataset_entry["sample"] = next(iter(ds))
             info["dataset_samples"].append(dataset_entry)
             break  # only get first successful dataset
-        except Exception as e:
+        except Exception:
             pass
 
     try:
         model_repo_info = repo_info(model_id, repo_type="model")
         info["widget_data"] = getattr(model_repo_info, "widget_data", None)
-    except Exception as e:
+    except Exception:
         pass
 
     samples_filename = f"{model_id.replace('/', '_')}_samples.json"
@@ -78,7 +78,7 @@ def fetch_model_card(model_id: str, output_dir: str) -> dict:
                     local_dir=output_dir,
                 )
                 json_config_files.append(Path(local_path).absolute().as_posix())
-            except Exception as e:
+            except Exception:
                 pass
 
     return {

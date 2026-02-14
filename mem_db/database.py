@@ -5,7 +5,6 @@ This module provides database connectivity, schema management, and CRUD operatio
 following the architecture specifications for the document management system.
 """
 
-import json
 import logging  # noqa: E402
 import os
 import sqlite3  # noqa: E402

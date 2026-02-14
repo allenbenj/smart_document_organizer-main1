@@ -5,9 +5,9 @@ Unifies search capabilities: keyword, vector, and knowledge graph search.
 """
 import logging
 import time
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any
 
-from utils.models import SearchQuery, SearchResponse, SearchSuggestionResponse
+from utils.models import SearchQuery, SearchResponse
 
 logger = logging.getLogger(__name__)
 

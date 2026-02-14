@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QIcon
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QStyle,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -43,11 +44,14 @@ def log_run_event(level: str, message: str, source: str = "GUI") -> None:
 class RunConsolePanel(QGroupBox):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__("Run Console", parent)
+        self.setToolTip("Displays real-time logs and events from background operations")
         layout = QVBoxLayout(self)
 
         toolbar = QHBoxLayout()
         self.clear_btn = QPushButton("Clear")
+        self.clear_btn.setToolTip("Clear all logged events")
         self.copy_btn = QPushButton("Copy")
+        self.copy_btn.setToolTip("Copy all logs to clipboard")
         toolbar.addStretch()
         toolbar.addWidget(self.copy_btn)
         toolbar.addWidget(self.clear_btn)
@@ -56,12 +60,15 @@ class RunConsolePanel(QGroupBox):
         self.console = QTextEdit()
         self.console.setReadOnly(True)
         self.console.setMinimumHeight(140)
+        self.console.setToolTip("Event log from recent operations")
         layout.addWidget(self.console)
 
         self.clear_btn.clicked.connect(self.console.clear)
         self.copy_btn.clicked.connect(self.copy_all)
+        self.console.textChanged.connect(self._update_copy_button)
 
         get_run_event_bus().event_logged.connect(self.append_event)
+        self._update_copy_button()
 
     def append_event(self, ts: str, level: str, source: str, message: str) -> None:
         color = {
@@ -78,6 +85,11 @@ class RunConsolePanel(QGroupBox):
 
     def copy_all(self) -> None:
         QGuiApplication.clipboard().setText(self.console.toPlainText())
+
+    def _update_copy_button(self) -> None:
+        """Enable copy button only if there's text to copy."""
+        has_text = not self.console.toPlainText().strip() == ""
+        self.copy_btn.setEnabled(has_text)
 
 
 @dataclass
@@ -101,12 +113,15 @@ class JobStatusWidget(QFrame):
         self.job_name = job_name
 
         self.setFrameShape(QFrame.StyledPanel)
+        self.setToolTip(f"Status of {job_name}")
         layout = QHBoxLayout(self)
         self.name_label = QLabel(f"{job_name}:")
+        self.icon_label = QLabel()
         self.state_label = QLabel("QUEUED")
         self.detail_label = QLabel("Waiting")
         self.elapsed_label = QLabel("Elapsed: 0s")
         layout.addWidget(self.name_label)
+        layout.addWidget(self.icon_label)
         layout.addWidget(self.state_label)
         layout.addWidget(self.detail_label, 1)
         layout.addWidget(self.elapsed_label)
@@ -132,6 +147,7 @@ class JobStatusWidget(QFrame):
         self.detail_label.setText(self.model.detail)
         self._refresh_elapsed()
         self._refresh_style()
+        self._update_tooltip()
 
     def reset(self, detail: str = "Waiting") -> None:
         self.model = JobStatusModel(state="queued", detail=detail)
@@ -139,9 +155,12 @@ class JobStatusWidget(QFrame):
         self.detail_label.setText(detail)
         self._refresh_elapsed()
         self._refresh_style()
+        self._update_tooltip()
 
     def _refresh_elapsed(self) -> None:
-        self.elapsed_label.setText(f"Elapsed: {self.model.elapsed_seconds()}s")
+        elapsed = self.model.elapsed_seconds()
+        self.elapsed_label.setText(f"Elapsed: {elapsed}s")
+        self._update_tooltip()
 
     def _refresh_style(self) -> None:
         color = {
@@ -152,17 +171,45 @@ class JobStatusWidget(QFrame):
         }.get(self.model.state, "#616161")
         self.state_label.setStyleSheet(f"font-weight: bold; color: {color};")
 
+        # Set icon based on state
+        icon_text = {
+            "queued": "⏳",
+            "running": "🔄",
+            "success": "✅",
+            "failed": "❌",
+        }.get(self.model.state, "")
+        self.icon_label.setText(icon_text)
+
+    def _update_tooltip(self) -> None:
+        tooltip_parts = [f"Job: {self.job_name}", f"State: {self.model.state.upper()}", f"Detail: {self.model.detail}"]
+        if self.model.started_at:
+            tooltip_parts.append(f"Started: {self.model.started_at.strftime('%H:%M:%S')}")
+        if self.model.finished_at:
+            tooltip_parts.append(f"Finished: {self.model.finished_at.strftime('%H:%M:%S')}")
+        tooltip_parts.append(f"Elapsed: {self.model.elapsed_seconds()}s")
+        self.setToolTip("\n".join(tooltip_parts))
+
 
 class ResultsSummaryBox(QGroupBox):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__("Results Summary", parent)
+        self.setToolTip("Summary of the most recent job outcome and outputs")
         layout = QGridLayout(self)
-        layout.addWidget(QLabel("Outcome:"), 0, 0)
-        layout.addWidget(QLabel("Output Location:"), 1, 0)
-        layout.addWidget(QLabel("Logs:"), 2, 0)
+        outcome_label = QLabel("Outcome:")
+        outcome_label.setToolTip("Result of the last operation")
+        layout.addWidget(outcome_label, 0, 0)
+        output_label = QLabel("Output Location:")
+        output_label.setToolTip("Where results were saved or displayed")
+        layout.addWidget(output_label, 1, 0)
+        logs_label = QLabel("Logs:")
+        logs_label.setToolTip("Where operation logs are available")
+        layout.addWidget(logs_label, 2, 0)
         self.outcome = QLabel("No run yet")
+        self.outcome.setToolTip("Status of the last completed job")
         self.output_path = QLabel("N/A")
+        self.output_path.setToolTip("Path or location of generated outputs")
         self.logs_path = QLabel("N/A")
+        self.logs_path.setToolTip("Location of detailed logs")
         for lbl in (self.outcome, self.output_path, self.logs_path):
             lbl.setWordWrap(True)
         layout.addWidget(self.outcome, 0, 1)
@@ -179,14 +226,22 @@ class SystemHealthStrip(QFrame):
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setFrameShape(QFrame.StyledPanel)
+        self.setToolTip("System health indicators - Backend API and Advanced components")
         layout = QHBoxLayout(self)
         self.backend_label = QLabel("Backend: checking...")
+        self.backend_label.setToolTip("Status of the backend API server")
         self.advanced_label = QLabel("Advanced: checking...")
+        self.advanced_label.setToolTip("Status of advanced processing components")
         self.last_check_label = QLabel("Last check: --")
+        self.last_check_label.setToolTip("Timestamp of last health check")
+        self.refresh_btn = QPushButton("↻")
+        self.refresh_btn.setToolTip("Refresh health status manually")
+        self.refresh_btn.setMaximumWidth(30)
         layout.addWidget(self.backend_label)
         layout.addWidget(self.advanced_label)
         layout.addStretch()
         layout.addWidget(self.last_check_label)
+        layout.addWidget(self.refresh_btn)
 
     def update_status(self, backend: str, advanced: str) -> None:
         now = datetime.now().strftime("%H:%M:%S")

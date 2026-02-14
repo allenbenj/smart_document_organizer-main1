@@ -2,8 +2,6 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 
-from config.configuration_manager import ConfigurationManager
-from mem_db.database import DatabaseManager
 from services.dependencies import (
     get_database_manager_strict_dep,
     get_vector_store_strict_dep,
@@ -16,12 +14,6 @@ from utils.models import DocumentCreate, DocumentResponse, DocumentUpdate
 router = APIRouter()
 
 # Dependency Injection (strict container-backed)
-from services.dependencies import (
-    get_database_manager_strict_dep,
-    get_vector_store_strict_dep,
-    get_agent_manager_strict_dep,
-    get_config_manager_dep,
-)
 
 async def get_document_service(request: Request) -> DocumentService:
     """Strict DI-backed dependency to get DocumentService instance."""
