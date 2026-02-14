@@ -111,13 +111,25 @@ For list endpoints:
 ## 7) Webhook Callback Event Shape
 ```json
 {
-  "event": "step.completed",
+  "event_id": "wf_20260214_001:step.completed:ab12cd34",
+  "event_type": "step.completed",
   "job_id": "wf_20260214_001",
-  "step": "index_extract",
-  "status": "completed",
-  "timestamp": "2026-02-14T15:40:00Z",
-  "attempt": 1,
-  "signature_version": "v1"
+  "workflow": "memory_first_v2",
+  "status": "running",
+  "current_step": "index_extract",
+  "payload": {"step": "index_extract", "summary": "...", "count": 1},
+  "emitted_at": "2026-02-14T15:40:00Z"
 }
 ```
+
+Headers:
+- `X-Workflow-Event: job_callback`
+- `X-Workflow-Timestamp: <unix-seconds>`
+- `X-Workflow-Signature-Version: v1`
+- `X-Workflow-Signature: sha256=<digest>` when secret configured
+
+Retry behavior:
+- Retries on network errors, `429`, and `5xx`
+- No retries on other `4xx`
+- Final failures are persisted to webhook DLQ JSONL
 

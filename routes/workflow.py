@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
@@ -17,379 +15,29 @@ from app.contracts.workflow import (
     ResultItem,
     ResultResponse,
     ResultSchema,
-    StepStatusItem,
+    WorkflowBulkActionRequest,
+    WorkflowMutationResponse,
+    WorkflowOntologyEditRequest,
 )
 from services.dependencies import get_database_manager_strict_dep
-from services.file_index_service import FileIndexService
 from services.organization_service import OrganizationService
-from services.workflow_webhook_service import WorkflowWebhookService
+from services.workflow import (
+    STEP_ORDER,
+    default_stepper,
+    deliver_workflow_callback,
+    derive_draft_state_for_proposal,
+    execute_index_extract,
+    execute_summarize,
+    load_job,
+    persist_step_result,
+    read_idempotent_response,
+    save_job,
+    step_index,
+    update_step_status,
+    write_idempotent_response,
+)
 
 router = APIRouter()
-
-
-STEP_ORDER = ["sources", "index_extract", "summarize", "proposals", "review", "apply", "analytics"]
-
-
-def _default_stepper() -> list[StepStatusItem]:
-    return [StepStatusItem(name=s, status="not_started") for s in STEP_ORDER]
-
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if hasattr(value, "model_dump"):
-        try:
-            return value.model_dump(mode="json")
-        except Exception:
-            pass
-    return str(value)
-
-
-def _job_from_row(row: Dict[str, Any]) -> JobStatus:
-    data = dict(row)
-    stepper = []
-    try:
-        for item in json.loads(data.get("stepper_json") or "[]"):
-            stepper.append(StepStatusItem.model_validate(item))
-    except Exception:
-        stepper = _default_stepper()
-
-    try:
-        pagination = json.loads(data.get("pagination_json") or "{}")
-    except Exception:
-        pagination = {}
-
-    try:
-        undo = json.loads(data.get("undo_json") or "{}")
-    except Exception:
-        undo = {}
-
-    try:
-        metadata = json.loads(data.get("metadata_json") or "{}")
-    except Exception:
-        metadata = {}
-
-    return JobStatus(
-        job_id=str(data.get("job_id")),
-        workflow=str(data.get("workflow") or "memory_first_v2"),
-        status=str(data.get("status") or "queued"),
-        current_step=str(data.get("current_step") or "sources"),
-        progress=float(data.get("progress") or 0.0),
-        draft_state=str(data.get("draft_state") or "clean"),
-        started_at=data.get("started_at") or datetime.utcnow(),
-        updated_at=data.get("updated_at") or datetime.utcnow(),
-        completed_at=data.get("completed_at"),
-        idempotency_key=data.get("idempotency_key"),
-        webhook={
-            "enabled": bool(data.get("webhook_enabled")),
-            "url": data.get("webhook_url"),
-            "last_delivery_status": data.get("webhook_last_delivery_status"),
-            "last_delivery_at": data.get("webhook_last_delivery_at"),
-        },
-        stepper=stepper or _default_stepper(),
-        pagination=pagination,
-        undo=undo,
-        metadata=metadata,
-    )
-
-
-def _save_job(db: Any, job: JobStatus) -> None:
-    with db.get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO workflow_jobs (
-                job_id, workflow, status, current_step, progress, draft_state,
-                started_at, updated_at, completed_at, idempotency_key,
-                webhook_enabled, webhook_url, webhook_last_delivery_status, webhook_last_delivery_at,
-                stepper_json, pagination_json, undo_json, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(job_id) DO UPDATE SET
-                workflow = excluded.workflow,
-                status = excluded.status,
-                current_step = excluded.current_step,
-                progress = excluded.progress,
-                draft_state = excluded.draft_state,
-                started_at = excluded.started_at,
-                updated_at = excluded.updated_at,
-                completed_at = excluded.completed_at,
-                idempotency_key = excluded.idempotency_key,
-                webhook_enabled = excluded.webhook_enabled,
-                webhook_url = excluded.webhook_url,
-                webhook_last_delivery_status = excluded.webhook_last_delivery_status,
-                webhook_last_delivery_at = excluded.webhook_last_delivery_at,
-                stepper_json = excluded.stepper_json,
-                pagination_json = excluded.pagination_json,
-                undo_json = excluded.undo_json,
-                metadata_json = excluded.metadata_json
-            """,
-            (
-                job.job_id,
-                job.workflow,
-                job.status,
-                job.current_step,
-                job.progress,
-                job.draft_state,
-                job.started_at,
-                job.updated_at,
-                job.completed_at,
-                job.idempotency_key,
-                1 if job.webhook.enabled else 0,
-                job.webhook.url,
-                job.webhook.last_delivery_status,
-                job.webhook.last_delivery_at,
-                json.dumps([s.model_dump(mode="json") for s in job.stepper], default=_json_default),
-                json.dumps(job.pagination, default=_json_default),
-                json.dumps(job.undo.model_dump(mode="json"), default=_json_default),
-                json.dumps(job.metadata, default=_json_default),
-            ),
-        )
-        conn.commit()
-
-
-def _load_job(db: Any, job_id: str) -> Optional[JobStatus]:
-    with db.get_connection() as conn:
-        row = conn.execute("SELECT * FROM workflow_jobs WHERE job_id = ?", (job_id,)).fetchone()
-    if not row:
-        return None
-    return _job_from_row(dict(row))
-
-
-def _read_idempotent_response(db: Any, scope: str, key: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not key:
-        return None
-    with db.get_connection() as conn:
-        row = conn.execute(
-            "SELECT response_json FROM workflow_idempotency_keys WHERE scope = ? AND idempotency_key = ?",
-            (scope, key),
-        ).fetchone()
-    if not row:
-        return None
-    try:
-        return json.loads(row[0])
-    except Exception:
-        return None
-
-
-def _write_idempotent_response(db: Any, scope: str, key: Optional[str], response_body: Dict[str, Any]) -> None:
-    if not key:
-        return
-    with db.get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO workflow_idempotency_keys(scope, idempotency_key, response_json, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(scope, idempotency_key) DO UPDATE SET
-                response_json = excluded.response_json,
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (scope, key, json.dumps(response_body, default=_json_default)),
-        )
-        conn.commit()
-
-
-def _update_step_status(job: JobStatus, step_name: str, status: str) -> None:
-    for step in job.stepper:
-        if step.name == step_name:
-            step.status = status  # type: ignore[assignment]
-            step.updated_at = datetime.utcnow()
-            break
-
-
-def _step_index(step_name: str) -> int:
-    try:
-        return STEP_ORDER.index(step_name)
-    except ValueError:
-        return 0
-
-
-def _persist_step_result(job: JobStatus, *, step_name: str, result: ResultSchema) -> None:
-    completed = list(job.metadata.get("completed_steps") or [])
-    if step_name not in completed:
-        completed.append(step_name)
-
-    last_result = dict(job.metadata.get("last_result_by_step") or {})
-    last_result[step_name] = {
-        "updated_at": datetime.utcnow().isoformat(),
-        "count": int(result.pagination.count),
-        "next_cursor": result.pagination.next_cursor,
-        "summary": result.summary,
-    }
-
-    job.pagination[step_name] = result.pagination.model_dump(mode="json")
-    job.metadata["completed_steps"] = completed
-    job.metadata["last_result_by_step"] = last_result
-
-
-def _deliver_workflow_callback(
-    db: Any,
-    *,
-    job: JobStatus,
-    event_type: str,
-    payload: Dict[str, Any],
-) -> None:
-    if not (job.webhook and job.webhook.enabled and job.webhook.url):
-        return
-
-    try:
-        svc = WorkflowWebhookService()
-        event_id = f"{job.job_id}:{event_type}:{uuid4().hex[:10]}"
-        result = svc.deliver(
-            url=str(job.webhook.url),
-            payload={
-                "event_id": event_id,
-                "event_type": event_type,
-                "job_id": job.job_id,
-                "workflow": job.workflow,
-                "status": job.status,
-                "current_step": job.current_step,
-                "payload": payload,
-                "emitted_at": datetime.utcnow().isoformat(),
-            },
-            event_id=event_id,
-        )
-        job.webhook.last_delivery_at = datetime.utcnow()
-        job.webhook.last_delivery_status = (
-            f"delivered:{result.get('status')}@attempt={result.get('attempt')}"
-            if result.get("ok")
-            else f"failed@attempt={result.get('attempt')}"
-        )
-        _save_job(db, job)
-    except Exception:
-        return
-
-
-def _execute_index_extract(db: Any, payload: Dict[str, Any]) -> ResultSchema:
-    indexer = FileIndexService(db)
-
-    mode = str(payload.get("mode") or "auto").strip().lower()
-    max_files = int(payload.get("max_files", 5000))
-
-    if mode == "watched":
-        out = indexer.run_watched_index(max_files_per_watch=max_files)
-    elif mode == "refresh":
-        out = indexer.refresh_index(stale_after_hours=int(payload.get("stale_after_hours", 24)))
-    else:
-        roots = payload.get("roots")
-        if isinstance(roots, list) and roots:
-            out = indexer.index_roots(
-                [str(x) for x in roots if str(x).strip()],
-                recursive=bool(payload.get("recursive", True)),
-                max_files=max_files,
-                max_runtime_seconds=(float(payload["max_runtime_seconds"]) if payload.get("max_runtime_seconds") else None),
-            )
-        else:
-            out = indexer.run_watched_index(max_files_per_watch=max_files)
-
-    indexed = int(out.get("indexed", 0))
-    scanned = int(out.get("scanned", 0))
-    errors = int(out.get("errors", 0))
-    summary = f"Index/extract finished: indexed={indexed}, scanned={scanned}, errors={errors}"
-
-    return ResultSchema(
-        summary=summary,
-        items=[
-            ResultItem(
-                id=f"index_extract_{uuid4().hex[:10]}",
-                type="index_extract",
-                status="complete" if out.get("success", True) else "failed",
-                payload={"metrics": out},
-                version=1,
-            )
-        ],
-        bulk={"supported": False},
-        ontology_edits={"supported": False, "granular": False},
-        pagination=PaginationMeta(count=1, has_more=False, next_cursor=None),
-    )
-
-
-def _execute_summarize(db: Any, payload: Dict[str, Any]) -> ResultSchema:
-    limit = int(payload.get("limit", 500))
-    files, _total = db.list_indexed_files(limit=limit, offset=0, status="ready")
-    svc = OrganizationService(db)
-    proposals = svc.list_proposals(limit=min(1000, max(50, limit)), offset=0).get("items", [])
-
-    ext_counts: Dict[str, int] = {}
-    folder_counts: Dict[str, int] = {}
-    examples: list[Dict[str, Any]] = []
-
-    for rec in files:
-        ext = str(rec.get("ext") or "").lower() or "(none)"
-        ext_counts[ext] = ext_counts.get(ext, 0) + 1
-
-    for p in proposals:
-        folder = str(p.get("proposed_folder") or "Inbox/Review")
-        folder_counts[folder] = folder_counts.get(folder, 0) + 1
-        if len(examples) < 25:
-            examples.append(
-                {
-                    "proposal_id": p.get("id"),
-                    "from": p.get("current_path"),
-                    "to": f"{folder}/{p.get('proposed_filename')}",
-                    "confidence": p.get("confidence"),
-                }
-            )
-
-    naming_conventions = {
-        "top_extensions": sorted(ext_counts.items(), key=lambda kv: kv[1], reverse=True)[:12],
-        "filename_style": "preserve-source-stem-with-sanitization",
-    }
-    folder_structure = {
-        "top_destination_folders": sorted(folder_counts.items(), key=lambda kv: kv[1], reverse=True)[:20],
-        "default_folder": "Inbox/Review",
-    }
-
-    artifact = {
-        "generated_at": datetime.utcnow().isoformat(),
-        "naming_conventions": naming_conventions,
-        "folder_structure": folder_structure,
-        "examples": examples,
-        "source_counts": {"indexed_files": len(files), "proposals": len(proposals)},
-    }
-
-    return ResultSchema(
-        summary=f"Summary artifacts built from {len(files)} indexed file(s) and {len(proposals)} proposal(s)",
-        items=[
-            ResultItem(
-                id=f"summarize_{uuid4().hex[:10]}",
-                type="summary_artifact",
-                status="complete",
-                payload=artifact,
-                version=1,
-            )
-        ],
-        bulk={"supported": False},
-        ontology_edits={"supported": False, "granular": False},
-        pagination=PaginationMeta(count=1, has_more=False, next_cursor=None),
-    )
-
-
-def _derive_draft_state_for_proposal(
-    proposal: Dict[str, Any],
-    feedback_by_pid: Dict[int, list[Dict[str, Any]]],
-    action_by_pid: Dict[int, list[Dict[str, Any]]],
-) -> str:
-    pid = int(proposal.get("id") or 0)
-    status = str(proposal.get("status") or "proposed").lower()
-
-    if status == "applied":
-        return "clean"
-
-    feedback = feedback_by_pid.get(pid, [])
-    actions = action_by_pid.get(pid, [])
-
-    if any(str(f.get("action") or "") == "edit" for f in feedback):
-        return "human_edited"
-    if any(str(f.get("action") or "") == "reject" for f in feedback):
-        return "dirty"
-    if any(bool(a.get("success")) for a in actions):
-        return "saving"
-
-    rationale = str(proposal.get("rationale") or "").lower()
-    if "user edited" in rationale:
-        return "human_edited"
-    if status in {"approved"}:
-        return "dirty"
-    return "auto"
 
 
 @router.post("/workflow/jobs", response_model=JobStatusResponse)
@@ -400,7 +48,7 @@ async def create_workflow_job(
 ) -> JobStatusResponse:
     key = payload.idempotency_key or idempotency_key
     scope = "create_job"
-    cached = _read_idempotent_response(db, scope, key)
+    cached = read_idempotent_response(db, scope, key)
     if cached:
         return JobStatusResponse.model_validate(cached)
 
@@ -409,15 +57,15 @@ async def create_workflow_job(
         job_id=job_id,
         workflow=payload.workflow,
         idempotency_key=key,
-        stepper=_default_stepper(),
+        stepper=default_stepper(),
         metadata={**payload.metadata, "completed_steps": [], "last_result_by_step": {}},
     )
     if payload.webhook_url:
         job.webhook.enabled = True
         job.webhook.url = payload.webhook_url
 
-    _save_job(db, job)
-    _deliver_workflow_callback(
+    save_job(db, job)
+    deliver_workflow_callback(
         db,
         job=job,
         event_type="job.created",
@@ -425,18 +73,18 @@ async def create_workflow_job(
     )
     body = JobStatusResponse(success=True, job=job)
     body_dict = body.model_dump(mode="json")
-    _write_idempotent_response(db, scope, key, body_dict)
+    write_idempotent_response(db, scope, key, body_dict)
     return body
 
 
 @router.get("/workflow/jobs/{job_id}/status", response_model=JobStatusResponse)
 async def get_workflow_job_status(job_id: str, db=Depends(get_database_manager_strict_dep)) -> JobStatusResponse:
-    job = _load_job(db, job_id)
+    job = load_job(db, job_id)
     if not job:
-        job = JobStatus(job_id=job_id, status="failed", draft_state="failed", stepper=_default_stepper())
+        job = JobStatus(job_id=job_id, status="failed", draft_state="failed", stepper=default_stepper())
     job.updated_at = datetime.utcnow()
     if job.job_id.startswith("wf_"):
-        _save_job(db, job)
+        save_job(db, job)
     return JobStatusResponse(success=True, job=job)
 
 
@@ -450,21 +98,21 @@ async def execute_workflow_step(
 ) -> ResultResponse:
     key = payload.idempotency_key or idempotency_key
     scope = f"execute_step:{job_id}:{step_name}"
-    cached = _read_idempotent_response(db, scope, key)
+    cached = read_idempotent_response(db, scope, key)
     if cached:
         return ResultResponse.model_validate(cached)
 
-    job = _load_job(db, job_id)
+    job = load_job(db, job_id)
     if not job:
-        job = JobStatus(job_id=job_id, stepper=_default_stepper(), metadata={"completed_steps": [], "last_result_by_step": {}})
+        job = JobStatus(job_id=job_id, stepper=default_stepper(), metadata={"completed_steps": [], "last_result_by_step": {}})
 
     job.status = "running"
     job.current_step = step_name  # type: ignore[assignment]
     job.draft_state = "saving"
-    job.progress = max(job.progress, min((_step_index(step_name) + 1) / max(len(STEP_ORDER), 1), 1.0))
+    job.progress = max(job.progress, min((step_index(step_name) + 1) / max(len(STEP_ORDER), 1), 1.0))
     job.idempotency_key = key or job.idempotency_key
     job.updated_at = datetime.utcnow()
-    _update_step_status(job, step_name, "in_progress")
+    update_step_status(job, step_name, "in_progress")
 
     result = ResultSchema(
         summary=f"Execution accepted for step '{step_name}'",
@@ -476,9 +124,9 @@ async def execute_workflow_step(
 
     try:
         if step_name == "index_extract":
-            result = _execute_index_extract(db, payload.payload)
+            result = execute_index_extract(db, payload.payload)
         elif step_name == "summarize":
-            result = _execute_summarize(db, payload.payload)
+            result = execute_summarize(db, payload.payload)
             job.metadata["summary_artifact"] = result.items[0].payload if result.items else {}
         elif step_name == "proposals":
             svc = OrganizationService(db)
@@ -523,14 +171,14 @@ async def execute_workflow_step(
             ]
             result.pagination = PaginationMeta(count=1, has_more=False, next_cursor=None)
     except Exception as e:
-        _update_step_status(job, step_name, "failed")
+        update_step_status(job, step_name, "failed")
         job.status = "failed"
         job.draft_state = "failed"
         job.metadata["last_error"] = str(e)
-        _save_job(db, job)
+        save_job(db, job)
         response = ResultResponse(success=False, job_id=job_id, step=step_name, result=result, errors=[str(e)])
-        _write_idempotent_response(db, scope, key, response.model_dump(mode="json"))
-        _deliver_workflow_callback(
+        write_idempotent_response(db, scope, key, response.model_dump(mode="json"))
+        deliver_workflow_callback(
             db,
             job=job,
             event_type="step.failed",
@@ -538,20 +186,84 @@ async def execute_workflow_step(
         )
         return response
 
-    _update_step_status(job, step_name, "complete")
-    _persist_step_result(job, step_name=step_name, result=result)
+    update_step_status(job, step_name, "complete")
+    persist_step_result(job, step_name=step_name, result=result)
     job.draft_state = "clean"
-    _save_job(db, job)
+    save_job(db, job)
 
     response = ResultResponse(success=True, job_id=job_id, step=step_name, result=result, errors=[])
-    _write_idempotent_response(db, scope, key, response.model_dump(mode="json"))
-    _deliver_workflow_callback(
+    write_idempotent_response(db, scope, key, response.model_dump(mode="json"))
+    deliver_workflow_callback(
         db,
         job=job,
         event_type="step.completed",
         payload={"step": step_name, "summary": result.summary, "count": result.pagination.count},
     )
     return response
+
+
+@router.post("/workflow/jobs/{job_id}/proposals/bulk", response_model=WorkflowMutationResponse)
+async def workflow_bulk_proposal_action(
+    job_id: str,
+    payload: WorkflowBulkActionRequest,
+    db=Depends(get_database_manager_strict_dep),
+) -> WorkflowMutationResponse:
+    svc = OrganizationService(db)
+    items = []
+    errors = []
+    applied = 0
+    failed = 0
+
+    for proposal_id in payload.proposal_ids:
+        if payload.action == "approve":
+            out = svc.approve_proposal(int(proposal_id))
+        else:
+            out = svc.reject_proposal(int(proposal_id), note=payload.note)
+        if out.get("success"):
+            applied += 1
+        else:
+            failed += 1
+            errors.append(f"proposal_id={proposal_id}:{out.get('error', 'unknown_error')}")
+        items.append(out)
+
+    return WorkflowMutationResponse(
+        success=(failed == 0),
+        job_id=job_id,
+        step="proposals",
+        applied=applied,
+        failed=failed,
+        items=items,
+        errors=errors,
+    )
+
+
+@router.patch("/workflow/jobs/{job_id}/proposals/{proposal_id}/ontology", response_model=WorkflowMutationResponse)
+async def workflow_edit_proposal_ontology(
+    job_id: str,
+    proposal_id: int,
+    payload: WorkflowOntologyEditRequest,
+    db=Depends(get_database_manager_strict_dep),
+) -> WorkflowMutationResponse:
+    svc = OrganizationService(db)
+    out = svc.edit_proposal_fields(
+        proposal_id,
+        proposed_folder=payload.proposed_folder,
+        proposed_filename=payload.proposed_filename,
+        confidence=payload.confidence,
+        rationale=payload.rationale,
+        note=payload.note,
+        auto_approve=True,
+    )
+    success = bool(out.get("success"))
+    return WorkflowMutationResponse(
+        success=success,
+        job_id=job_id,
+        step="proposals",
+        applied=1 if success else 0,
+        failed=0 if success else 1,
+        items=[out],
+        errors=[] if success else [str(out.get("error") or "update_failed")],
+    )
 
 
 @router.get("/workflow/jobs/{job_id}/results", response_model=ResultResponse)
@@ -583,7 +295,7 @@ async def get_workflow_results(
         total_returned = len(proposals)
         items = []
         for p in proposals:
-            draft_state = _derive_draft_state_for_proposal(p, feedback_by_pid, action_by_pid)
+            draft_state = derive_draft_state_for_proposal(p, feedback_by_pid, action_by_pid)
             items.append(
                 ResultItem(
                     id=f"proposal_{p.get('id')}",
@@ -598,7 +310,14 @@ async def get_workflow_results(
                         "confidence": p.get("confidence"),
                         "rationale": p.get("rationale"),
                         "draft_state": draft_state,
+                        "status": p.get("status"),
                         "decision_source": (p.get("metadata") or {}).get("decision_source"),
+                        "ontology": {
+                            "folder": p.get("proposed_folder"),
+                            "filename": p.get("proposed_filename"),
+                            "confidence": p.get("confidence"),
+                            "rationale": p.get("rationale"),
+                        },
                     },
                     version=1,
                 )
@@ -615,7 +334,7 @@ async def get_workflow_results(
         return ResultResponse(success=True, job_id=job_id, step="proposals", result=result, errors=[])
 
     if step == "summarize":
-        job = _load_job(db, job_id)
+        job = load_job(db, job_id)
         artifact = (job.metadata.get("summary_artifact") if job else None) or {}
         items = []
         if artifact:
@@ -637,3 +356,69 @@ async def get_workflow_results(
         pagination=PaginationMeta(count=0, has_more=False, next_cursor=None),
     )
     return ResultResponse(success=True, job_id=job_id, step=step, result=result, errors=[])
+
+
+@router.post("/workflow/jobs/{job_id}/proposals/bulk")
+async def workflow_bulk_proposal_action(
+    job_id: str,
+    payload: Dict[str, Any] = Body(...),
+    db=Depends(get_database_manager_strict_dep),
+) -> Dict[str, Any]:
+    _ = job_id  # reserved for future job-level auditing
+    ids = payload.get("proposal_ids") or []
+    action = str(payload.get("action") or "").strip().lower()
+
+    svc = OrganizationService(db)
+    applied = 0
+    failed = 0
+    errors: list[Dict[str, Any]] = []
+
+    for raw_id in ids:
+        try:
+            pid = int(raw_id)
+        except Exception:
+            failed += 1
+            errors.append({"proposal_id": raw_id, "error": "invalid_proposal_id"})
+            continue
+
+        if action == "approve":
+            out = svc.approve_proposal(pid)
+        elif action == "reject":
+            out = svc.reject_proposal(pid, note=str(payload.get("note") or "bulk_action"))
+        else:
+            return {"success": False, "applied": 0, "failed": len(ids), "errors": [{"error": "invalid_action"}]}
+
+        if out.get("success"):
+            applied += 1
+        else:
+            failed += 1
+            errors.append({"proposal_id": pid, "error": out.get("error") or "operation_failed"})
+
+    return {"success": failed == 0, "applied": applied, "failed": failed, "errors": errors}
+
+
+@router.patch("/workflow/jobs/{job_id}/proposals/{proposal_id}/ontology")
+async def workflow_patch_proposal_ontology(
+    job_id: str,
+    proposal_id: int,
+    payload: Dict[str, Any] = Body(...),
+    db=Depends(get_database_manager_strict_dep),
+) -> Dict[str, Any]:
+    _ = job_id  # reserved for future job-level auditing
+    svc = OrganizationService(db)
+    out = svc.edit_proposal_fields(
+        proposal_id,
+        proposed_folder=payload.get("proposed_folder"),
+        proposed_filename=payload.get("proposed_filename"),
+        confidence=payload.get("confidence"),
+        rationale=payload.get("rationale"),
+        note=str(payload.get("note") or "ontology_patch"),
+        auto_approve=True,
+    )
+    return {
+        "success": bool(out.get("success")),
+        "applied": 1 if out.get("success") else 0,
+        "proposal_id": proposal_id,
+        "item": out.get("item"),
+        "error": out.get("error"),
+    }

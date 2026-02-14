@@ -5,6 +5,7 @@ import urllib.error
 
 from mem_db.database import DatabaseManager
 from services.dependencies import get_database_manager_strict_dep
+from services.workflow_webhook_dlq import as_replay_requests, read_webhook_dlq
 from services.workflow_webhook_service import WorkflowWebhookService
 
 
@@ -32,6 +33,58 @@ def test_webhook_service_retries_and_writes_dlq(monkeypatch, tmp_path):
     entry = json.loads(lines[0])
     assert entry["event_id"] == "evt_1"
     assert entry["attempts"] == 2
+    assert entry["replay"]["method"] == "POST"
+    assert entry["replay"]["body_base64"]
+
+
+def test_webhook_non_retryable_400_does_not_retry(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_WEBHOOK_MAX_RETRIES", "5")
+    monkeypatch.setenv("WORKFLOW_WEBHOOK_RETRY_BACKOFF_SECONDS", "0")
+
+    calls = {"n": 0}
+
+    def _http_400(*args, **kwargs):
+        calls["n"] += 1
+        raise urllib.error.HTTPError(url="http://example.com", code=400, msg="bad", hdrs=None, fp=None)
+
+    monkeypatch.setattr("urllib.request.urlopen", _http_400)
+    svc = WorkflowWebhookService()
+    out = svc.deliver(url="http://example.com/hook", payload={"x": 1}, event_id="evt_400")
+
+    assert out["ok"] is False
+    assert calls["n"] == 1
+    assert out["status"] == 400
+
+
+def test_webhook_signature_header_present_when_secret_set(monkeypatch):
+    monkeypatch.setenv("WORKFLOW_WEBHOOK_MAX_RETRIES", "0")
+    monkeypatch.setenv("WORKFLOW_WEBHOOK_SECRET", "supersecret")
+
+    captured = {"req": None}
+
+    class _Resp:
+        status = 204
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def _ok(req, *args, **kwargs):
+        captured["req"] = req
+        return _Resp()
+
+    monkeypatch.setattr("urllib.request.urlopen", _ok)
+
+    svc = WorkflowWebhookService()
+    out = svc.deliver(url="http://example.com/hook", payload={"ok": True}, event_id="evt_sig")
+
+    assert out["ok"] is True
+    req = captured["req"]
+    assert req is not None
+    assert req.headers.get("X-workflow-signature-version") == "v1"
+    assert str(req.headers.get("X-workflow-signature", "")).startswith("sha256=")
 
 
 def test_workflow_route_triggers_webhook_and_updates_status(client, tmp_path, monkeypatch):
@@ -64,3 +117,29 @@ def test_workflow_route_triggers_webhook_and_updates_status(client, tmp_path, mo
     webhook = status.json()["job"]["webhook"]
     assert webhook["enabled"] is True
     assert str(webhook["last_delivery_status"]).startswith("delivered:204")
+
+    metadata = status.json()["job"]["metadata"]
+    assert metadata["webhook"]["last_delivery"]["ok"] is True
+
+
+def test_webhook_dlq_read_replay_util(tmp_path):
+    p = tmp_path / "dlq.jsonl"
+    payload = {
+        "event_id": "evt_1",
+        "url": "http://example.com/hook",
+        "replay": {
+            "method": "POST",
+            "url": "http://example.com/hook",
+            "headers": {"Content-Type": "application/json"},
+            "body_base64": "eyJvayI6dHJ1ZX0=",
+            "encoding": "utf-8",
+        },
+    }
+    p.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    rows = read_webhook_dlq(p)
+    assert len(rows) == 1
+
+    replay = as_replay_requests(rows)
+    assert replay[0]["event_id"] == "evt_1"
+    assert replay[0]["body"] == '{"ok":true}'
