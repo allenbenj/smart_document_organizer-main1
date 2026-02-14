@@ -1,0 +1,240 @@
+{
+  "generated_at": "2025-08-17T12:58:42Z",
+  "source_summary": "Detailed import map generated from repository scan (search_files results). This maps files -> list of import statements/optional imports where detected.",
+  "total_import_statements_detected": 183,
+  "total_files_sampled": 30,
+  "files": {
+    "mem_db/memory/vector_store/vector_store.py": [
+      "import asyncio",
+      "import hashlib",
+      "import json",
+      "import logging",
+      "import os",
+      "import sqlite3",
+      "import time",
+      "from abc import ABC, abstractmethod",
+      "from collections import deque",
+      "from cachetools import LRUCache",
+      "from dataclasses import asdict, dataclass, field, fields",
+      "from datetime import datetime, timezone",
+      "from enum import Enum",
+      "from pathlib import Path",
+      "from typing import Any, Deque, Dict, List, Optional",
+      "from .vector_metadata_repository import VectorMetadataRepository",
+      "import faiss  # optional/3rd-party",
+      "import numpy as np  # optional/3rd-party",
+      "import tenacity  # optional/3rd-party",
+      "try: from sentence_transformers import SentenceTransformer  # optional conditional import"
+    ],
+    "mem_db/memory/vector_store/rag_vector_store.py": [
+      "import asyncio",
+      "import hashlib",
+      "import json",
+      "import logging",
+      "import time",
+      "from pathlib import Path",
+      "from typing import Dict, List, Any, Optional, Union, Tuple",
+      "from dataclasses import dataclass, field, asdict",
+      "from datetime import datetime, timezone",
+      "from enum import Enum, auto",
+      "try: from chromadb import PersistentClient, Settings",
+      "try: from langchain_community.vectorstores import Chroma",
+      "try: from langchain_huggingface import HuggingFaceEmbeddings",
+      "try: from langchain.text_splitter import RecursiveCharacterTextSplitter",
+      "try: from langchain.docstore.document import Document",
+      "try: import pypdf, docx, bs4 (BeautifulSoup)",
+      "try: import spacy, re"
+    ],
+    "mem_db/db/code_database_manager.py": [
+      "import sqlite3",
+      "import json",
+      "import time",
+      "import hashlib",
+      "from datetime import datetime",
+      "from typing import List, Tuple, Dict, Any, Optional",
+      "from pathlib import Path",
+      "ast parsing: records import AST Import and ImportFrom nodes",
+      "inserts into imports table (DB)"
+    ],
+    "mem_db/database.py": [
+      "import sqlite3",
+      "import logging",
+      "from pathlib import Path",
+      "from typing import List, Dict, Any, Optional, Tuple",
+      "from datetime import datetime",
+      "import json",
+      "from utils.models import DocumentCreate, DocumentUpdate, DocumentResponse"
+    ],
+    "routes/documents.py": [
+      "from fastapi import APIRouter, HTTPException, UploadFile, File, Query",
+      "from typing import List, Optional",
+      "import logging",
+      "import tempfile",
+      "import os",
+      "from pathlib import Path",
+      "from datetime import datetime",
+      "from utils.models import DocumentCreate, DocumentUpdate, DocumentResponse",
+      "from mem_db.database import get_database_manager",
+      "try: import fitz  # PyMuPDF",
+      "try: from docx import Document",
+      "try: import pandas as pd"
+    ],
+    "routes/vector_store.py": [
+      "from fastapi import APIRouter, HTTPException",
+      "import logging",
+      "from typing import Dict, Any, List, Optional",
+      "from pydantic import BaseModel",
+      "from mem_db.vector_store import get_vector_store",
+      "optional local imports: import numpy as np"
+    ],
+    "routes/search.py": [
+      "from fastapi import APIRouter, HTTPException, Query",
+      "from typing import List, Optional",
+      "import logging",
+      "import time",
+      "from utils.models import SearchQuery, SearchResponse, SearchSuggestionResponse",
+      "from mem_db.database import get_database_manager"
+    ],
+    "routes/ontology.py": [
+      "from fastapi import APIRouter, HTTPException",
+      "import logging",
+      "from typing import Dict, Any, List",
+      "try: from agents.entities.ontology.ontology import LegalEntityType, get_extraction_prompt, LegalRelationshipType"
+    ],
+    "routes/knowledge.py": [
+      "from fastapi import APIRouter, HTTPException",
+      "import logging",
+      "from typing import Dict, Any, Optional, List",
+      "from pydantic import BaseModel",
+      "from mem_db.knowledge import get_knowledge_manager",
+      "try: import uuid",
+      "try: from mem_db.knowledge.unified_knowledge_graph_manager import LegalEntity"
+    ],
+    "routes/agents.py": [
+      "from fastapi import APIRouter, HTTPException",
+      "import logging",
+      "from typing import Dict, Any, Optional, List",
+      "from pydantic import BaseModel",
+      "from pathlib import Path",
+      "from agents import get_agent_manager, list_agent_types",
+      "try: from agents.fallback_agent_manager import AgentType as FAgentType",
+      "try: from agents.production_agent_manager import AgentType as PAgentType"
+    ],
+    "agents/base/agent_registry.py": [
+      "import importlib",
+      "import inspect",
+      "try: module = importlib.import_module(module_path)",
+      "try/except ImportError handling",
+      "dynamically load orchestrator classes and agent classes"
+    ],
+    "agents/analysis/smart_doc_orchestrator.py": [
+      "import ast",
+      "import sys",
+      "with open(file_path, 'r', encoding='utf-8') as f: source_code = f.read()",
+      "tree = ast.parse(source_code)",
+      "uses ast.unparse or ast.get_source_segment depending on Python version"
+    ],
+    "utils/ingestion.py": [
+      "import os",
+      "import logging",
+      "from typing import Optional, Union, Dict, Any, Callable",
+      "import pdfplumber  # 3rd-party optional",
+      "import docx  # 3rd-party optional",
+      "import sys",
+      "from functools import wraps",
+      "from pathlib import Path",
+      "from .classification import extract_text"
+    ],
+    "utils/file_scanner.py": [
+      "import os",
+      "import hashlib",
+      "from datetime import datetime",
+      "from pathlib import Path",
+      "import logging",
+      "from typing import Dict, List, Any, Tuple",
+      "from multiprocessing import Pool, cpu_count"
+    ],
+    "utils/detailed_logging.py": [
+      "import logging",
+      "from enum import Enum",
+      "from typing import Any, Callable, Dict, Optional"
+    ],
+    "mem_db/memory/unified_memory_manager.py": [
+      "import asyncio",
+      "import hashlib",
+      "import json",
+      "import logging",
+      "import sqlite3",
+      "import uuid",
+      "from datetime import datetime, timedelta",
+      "from pathlib import Path",
+      "try: import chromadb; from chromadb.config import Settings"
+    ],
+    "mem_db/memory/chroma_memory/memory_bridge.py": [
+      "from chromadb import PersistentClient",
+      "from langchain_huggingface import HuggingFaceEmbeddings",
+      "from langchain_community.vectorstores import Chroma",
+      "from langchain.text_splitter import RecursiveCharacterTextSplitter",
+      "from langchain.docstore.document import Document",
+      "from pathlib import Path",
+      "import asyncio"
+    ],
+    "mem_db/memory/vector_memory_interface.py": [
+      "from chromadb import Client",
+      "from chromadb.config import Settings",
+      "from sentence_transformers import SentenceTransformer",
+      "from typing import List, Dict"
+    ],
+    "mem_db/__init__.py": [
+      "from .database import DatabaseManager, get_database_manager"
+    ],
+    "mem_db/vector_store/__init__.py": [
+      "from pathlib import Path",
+      "from typing import Optional",
+      "try: from .unified_vector_store import UnifiedVectorStore"
+    ],
+    "tests/conftest.py": [
+      "import sys",
+      "from pathlib import Path",
+      "import pytest",
+      "from fastapi.testclient import TestClient",
+      "from smart_document_organizer.main import app",
+      "try: from smart_document_organizer.mem_db.database import DatabaseManager"
+    ],
+    "start_app.py": [
+      "import sys",
+      "import os",
+      "import subprocess",
+      "import time",
+      "import requests"
+    ],
+    "pipelines/__init__.py": [
+      "from .runner import Pipeline, Step, run_pipeline"
+    ],
+    "utils/ml_optimizer.py": [
+      "import json",
+      "from pathlib import Path",
+      "try: import numpy as np",
+      "import hashlib",
+      "import sqlite3",
+      "import threading",
+      "from collections import defaultdict, deque"
+    ],
+    "agents/legal/toulmin_analyzer.py": [
+      "def try_import(path): try: return __import__(path, fromlist=['*']) except ImportError: return None"
+    ],
+    "mem_db/knowledge/knowledge-tracker.py": [
+      "import sqlite3",
+      "import json",
+      "from pathlib import Path",
+      "cursor SQL queries against import_dependencies table",
+      "CLI entrypoints for 'dependencies' and 'technical debt' commands"
+    ]
+  },
+  "notes": [
+    "This is an AST-style summary built from the repository scan output. It includes conditional/try imports where visible.",
+    "Next recommended step: run a dedicated AST parser across all .py files (mem_db/db/code_database_manager.py contains an existing parser for similar purposes) to produce a fully exhaustive import->file mapping and write to the DB or a canonical JSON.",
+    "If you want, I will now: (A) run a per-file AST extractor and overwrite this file with a fully exhaustive, normalized map, (B) create per-file missing-file snapshots for files that appear referenced but not present, or (C) start creating patches to ensure imports are persisted in files that were previously only loaded dynamically."
+  ],
+  "next_action": "Confirm whether to proceed with a full AST extraction pass that normalizes module names to file paths and writes the exhaustive .kilocode/import_map_detailed.json (overwrite)."
+}

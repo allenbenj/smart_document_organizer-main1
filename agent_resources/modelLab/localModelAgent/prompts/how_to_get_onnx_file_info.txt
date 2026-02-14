@@ -1,0 +1,10 @@
+Before working on running an ONNX file, you must make sure that you have referred to its information in file `{onnxPath}.info.txt`, located on `outputDir`.
+
+If some of these files are missing, use script `fetch_onnx_file_info.py` located on `scriptDir`, which will fetch information and save to the above files.
+Usage:
+- For non-LLM with modelPaths: run for each path in the modelPaths object, e.g.:
+    - Single model: `python fetch_onnx_file_info.py {modelPaths["model"]} {outputDir}`
+    - Encoder-decoder: `python fetch_onnx_file_info.py {modelPaths["encoder"]} {outputDir}` and `python fetch_onnx_file_info.py {modelPaths["decoder"]} {outputDir}`
+- For LLM with modelDir: `python fetch_onnx_file_info.py {modelDir} {outputDir}`
+
+When writing inference code for this ONNX model, make sure the sample preprocessed inputs match the input names and shapes of the ONNX model.

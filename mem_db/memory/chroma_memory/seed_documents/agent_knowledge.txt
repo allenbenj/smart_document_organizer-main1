@@ -1,0 +1,287 @@
+You are a Document Parser Agent. Your role is to ingest raw legal documents of various formats (PDF, scanned OCR, Word, or text) and convert them into clean, structured plaintext for downstream analysis. You must preserve page breaks, section headings, and metadata where available.
+
+Objectives:
+- Extract clean text while preserving logical document structure.
+- Identify and tag headings, paragraphs, and tables.
+- OCR scanned content if needed.
+- Mark document origin and file metadata in header.
+
+Output format:
+[DOCUMENT HEADER]
+- File Name: ...
+- Document Type: ...
+- Source Metadata: ...
+
+[DOCUMENT BODY]
+<Page X>
+...
+
+You are a Fact Extraction Agent tasked with identifying granular factual elements from parsed legal documents. Apply IRAC, deductive logic, and legal taxonomies to isolate:
+
+- Parties Involved
+- Factual Timeline
+- Procedural History
+- Elements of Offense/Claim
+- Evidence Referenced
+- Witness Testimony
+- Judicial Rulings
+- Discrepancies or Ambiguities
+
+Output Format:
+[FACT EXTRACTION REPORT]
+- Parties Involved: [...]
+- Timeline: [...]
+- Procedural Posture: [...]
+- Facts Related to Alleged Offense: [...]
+- Supporting Evidence: [...]
+- Witness Statements: [...]
+- Judicial Notes: [...]
+- Unresolved/Contradictory Facts: [...]
+
+You are an Issue Mapping Agent. Your task is to classify extracted facts into distinct legal issue domains.
+
+Apply MECE structuring and IRAC reasoning to map:
+- Criminal Law Issues
+- Civil Law Issues
+- Constitutional Claims
+- Procedural Errors
+- Evidentiary Challenges
+- Prosecutorial Misconduct Indicators
+- Due Process Violations
+
+Output Format:
+[LEGAL ISSUE MAPPING]
+- Issue Category: [...]
+- Associated Facts: [...]
+- Related Rules/Doctrines: [...]
+- Case Law References (if mentioned): [...]
+- Potential Argument Threads: [...]
+
+You are a Timeline Constructor Agent. You are responsible for assembling all chronological facts into a cohesive timeline.
+
+Objectives:
+- Identify date-bound factual statements.
+- Link events with causality.
+- Highlight legal milestones: charges, hearings, motions, rulings.
+
+Output Format:
+[TIMELINE REPORT]
+- [Date] — [Event Description]
+- [Date] — [Procedural Action]
+- [Date] — [Evidentiary Milestone]
+
+You are a Legal Argument Mapper. Your role is to align extracted facts with legal elements of claims, defenses, or procedural challenges.
+
+Apply:
+- Deductive/Inductive Reasoning
+- Causal Chain Logic
+- Toulmin Model
+
+Output Format:
+[LEGAL ARGUMENT MAP]
+- Claim/Defense: [...]
+- Relevant Facts: [...]
+- Rule of Law: [...]
+- Argument Structure: Claim → Data → Warrant → Rebuttal → Conclusion
+- Legal Weakness/Gap Analysis: [...]
+You are a Legal Summarizer Agent. Your task is to synthesize all structured outputs into a concise executive summary for attorney review.
+
+Output Format:
+[EXECUTIVE SUMMARY]
+- Case Overview
+- Key Factual Findings
+- Legal Issues Identified
+- Critical Arguments or Concerns
+- Notable Procedural Observations
+
+You are a System Setup Agent. Your responsibility is to prepare the full environment for the legal document analysis stack.
+
+Tasks:
+- Verify/create directories: /prompts, /memory, /knowledge, /logs
+- Install required Python packages
+- Initialize embedding models
+- Validate agent config files
+- Log setup status
+
+Output Format:
+[ENVIRONMENT STATUS REPORT]
+- Folder Setup: Success/Error
+- Package Installation: Success/Error
+- Model Initialization: Success/Error
+- Configuration Verification: Success/Error
+
+agents:
+  setup_agent:
+    role: "System Setup Agent"
+    prompt: "agent.system.main.setupagent.md"
+    run_on_start: true
+
+  document_parser:
+    role: "Document Parser Agent"
+    prompt: "agent.system.main.parser.md"
+    input_folder: "raw_documents"
+    output_folder: "parsed_text"
+
+  fact_extractor:
+    role: "Fact Extraction Agent"
+    prompt: "agent.system.main.factextractor.md"
+    input_folder: "parsed_text"
+    output_folder: "facts_extracted"
+
+  issue_mapper:
+    role: "Issue Mapper Agent"
+    prompt: "agent.system.main.issuemapper.md"
+    input_folder: "facts_extracted"
+    output_folder: "legal_issues"
+
+  timeline_builder:
+    role: "Timeline Constructor Agent"
+    prompt: "agent.system.main.timelinebuilder.md"
+    input_folder: "facts_extracted"
+    output_folder: "case_timeline"
+
+  argument_mapper:
+    role: "Legal Argument Mapper"
+    prompt: "agent.system.main.argumentmapper.md"
+    input_folder: "facts_extracted"
+    output_folder: "legal_arguments"
+
+  summarizer:
+    role: "Summarizer Agent"
+    prompt: "agent.system.main.summarizer.md"
+    input_folder:
+      - "legal_issues"
+      - "case_timeline"
+      - "legal_arguments"
+    output_folder: "executive_summary"
+
+# legal_agent_pipeline.py
+
+1. Document Parser Agent
+Document formats (PDF, DOCX, scanned images/OCR requirements)
+Text extraction libraries (PyMuPDF, pdfplumber, OCR engines like Tesseract)
+Handling of special formatting (tables, headers, footnotes, legal citations)
+Error handling for corrupted or password-protected documents
+Metadata extraction standards (dates, author, source)
+2. Fact Extractor Agent
+Legal taxonomy (parties, procedural posture, factual narrative, evidence)
+Distinguishing factual statements from legal arguments
+Identification of procedural stages (initial pleadings, discovery, hearings, trials, judgments)
+Contextual recognition of important versus irrelevant information
+Ability to extract structured factual summaries
+3. Issue Mapper Agent
+Understanding of legal concepts and frameworks (criminal law, civil claims, constitutional law, procedural rules)
+Recognition of legal issues from specific facts (issue spotting)
+Knowledge of relevant case law or statutes commonly cited
+How to classify facts into appropriate legal categories and hierarchies (MECE)
+4. Timeline Constructor Agent
+Identifying dates and chronology explicitly and implicitly from text
+Event sequencing logic to handle conflicting or ambiguous timelines
+Recognition of legally significant milestones (filings, hearings, judgments)
+Chronological validation (events alignment with procedural rules or case timeline)
+5. Legal Argument Mapper Agent
+Understanding argument structure (Toulmin model, IRAC)
+Linking facts clearly to legal elements (causal and logical reasoning)
+Identifying weaknesses or inconsistencies in arguments
+Applying precedents or doctrines accurately to extracted facts
+6. Summarizer Agent
+Ability to provide clear, concise summaries suitable for executive-level review
+Skill in synthesizing complex legal information into accessible insights
+Highlighting key legal issues, factual disputes, and procedural milestones
+Maintaining objectivity and precision in summarizing sensitive or nuanced legal arguments
+⚙️ General Technical Knowledge:
+LangChain/OpenAI or Local LLM usage (LLM invocation, prompt design)
+Vector embeddings (e.g., HuggingFace, SentenceTransformer)
+FAISS or other vector store for similarity search and fact recall
+Error handling for LLM failures or partial responses
+System-level resource awareness (memory/CPU constraints)
+📌 Additional Practical Considerations:
+Error Handling & Robustness: Agents must have logic to handle unexpected inputs gracefully.
+Logging & Audit Trails: Clear logs to trace agent actions and verify correctness.
+Performance Monitoring: Ability to identify bottlenecks or inefficiencies in the pipeline.
+Security & Confidentiality: Understanding of secure handling/storage of sensitive legal documents.
+
+# legal_agent_pipeline.py
+
+import os
+import subprocess
+from pathlib import Path
+from langchain_openai import ChatOpenAI
+
+# Define folder structure
+folders = [
+    "raw_documents",
+    "parsed_text",
+    "facts_extracted",
+    "legal_issues",
+    "case_timeline",
+    "legal_arguments",
+    "executive_summary",
+    "logs"
+]
+
+# Ensure folders exist
+def setup_directories():
+    for folder in folders:
+        Path(folder).mkdir(exist_ok=True)
+    print("✅ Directory structure initialized.")
+
+# Robust LangChain/OpenAI client with detailed prompt logic and error handling
+def robust_llm_call(prompt, model_name="mistral", base_url="http://localhost:1234/v1", retries=5, timeout=120):
+    llm = ChatOpenAI(
+        model_name=model_name,
+        base_url=base_url,
+        max_retries=retries,
+        timeout=timeout,
+        streaming=False
+    )
+    try:
+        response = llm.invoke(prompt)
+        return response.content
+    except Exception as e:
+        print(f"⚠️ Error invoking model: {e}")
+        return None
+
+# Detailed agent execution with comprehensive prompt design
+def run_agent(agent_name, input_path, output_path, prompt_path):
+    print(f"🔍 Running {agent_name}...")
+    detailed_prompt = (
+        f"You are the {agent_name.replace('_', ' ').title()}. "
+        "Your task is to analyze and process the documents comprehensively. "
+        f"Input documents are located in '{input_path}'. "
+        f"Use the detailed instructions provided in '{prompt_path}'. "
+        "Ensure meticulous extraction, analysis, categorization, and summarization. "
+        "Address any ambiguities explicitly and maintain a logical structure."
+    )
+    response = robust_llm_call(detailed_prompt)
+    if response:
+        output_file = os.path.join(output_path, f"{agent_name}_output.txt")
+        with open(output_file, "w") as f:
+            f.write(response)
+        print(f"✅ {agent_name} completed. Output saved to {output_file}")
+    else:
+        print(f"❌ {agent_name} failed.")
+
+# Define agents with comprehensive prompt paths and inputs/outputs clearly indicated
+agents = [
+    {"name": "document_parser", "input": "raw_documents", "output": "parsed_text", "prompt": "prompts/reflection/agent.system.main.parser.md"},
+    {"name": "fact_extractor", "input": "parsed_text", "output": "facts_extracted", "prompt": "prompts/reflection/agent.system.main.factextractor.md"},
+    {"name": "issue_mapper", "input": "facts_extracted", "output": "legal_issues", "prompt": "prompts/reflection/agent.system.main.issuemapper.md"},
+    {"name": "timeline_builder", "input": "facts_extracted", "output": "case_timeline", "prompt": "prompts/reflection/agent.system.main.timelinebuilder.md"},
+    {"name": "argument_mapper", "input": "facts_extracted", "output": "legal_arguments", "prompt": "prompts/reflection/agent.system.main.argumentmapper.md"},
+    {"name": "summarizer", "input": "legal_arguments", "output": "executive_summary", "prompt": "prompts/reflection/agent.system.main.summarizer.md"}
+]
+
+# Execute pipeline
+def run_pipeline():
+    setup_directories()
+    for agent in agents:
+        run_agent(
+            agent_name=agent["name"],
+            input_path=agent["input"],
+            output_path=agent["output"],
+            prompt_path=agent["prompt"]
+        )
+
+if __name__ == "__main__":
+    run_pipeline()

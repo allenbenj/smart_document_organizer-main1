@@ -1,0 +1,122 @@
+Generate Class-Based Inference Code for ONNX model
+
+Task:
+You are an AI model expert. Your task is to read a model card document, understand how many tasks are covered therein, and write sample code based on code in model card.
+
+Parameters:
+- outputDir: model card info and `test_inference_classes.py` is located here. You should generate `inference_classes.py` here.
+
+For each task covered in the document, implement a subclass of this abstract python class,
+```python
+from abc import ABC, abstractmethod
+
+class ONNXTaskModel(ABC):
+    '''
+    in __init__ method, the subclass should define self.output_names, which should be a list as a subset of the model's all output names.
+    '''
+    demo_sample = None # to specify in subclass, if model card documents include sample code to easily define/obtain a sample input for the model
+
+    @abstractmethod
+    def preprocess_input(self, sample):
+        '''
+        This method should perform the following steps:
+        1. If sample is a widget data structure, extract the relevant input data from it
+        2. preprocess the input sample to match the input format of the PyTorch model, matching input_names
+        3. Convert the above inputs into a dictionary of (input_name, numpy_array) that can be used as input for the ONNX inference session. Note that all float
+        '''
+        pass
+
+    @abstractmethod
+    def show_results(self, result):
+        '''
+        Show results of the inference, e.g., print prediction or visualize in human-friendly manner, based on model card document; postprocess the output as needed.
+        The result is computed from the ONNX inference session.
+        '''
+        pass
+
+    def inference_demo(self, onnx_model_path, sample):
+        '''
+        Run inference on a sample input and show the results.
+        '''
+        import io
+        import onnxruntime as ort
+        import numpy as np
+
+        sess_options = ort.SessionOptions()
+        # workaround
+        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+        session = ort.InferenceSession(onnx_model_path, sess_options=sess_options)
+        preprocessed_sample = self.preprocess_input(sample)
+        outputs = session.run(
+            self.output_names,
+            preprocessed_sample
+        )
+        results = {name: output for name, output in zip(self.output_names, outputs)}
+        # IMPORTANT: Casting float16 arrays to float32 before any post processing to avoid numerical issues.
+        for name, output in results.items():
+            if isinstance(output, np.ndarray) and output.dtype == np.float16:
+                results[name] = output.astype(np.float32)
+        self.show_results(results)
+```
+
+reflecting the e2e workflow in this task, and making sure to implement all the abstract methods and specify class properties which you are required to provide and can provide accurately. Subclass of each task must be implemented its own Python code block, and must be self-contained: all the module imports are put into functions where the modules are actually used, instead of as top-level imports. In addition, do not write any Python code block other than these subclasses. Do not put the abstract class code to your output.
+
+Keep in mind that your class is supposed to work with onnx model, but the sample code in the model card are often in Pytorch, so you should adapt accordingly (e.g preprocess to get inputs in Pytorch format then convert to numpy format for ONNX).
+
+Your class will be run in full automation, do not expect any user interaction.
+
+Steps:
+- generate `inference_classes.py` in `outputDir`; IMPORTANT: if there are no widget data samples in the samples json, you MUST provide demo_sample in your subclass so there is at least one sample to run for following tests (you may create one or adapt one dataset sample from the json, and note that a dataset sample may not be directly usable to test the model at hand and may need you to make a few changes to it); the above parent class `ONNXTaskModel` can be imported by
+```python
+from onnx_task_model import ONNXTaskModel
+```
+
+- use pip to install missing dependencies, and use python to test via `python test_inference_classes.py --model-path <ONNX_MODEL_PATH> --samples-json <SAMPLES_JSON_PATH>`. The test script is implemented as follows:
+```python
+import json
+import sys
+import os
+import argparse
+from pathlib import Path
+
+from onnx_task_model import ONNXTaskModel
+
+def get_widget_samples(samples_json_path):
+    if samples_json_path:
+        with open(samples_json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get('widget_data', [])
+    else:
+        return []
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Test inference classes with ONNX model')
+    parser.add_argument('--model-path', type=str, required=True,
+                        help='Path to the ONNX model file')
+    parser.add_argument('--samples-json', type=str, required=False,
+                        help='Path to the JSON file containing samples')
+    args = parser.parse_args()
+    onnx_model_path = args.model_path
+
+    widget_samples = get_widget_samples(args.samples_json)
+
+    sys.path.append(os.getcwd())
+    from inference_classes import *
+
+    for cls in ONNXTaskModel.__subclasses__():
+        model = cls()
+        assert model.demo_sample is not None or widget_samples, "No demo_sample or widget_data samples available for testing."
+        if widget_samples:
+            for sample in widget_samples:
+                model.inference_demo(onnx_model_path, sample)
+        if model.demo_sample is not None:
+            model.inference_demo(onnx_model_path, model.demo_sample)
+```
+
+- If you encounter errors in test, analyze and fix them. The corrected code in the same format as before - implement the same class structure but with the bugs fixed. Make sure all abstract methods are properly implemented and the code can run without errors. Common fixes needed:
+    1. Convert numpy.int64 to regular int when needed (e.g., int(numpy_value))
+    2. Handle data type mismatches between numpy arrays and expected types
+    3. Fix iteration issues with scalar values
+    4. Ensure all variables are properly initialized
+
+- Run the fixing-testing loop for AT MOST 5 times. IMPORTANT: do not tweak do not tweak input examples smartly to bypass the failed cases, instead focus on identifying and fixing root causes in `inference_classes.py`.

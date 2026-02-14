@@ -1,0 +1,212 @@
+{
+    "add_docstrings": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def multiply(a, b): return a * b",
+            "instruction": "Add docstrings and type annotations to all functions"
+        }
+    },
+    "simplify_function": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def compute(x): if x > 10: return True else: return False",
+            "instruction": "Simplify conditionals and improve logic clarity"
+        }
+    },
+    "make_class": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def start(): print('start')\ndef stop(): print('stop')",
+            "instruction": "Refactor this into a class with start and stop methods"
+        }
+    },
+    "generate_tests": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def divide(a, b): return a / b",
+            "instruction": "Generate pytest unit tests for this function"
+        }
+    },
+    "use_list_comprehension": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "results = []\nfor x in range(10): results.append(x*x)",
+            "instruction": "Refactor this using list comprehension"
+        }
+    },
+    "clean_style": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def sum(x,y):return(x+y)",
+            "instruction": "Fix indentation, spacing, and format per PEP8"
+        }
+    },
+    "add_logging": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def fetch_data(): data = get()",
+            "instruction": "Add logging to track when functions are entered"
+        }
+    },
+    "split_large_function": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def process(): ... (long logic)",
+            "instruction": "Split this large function into smaller helper functions"
+        }
+    },
+    "rename_variables": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def f(x): return x+1",
+            "instruction": "Rename variables for clarity"
+        }
+    },
+    "convert_to_async": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def fetch(): response = requests.get('http://x.com')",
+            "instruction": "Convert this function to async/await"
+        }
+    },
+    "inline_obvious_values": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "PI = 3.14\ndef area(r): return PI * r * r",
+            "instruction": "Inline constants and simplify where appropriate"
+        }
+    },
+    "extract_constants": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def connect(): return 'https://api.domain.com/v1'",
+            "instruction": "Extract magic strings into named constants"
+        }
+    },
+    "use_enums": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "if status == 'open': ... elif status == 'closed': ...",
+            "instruction": "Refactor string flags into an Enum"
+        }
+    },
+    "add_error_handling": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def risky(): return 1/0",
+            "instruction": "Add try/except blocks to handle possible errors"
+        }
+    },
+    "break_module": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "# huge file with many unrelated functions",
+            "instruction": "Break this into smaller modules by domain"
+        }
+    },
+    "doc_all_classes": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "class User: pass",
+            "instruction": "Add class-level docstrings explaining purpose and usage"
+        }
+    },
+    "modernize_syntax": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "d = dict([(k, v) for k, v in pairs])",
+            "instruction": "Modernize syntax to current Python standards"
+        }
+    },
+    "convert_to_dataclass": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "class Point: def __init__(self, x, y): self.x = x; self.y = y",
+            "instruction": "Convert this to a @dataclass"
+        }
+    },
+    "optimize_loops": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "total = 0\nfor x in data:\n    total += x",
+            "instruction": "Optimize loops using built-in functions"
+        }
+    },
+    "type_enforcement": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def load(file): return open(file).read()",
+            "instruction": "Enforce type checking and strict typing"
+        }
+    },
+    "convert_recursive_to_iterative": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def fact(n): return 1 if n==0 else n*fact(n-1)",
+            "instruction": "Convert this recursive function to an iterative version"
+        }
+    },
+    "batch_refactor": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "# large module with inconsistent spacing and function names",
+            "instruction": "Clean up style and apply consistent naming across functions"
+        }
+    },
+    "thread_safe": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "counter = 0\ndef inc(): global counter; counter += 1",
+            "instruction": "Make this code thread-safe"
+        }
+    },
+    "parallelize": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "for file in files: process(file)",
+            "instruction": "Refactor to use multiprocessing or async"
+        }
+    },
+    "secure_passwords": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def store_pw(p): open('pw.txt', 'w').write(p)",
+            "instruction": "Refactor to store passwords securely using hashing"
+        }
+    },
+    "sanitize_inputs": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def run(cmd): os.system(cmd)",
+            "instruction": "Add input sanitization to prevent command injection"
+        }
+    },
+    "use_context_manager": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "f = open('file.txt'); data = f.read(); f.close()",
+            "instruction": "Use a context manager (with statement) for file access"
+        }
+    },
+    "modularize_tests": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "# tests are defined inline with logic",
+            "instruction": "Move tests into a separate module"
+        }
+    },
+    "refactor_state_machine": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "if mode == 1: ... elif mode == 2: ...",
+            "instruction": "Refactor into an explicit state machine pattern"
+        }
+    },
+    "enforce_dependency_injection": {
+        "tool": "refactor_code",
+        "args": {
+            "code": "def log(): return Logger()",
+            "instruction": "Use dependency injection instead of creating dependencies internally"
+        }
+    }
+}

@@ -1,0 +1,40 @@
+Generate Standalone Inference Script
+
+Task:
+You are an AI expert in creating clean, educational Python code samples. Your task is to convert object-oriented ONNX model inference code into a simple, standalone Python script that demonstrates how to use the model for inference.
+
+Parameters:
+- outputDir: `inference_classes.py` is located here. You should generate `inference_script.py` here.
+
+Requirements:
+1. Convert the class-based code into a simple, functional script
+2. The script should be educational and easy to understand for engineers
+3. Keep the core functionality but remove unnecessary complexity
+4. Include clear comments explaining each step
+5. Make it directly executable - include a main section that demonstrates the inference
+6. Ensure all necessary imports are at the top of the file
+7. The script should be self-contained and concise
+8. Focus on showing the essential steps: preprocessing, inference, and postprocessing
+
+Instructions:
+1. Extract the core preprocessing logic from the preprocess_input method
+2. Extract the core postprocessing/result display logic from the show_results method
+3. Create a simple main function that:
+   - Loads the ONNX model
+   - Prepares sample input (use the demo_sample if available)
+   - Runs inference
+   - Displays results
+4. Add clear comments explaining what each section does
+5. Remove class inheritance and make it a straightforward script
+6. Ensure the script is educational - someone should be able to understand how to use this model just by reading the code
+7. IMPORTANT: when creating `ort.InferenceSession`, you must ALWAYS pass `sess_options` argument, after setting `sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED` to fix a known issue.
+
+Steps:
+- Refer to `inference_classes.py`, which passed the tests certain on input samples;
+- Generate standalone `inference_script.py` in `outputDir` following above instructions;
+- use pip to install missing dependencies, and run `python inference_script.py` to test it on same samples;
+- If you encounter errors in test, analyze and fix them. Make sure to:
+    1. Keep all the overall preprocess-run inference-postprocess flow in `inference_classes.py` intact
+    2. Ensure the script is executable and handles edge cases properly
+    3. Maintain proper error handling
+- Run the fixing-testing loop for AT MOST 5 times. IMPORTANT: do not tweak input examples or test code smartly to bypass the failed cases; instead focus on fixing issues in inference code.

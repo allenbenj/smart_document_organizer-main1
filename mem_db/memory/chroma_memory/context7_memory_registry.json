@@ -1,0 +1,21 @@
+{
+  "agent_knowledge": {
+    "id": "chroma:./chroma_db/embedded_rag_memory",
+    "namespaces": [
+      "reasoning_frameworks",
+      "legal_memory",
+      "architecture_guides",
+      "human_approved_knowledge"
+    ],
+    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+    "description": "Agent reasoning memory for legal AI system.",
+    "created_by": "ben",
+    "project": "legal_ai_analysis",
+    "tags": {
+      "auto_tag_sources": true,
+      "auto_timestamp_entries": true,
+      "default_language": "en",
+      "allow_duplicate_chunks": false
+    }
+  }
+}

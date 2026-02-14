@@ -1,0 +1,41 @@
+embedding_model: sentence-transformers/all-MiniLM-L6-v2
+
+chunking:
+  chunk_size: 1000
+  chunk_overlap: 100
+  split_method: recursive
+
+vectorstore:
+  provider: chroma
+  persist_directory: ./chroma_db
+  collection_prefix: embedded_rag_memory
+
+namespaces:
+  - reasoning_frameworks
+  - legal_memory
+  - architecture_guides
+  - human_approved_knowledge
+
+metadata:
+  created_by: ben
+  project: legal_ai_analysis
+  auto_tag_sources: true
+  auto_timestamp_entries: true
+  default_language: en
+  allow_duplicate_chunks: false
+
+document_loader:
+  accepted_extensions:
+    - .md
+    - .txt
+    - .pdf
+  exclude_filenames:
+    - README.md
+    - .DS_Store
+  max_file_size_mb: 10
+
+runtime_controls:
+  overwrite_existing_vectors: false
+  dry_run: false
+  verbose: true
+  fail_on_error: true

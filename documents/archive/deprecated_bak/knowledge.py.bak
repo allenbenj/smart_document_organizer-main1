@@ -1,0 +1,641 @@
+import logging
+import re  # noqa: E402
+from typing import Any, Dict, List, Optional, Tuple  # noqa: E402
+
+from fastapi import APIRouter, HTTPException  # noqa: E402
+from pydantic import BaseModel  # noqa: E402
+
+from mem_db.knowledge import get_knowledge_manager  # noqa: E402
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+@router.get("/knowledge")
+async def knowledge_status() -> Dict[str, Any]:
+    try:
+        mgr = get_knowledge_manager()
+        if mgr is None:
+            return {
+                "available": False,
+                "initialized": False,
+                "reason": "dependencies_missing",
+                "degradation": {
+                    "component": "knowledge_graph",
+                    "lost_features": [
+                        "graph-based legal entity/relationship storage",
+                        "KG queries and visualization",
+                        "relationship proposals with enforcement",
+                    ],
+                    "fits_workflow": False,
+                    "suggested_actions": [
+                        "Install networkx and required KG deps",
+                        "Initialize Knowledge Manager",
+                    ],
+                },
+            }
+        # Best-effort stats
+        stats = getattr(mgr, "_stats", {})
+        return {
+            "available": True,
+            "initialized": bool(getattr(mgr, "_networkx_graph", None)),
+            "stats": stats,
+        }
+    except Exception as e:
+        logger.error(f"Knowledge status error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get knowledge status")
+
+
+@router.post("/knowledge/init")
+async def knowledge_init() -> Dict[str, Any]:
+    try:
+        mgr = get_knowledge_manager()
+        if mgr is None:
+            raise HTTPException(
+                status_code=501,
+                detail={
+                    "error": "knowledge_unavailable",
+                    "degradation": {
+                        "component": "knowledge_graph",
+                        "lost_features": ["KG initialization", "graph storage"],
+                        "fits_workflow": False,
+                        "suggested_actions": [
+                            "Install networkx",
+                            "Initialize Knowledge Manager",
+                        ],
+                    },
+                },
+            )
+        ok = await mgr.initialize()
+        return {"initialized": bool(ok)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Knowledge init error: {e}")
+        raise HTTPException(
+            status_code=500, detail="Failed to initialize knowledge manager"
+        )
+
+
+class EntityPayload(BaseModel):
+    name: str
+    entity_type: str
+    content: Optional[str] = None
+    jurisdiction: Optional[str] = None
+    legal_domain: Optional[str] = None
+    attributes: Optional[Dict[str, Any]] = None
+
+
+@router.post("/knowledge/entities")
+async def add_entity(payload: EntityPayload) -> Dict[str, Any]:  # noqa: C901
+    try:
+        mgr = get_knowledge_manager()
+        if mgr is None:
+            raise HTTPException(
+                status_code=501,
+                detail={
+                    "error": "knowledge_unavailable",
+                    "degradation": {
+                        "component": "knowledge_graph",
+                        "lost_features": ["entity create/list"],
+                        "fits_workflow": False,
+                        "suggested_actions": [
+                            "Install KG deps",
+                            "Initialize Knowledge Manager",
+                        ],
+                    },
+                },
+            )
+        # Best-effort add via internals if public API missing
+        import uuid  # noqa: E402
+
+        ent_id = str(uuid.uuid4())
+        data = {
+            "id": ent_id,
+            "name": payload.name,
+            "entity_type": payload.entity_type,
+            "content": payload.content,
+            "jurisdiction": payload.jurisdiction,
+            "legal_domain": payload.legal_domain,
+        }
+        # Merge any attributes into the entity data
+        if payload.attributes:
+            try:
+                data.update(
+                    {k: v for k, v in payload.attributes.items() if k not in data}
+                )
+            except Exception:
+                pass
+        try:
+            from mem_db.knowledge.unified_knowledge_graph_manager import LegalEntity  # noqa: E402
+
+            entity = LegalEntity.from_dict(data)
+        except Exception:
+            entity = data
+        # Insert into manager internals when available
+        if hasattr(mgr, "_entities"):
+            mgr._entities[ent_id] = entity
+        if hasattr(mgr, "_networkx_graph") and mgr._networkx_graph is not None:
+            mgr._networkx_graph.add_node(
+                ent_id, **(entity.to_dict() if hasattr(entity, "to_dict") else data)
+            )
+        # Update stats
+        if hasattr(mgr, "_stats"):
+            mgr._stats["total_entities"] = len(getattr(mgr, "_entities", {}))
+        return {"id": ent_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Add entity error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add entity")
+
+
+@router.get("/knowledge/entities")
+async def list_entities(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+    try:
+        mgr = get_knowledge_manager()
+        if mgr is None:
+            raise HTTPException(
+                status_code=501,
+                detail={
+                    "error": "knowledge_unavailable",
+                    "degradation": {
+                        "component": "knowledge_graph",
+                        "lost_features": ["relationship create/list"],
+                        "fits_workflow": False,
+                        "suggested_actions": [
+                            "Install KG deps",
+                            "Initialize Knowledge Manager",
+                        ],
+                    },
+                },
+            )
+        entities = []
+        store = getattr(mgr, "_entities", {})
+        keys = list(store.keys())[offset : offset + limit]
+        for k in keys:
+            v = store[k]
+            if hasattr(v, "to_dict"):
+                entities.append(v.to_dict())
+            else:
+                entities.append({"id": k, **(v or {})})
+        return {"items": entities, "count": len(store)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"List entities error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list entities")
+
+
+class RelationshipPayload(BaseModel):
+    source_id: str
+    target_id: str
+    relation_type: str
+    properties: Optional[Dict[str, Any]] = None
+
+
+class EntitiesImportPayload(BaseModel):
+    items: List[
+        Dict[str, Any]
+    ]  # each: { name: str, entity_type_label?: str, entity_type?: str, attributes?: dict }
+    use_heuristics: Optional[bool] = True
+
+
+@router.post("/knowledge/relationships")
+async def add_relationship(payload: RelationshipPayload) -> Dict[str, Any]:
+    try:
+        mgr = get_knowledge_manager()
+        if mgr is None:
+            raise HTTPException(
+                status_code=501, detail="Knowledge manager dependencies not available"
+            )
+        rel_id = f"rel_{payload.source_id}_{payload.target_id}_{payload.relation_type}"
+        data = {
+            "id": rel_id,
+            "source_id": payload.source_id,
+            "target_id": payload.target_id,
+            "relation_type": payload.relation_type,
+            "properties": payload.properties or {},
+        }
+        # Store internally if available
+        if hasattr(mgr, "_relationships"):
+            mgr._relationships[rel_id] = data
+        if hasattr(mgr, "_networkx_graph") and mgr._networkx_graph is not None:
+            mgr._networkx_graph.add_edge(
+                payload.source_id,
+                payload.target_id,
+                key=rel_id,
+                relation_type=payload.relation_type,
+                **(payload.properties or {}),
+            )
+        # Update stats
+        if hasattr(mgr, "_stats"):
+            mgr._stats["total_relationships"] = len(getattr(mgr, "_relationships", {}))
+        return {"id": rel_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Add relationship error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add relationship")
+
+
+class TriplesPayload(BaseModel):
+    triples: List[Tuple[str, str, str]]
+    entity_type: Optional[str] = "generic"
+    entity_type_label: Optional[str] = (
+        None  # Ontology label (e.g., "Person", "Statute")
+    )
+    create_missing: Optional[bool] = True
+    use_heuristics: Optional[bool] = True
+
+
+@router.post("/knowledge/import_triples")
+async def import_triples(payload: TriplesPayload) -> Dict[str, Any]:  # noqa: C901
+    """Import KG triples (head, relation, tail) into the knowledge store.
+
+    - Creates entities by name when missing if create_missing is True.
+    - Adds relationships with relation_type.
+    """
+    try:
+        mgr = get_knowledge_manager()
+        if mgr is None:
+            raise HTTPException(
+                status_code=501, detail="Knowledge manager dependencies not available"
+            )
+
+        # Helper: find entity id by name
+        def find_entity_id_by_name(name: str) -> Optional[str]:
+            store = getattr(mgr, "_entities", {})
+            for eid, obj in store.items():
+                d = obj.to_dict() if hasattr(obj, "to_dict") else obj
+                if str(d.get("name", "")).strip().lower() == name.strip().lower():
+                    return eid
+            return None
+
+        created_entities = 0
+        created_rels = 0
+
+        # Resolve ontology default type if provided
+        default_type = payload.entity_type or "generic"
+        if payload.entity_type_label:
+            try:
+                from agents.entities.ontology.ontology import get_entity_type_by_label  # noqa: E402
+
+                et = get_entity_type_by_label(payload.entity_type_label)
+                if et is not None:
+                    default_type = et.value.label
+            except Exception:
+                pass
+
+        # Lightweight heuristics to infer ontology labels when requested
+        def infer_entity_type_label(name: str) -> Optional[str]:
+            try:
+                text = (name or "").strip()
+                low = text.lower()
+                # Dates
+                if re.search(
+                    r"\b\d{4}-\d{2}-\d{2}\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b",
+                    low,
+                ):
+                    return "DateEntity"
+                # Money
+                if re.search(r"\$\s*\d|\b(usd|eur|gbp)\b|\d[,\d]*\.\d{2}", low):
+                    return "MonetaryAmount"
+                # Court / Case
+                if " court" in low or "court o" in low or "appeals" in low:
+                    return "Court"
+                if re.search(r"\b(v\.|vs|versus)\b", low):
+                    return "Case"
+                # Statute / Regulation
+                if (
+                    " u.s.c" in low
+                    or " code" in low
+                    or " statute" in low
+                    or "§" in text
+                ):
+                    return "Statute"
+                if " regulation" in low or " cfr" in low:
+                    return "Regulation"
+                # Law Enforcement
+                if "police" in low or "sheri" in low or "fbi" in low:
+                    return "LawEnforcementAgency"
+                # Org / Party
+                if re.search(r"\b(inc\.|llc|corp\.|ltd\.|company|incorporated)\b", low):
+                    return "Party"
+                # Document types
+                if low.startswith("motion ") or " motion" in low:
+                    return "Motion"
+                if " order" in low:
+                    return "Order"
+                # Location
+                if re.search(
+                    r"\b(county|city|street|avenue|road|st\.|ave\.|rd\.)\b", low
+                ):
+                    return "LocationEntity"
+                # Person (two capitalized words heuristic)
+                if re.match(r"^[A-Z][a-z]+\s+[A-Z][a-z]+(\s+[A-Z][a-z]+)?$", text):
+                    return "Person"
+            except Exception:
+                pass
+            return None
+
+        def infer_relationship_type(rel: str) -> str:
+            s = (rel or "").strip().lower()
+            if "cite" in s:
+                return "cites"
+            if "overrule" in s:
+                return "overrules"
+            if "distinguish" in s:
+                return "distinguishes"
+            if "follow" in s:
+                return "follows"
+            if "filed" in s:
+                return "filed_by"
+            if "represent" in s:
+                return "represents"
+            if "decid" in s:
+                return "decided_by"
+            if "support" in s:
+                return "supports"
+            if "conflict" in s:
+                return "conflicts_with"
+            if "relat" in s:
+                return "related_to"
+            return s or "related_to"
+
+        def extract_entity_attributes(name: str, etype_label: str) -> Dict[str, Any]:
+            attrs: Dict[str, Any] = {}
+            text = name or ""
+            if etype_label == "DateEntity":
+                m = re.search(r"(\d{4}-\d{2}-\d{2}|\b\d{1,2}/\d{1,2}/\d{2,4}\b)", text)
+                if m:
+                    attrs["date_value"] = m.group(1)
+            elif etype_label == "MonetaryAmount":
+                m = re.search(r"(\$\s*\d[\d,]*\.?\d{0,2})", text)
+                if m:
+                    attrs["amount"] = m.group(1)
+                c = re.search(r"\b(USD|EUR|GBP|usd|eur|gbp)\b", text)
+                if c:
+                    attrs["currency"] = c.group(1).upper()
+            elif etype_label == "Statute":
+                m = re.search(
+                    r"(§\s*\d+[\w\.-]*|\b\d+\s*U\.S\.C\.\s*§?\s*\d+[\w\.-]*)", text
+                )
+                if m:
+                    attrs["citation"] = m.group(1)
+            elif etype_label == "Court":
+                attrs["court_name"] = text
+            elif etype_label == "Case":
+                m = re.search(r"(No\.?\s*[A-Za-z0-9\-]+)", text)
+                if m:
+                    attrs["case_number"] = m.group(1)
+            elif etype_label == "LocationEntity":
+                attrs["location_name"] = text
+            elif etype_label in ("Person", "Party"):
+                attrs["name"] = text
+            return attrs
+
+        for head, rel, tail in payload.triples:
+            h_id = find_entity_id_by_name(head)
+            t_id = find_entity_id_by_name(tail)
+            # Create missing entities if allowed
+            if payload.create_missing:
+                if not h_id:
+                    inferred = (
+                        infer_entity_type_label(head)
+                        if payload.use_heuristics
+                        else None
+                    )
+                    etype = default_type
+                    if inferred:
+                        try:
+                            from agents.entities.ontology.ontology import (  # noqa: E402
+                                get_entity_type_by_label,
+                            )
+
+                            if get_entity_type_by_label(inferred):
+                                etype = inferred
+                        except Exception:
+                            pass
+                    attrs = extract_entity_attributes(head, etype)
+                    res = await add_entity(
+                        EntityPayload(name=head, entity_type=etype, attributes=attrs)
+                    )
+                    h_id = res.get("id")
+                    created_entities += 1
+                if not t_id:
+                    inferred = (
+                        infer_entity_type_label(tail)
+                        if payload.use_heuristics
+                        else None
+                    )
+                    etype = default_type
+                    if inferred:
+                        try:
+                            from agents.entities.ontology.ontology import (  # noqa: E402
+                                get_entity_type_by_label,
+                            )
+
+                            if get_entity_type_by_label(inferred):
+                                etype = inferred
+                        except Exception:
+                            pass
+                    attrs = extract_entity_attributes(tail, etype)
+                    res = await add_entity(
+                        EntityPayload(name=tail, entity_type=etype, attributes=attrs)
+                    )
+                    t_id = res.get("id")
+                    created_entities += 1
+            if not h_id or not t_id:
+                # Skip if cannot resolve entities
+                continue
+
+            rel_norm = infer_relationship_type(rel)
+            rel_payload = RelationshipPayload(
+                source_id=h_id, target_id=t_id, relation_type=rel_norm, properties={}
+            )
+            res = await add_relationship(rel_payload)
+            if res.get("id"):
+                created_rels += 1
+
+        return {
+            "created_entities": created_entities,
+            "created_relationships": created_rels,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Import triples error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to import triples")
+
+
+@router.get("/knowledge/relationships")
+async def list_relationships(limit: int = 50, offset: int = 0) -> Dict[str, Any]:
+    try:
+        mgr = get_knowledge_manager()
+        if mgr is None:
+            raise HTTPException(
+                status_code=501, detail="Knowledge manager dependencies not available"
+            )
+        rels = []
+        store = getattr(mgr, "_relationships", {})
+        keys = list(store.keys())[offset : offset + limit]
+        for k in keys:
+            v = store[k]
+            rels.append(v)
+        return {"items": rels, "count": len(store)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"List relationships error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to list relationships")
+
+
+# Simple approval workflow (in-memory proposals)
+_proposals: List[Dict[str, Any]] = []
+_proposal_seq = 0
+
+
+class ProposalPayload(BaseModel):
+    kind: str  # 'entity' | 'relationship'
+    data: Dict[str, Any]
+
+
+@router.post("/knowledge/proposals")
+async def add_proposal(payload: ProposalPayload) -> Dict[str, Any]:
+    try:
+        global _proposal_seq
+        _proposal_seq += 1
+        item = {"id": _proposal_seq, "kind": payload.kind, "data": payload.data}
+        _proposals.append(item)
+        return {"id": _proposal_seq}
+    except Exception as e:
+        logger.error(f"Add proposal error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add proposal")
+
+
+@router.get("/knowledge/proposals")
+async def list_proposals() -> Dict[str, Any]:
+    return {"items": list(_proposals), "count": len(_proposals)}
+
+
+class DecisionPayload(BaseModel):
+    id: int
+
+
+@router.post("/knowledge/proposals/approve")
+async def approve_proposal(payload: DecisionPayload) -> Dict[str, Any]:
+    try:
+        idx = next((i for i, p in enumerate(_proposals) if p["id"] == payload.id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        prop = _proposals.pop(idx)
+        # Apply to knowledge store
+        if prop["kind"] == "entity":
+            ep = EntityPayload(**prop["data"])  # type: ignore[arg-type]
+            res = await add_entity(ep)
+            return {"approved": True, "created": res}
+        elif prop["kind"] == "relationship":
+            rp = RelationshipPayload(**prop["data"])  # type: ignore[arg-type]
+            res = await add_relationship(rp)
+            return {"approved": True, "created": res}
+        else:
+            return {"approved": False, "reason": "Unknown proposal kind"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Approve proposal error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to approve proposal")
+
+
+@router.post("/knowledge/proposals/reject")
+async def reject_proposal(payload: DecisionPayload) -> Dict[str, Any]:
+    try:
+        idx = next((i for i, p in enumerate(_proposals) if p["id"] == payload.id), None)
+        if idx is None:
+            raise HTTPException(status_code=404, detail="Proposal not found")
+        _proposals.pop(idx)
+        return {"rejected": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Reject proposal error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to reject proposal")
+
+
+@router.post("/knowledge/import_entities")
+async def import_entities(payload: EntitiesImportPayload) -> Dict[str, Any]:  # noqa: C901
+    """Batch import entities into the knowledge store using ontology labels when provided."""
+    try:
+        mgr = get_knowledge_manager()
+        if mgr is None:
+            raise HTTPException(
+                status_code=501, detail="Knowledge manager dependencies not available"
+            )
+
+        created = 0
+
+        def extract_entity_attributes(name: str, etype_label: str) -> Dict[str, Any]:
+            attrs: Dict[str, Any] = {}
+            text = name or ""
+            if etype_label == "DateEntity":
+                m = re.search(r"(\d{4}-\d{2}-\d{2}|\b\d{1,2}/\d{1,2}/\d{2,4}\b)", text)
+                if m:
+                    attrs["date_value"] = m.group(1)
+            elif etype_label == "MonetaryAmount":
+                m = re.search(r"(\$\s*\d[\d,]*\.?\d{0,2})", text)
+                if m:
+                    attrs["amount"] = m.group(1)
+                c = re.search(r"\b(USD|EUR|GBP|usd|eur|gbp)\b", text)
+                if c:
+                    attrs["currency"] = c.group(1).upper()
+            elif etype_label == "Statute":
+                m = re.search(
+                    r"(§\s*\d+[\w\.-]*|\b\d+\s*U\.S\.C\.\s*§?\s*\d+[\w\.-]*)", text
+                )
+                if m:
+                    attrs["citation"] = m.group(1)
+            elif etype_label == "Court":
+                attrs["court_name"] = text
+            elif etype_label == "Case":
+                m = re.search(r"(No\.?\s*[A-Za-z0-9\-]+)", text)
+                if m:
+                    attrs["case_number"] = m.group(1)
+            elif etype_label == "LocationEntity":
+                attrs["location_name"] = text
+            elif etype_label in ("Person", "Party"):
+                attrs["name"] = text
+            return attrs
+
+        for it in payload.items:
+            name = str(it.get("name", "")).strip()
+            if not name:
+                continue
+            etype = (it.get("entity_type") or "generic").strip()
+            label = (it.get("entity_type_label") or "").strip() or None
+            if label:
+                try:
+                    from agents.entities.ontology.ontology import (  # noqa: E402
+                        get_entity_type_by_label,
+                    )
+
+                    et = get_entity_type_by_label(label)
+                    if et is not None:
+                        etype = et.value.label
+                except Exception:
+                    pass
+            attrs = it.get("attributes") or {}
+            if payload.use_heuristics and label and not attrs:
+                # Use ontology label to guide attribute extraction
+                attrs = extract_entity_attributes(name, label)
+            res = await add_entity(
+                EntityPayload(name=name, entity_type=etype, attributes=attrs)
+            )
+            if res.get("id"):
+                created += 1
+        return {"created": created}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Import entities error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to import entities")

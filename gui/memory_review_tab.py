@@ -1,0 +1,157 @@
+import sys
+from typing import Any, Dict, List  # noqa: E402
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import PySide6.QtWidgets as _QtWidgets  # noqa: F401
+    import PySide6.QtCore as _QtCore        # noqa: F401
+    import PySide6.QtGui as _QtGui          # noqa: F401
+
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+try:
+    import requests  # noqa: E402
+except Exception:
+    requests = None
+
+
+API_BASE = "http://127.0.0.1:8000/api"
+
+
+class MemoryReviewTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.filtertext = ""
+        self.init_ui()
+        self.refresh()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+
+        controls = QHBoxLayout()
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.refresh)
+        self.approve_btn = QPushButton("Approve")
+        self.approve_btn.clicked.connect(self.approve_selected)
+        self.reject_btn = QPushButton("Reject")
+        self.reject_btn.clicked.connect(self.reject_selected)
+        controls.addWidget(self.refresh_btn)
+        controls.addWidget(self.approve_btn)
+        controls.addWidget(self.reject_btn)
+
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText(
+            "Filter by flag (e.g., sensitive) or status (pending)..."
+        )
+        self.filter_input.returnPressed.connect(self.refresh)
+        controls.addWidget(QLabel("Filter:"))
+        controls.addWidget(self.filter_input)
+
+        layout.addLayout(controls)
+
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["ID", "Namespace", "Key", "Status", "Flags", "Confidence", "Importance"]
+        )
+        layout.addWidget(self.table)
+
+        self.setLayout(layout)
+
+    def _get(self, path: str) -> Dict[str, Any]:
+        if requests is None:
+            raise RuntimeError("requests not available")
+        r = requests.get(API_BASE + path, timeout=5)
+        r.raise_for_status()
+        return r.json()
+
+    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        if requests is None:
+            raise RuntimeError("requests not available")
+        r = requests.post(API_BASE + path, json=payload, timeout=5)
+        r.raise_for_status()
+        return r.json()
+
+    def refresh(self):
+        try:
+            filt = (self.filter_input.text() or "").strip().lower()
+            data = self._get("/agents/memory/proposals")
+            items: List[Dict[str, Any]] = data.get("proposals", [])
+            if filt:
+                items = [
+                    p
+                    for p in items
+                    if filt in ",".join(p.get("flags", [])).lower()
+                    or filt in str(p.get("status", "")).lower()
+                ]
+            self.table.setRowCount(len(items))
+            for i, p in enumerate(items):
+                self.table.setItem(i, 0, QTableWidgetItem(str(p.get("id"))))
+                self.table.setItem(i, 1, QTableWidgetItem(p.get("namespace", "")))
+                self.table.setItem(i, 2, QTableWidgetItem(p.get("key", "")))
+                self.table.setItem(i, 3, QTableWidgetItem(p.get("status", "")))
+                self.table.setItem(
+                    i, 4, QTableWidgetItem(", ".join(p.get("flags", [])))
+                )
+                self.table.setItem(
+                    i, 5, QTableWidgetItem(str(p.get("confidence_score", "")))
+                )
+                self.table.setItem(
+                    i, 6, QTableWidgetItem(str(p.get("importance_score", "")))
+                )
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to load proposals: {e}")
+
+    def _selected_id(self) -> int:
+        row = self.table.currentRow()
+        if row < 0:
+            return 0
+        item = self.table.item(row, 0)
+        if not item:
+            return 0
+        try:
+            return int(item.text())
+        except Exception:
+            return 0
+
+    def approve_selected(self):
+        pid = self._selected_id()
+        if not pid:
+            QMessageBox.information(self, "Approve", "Select a proposal first")
+            return
+        try:
+            self._post("/agents/memory/proposals/approve", {"proposal_id": pid})
+            self.refresh()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Approve failed: {e}")
+
+    def reject_selected(self):
+        pid = self._selected_id()
+        if not pid:
+            QMessageBox.information(self, "Reject", "Select a proposal first")
+            return
+        try:
+            self._post("/agents/memory/proposals/reject", {"proposal_id": pid})
+            self.refresh()
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Reject failed: {e}")
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    w = MemoryReviewTab()
+    w.setWindowTitle("Memory Review")
+    w.resize(900, 500)
+    w.show()
+    sys.exit(app.exec())

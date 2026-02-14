@@ -1,0 +1,44 @@
+popular_models:
+  - title: "OpenAI GPT-5.2"
+    subtitle: "Hosted by Microsoft Foundry"
+    description: |
+      GPT-5.2 is engineered for enterprise agent scenarios—delivering structured, auditable outputs, reliable tool use, and governed integrations.
+    tags: ["Multipurpose", "Multilingual", "Multimodal"]
+    icon: "openai"
+    providers:
+      - name: "Microsoft Foundry"
+        models: ["gpt-5.2"]
+
+  - title: "Claude Opus 4.5"
+    subtitle: "Hosted by Microsoft Foundry"
+    description: |
+      Claude Opus 4.5 is Anthropic's most intelligent model, and an industry leader across coding, agents, computer use, and enterprise workflows.
+    tags: ["Coding", "Agentic", "Reasoning"]
+    icon: "foundry-anthropic"
+    providers:
+      - name: "Microsoft Foundry"
+        models: ["claude-opus-4-5"]
+
+  - title: "Phi-4"
+    subtitle: "Multiple hosting options"
+    description: |
+      Phi-4 is a state-of-the-art open model built upon a blend of synthetic datasets, data from filtered public domain websites, and acquired academic books and Q&A datasets. The goal of this approach was to ensure that small capable models were trained with data focused on high quality and advanced reasoning.
+    tags: ["Reasoning", "Understanding", "Low latency"]
+    icon: "ms"
+    providers:
+      - name: "Microsoft Foundry"
+        models: ["Phi-4"]
+      - name: "GitHub"
+        models: ["Phi-4"]
+      - name: "Ollama"
+        models: ["phi-4"]
+      - name: "Foundry Local"
+        models:
+          - Phi-4-mini-instruct-generic-cpu:4
+          - Phi-4-mini-instruct-generic-gpu:4
+      # Only on Linux where FL is not available, ONNX provider is used. For other platforms, this is ignored.
+      - name: "ONNX"
+        models:
+          - Phi-4-mini-cpu-int4-rtn-block-32-acc-level-4-onnx
+          - Phi-4-mini-gpu-int4-rtn-block-32
+

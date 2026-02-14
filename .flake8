@@ -1,0 +1,51 @@
+[flake8]
+# Flake8 configuration for Smart Document Organizer
+# Extends default flake8 with some project-specific adjustments
+
+max-line-length = 88
+max-complexity = 10
+
+# Ignore some common warnings that are acceptable in this project
+ignore =
+    # Line too long (black handles this)
+    E501,
+    # Whitespace before ':' (black handles this)
+    E203,
+    # Line break before binary operator (black handles this)
+    W503,
+    # Ambiguous variable names (common in math/science code)
+    E741,
+    # Do not assign to lambda expression
+    E731,
+
+# Exclude directories that shouldn't be linted
+exclude =
+    .git,
+    __pycache__,
+    .pytest_cache,
+    build,
+    dist,
+    *.egg-info,
+    .venv,
+    venv,
+    node_modules,
+    .qdrant,
+    data/,
+    mem_db/data/,
+    documents/,
+    logs/,
+    watch/,
+    .env
+
+# Per-file ignores
+per-file-ignores =
+    # Allow unused imports in __init__.py files (they re-export)
+    */__init__.py: F401
+    # Allow assert in tests
+    tests/*: S101
+
+# Naming conventions (for flake8-pep8-naming plugin if installed)
+# N803: argument name should be lowercase
+# N806: variable in function should be lowercase
+# These are often needed for compatibility with external APIs
+extend-ignore = N803,N806

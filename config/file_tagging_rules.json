@@ -1,0 +1,66 @@
+{
+  "rules": [
+    {
+      "id": "seed-delta9",
+      "tag": "domain:delta9",
+      "type": "keyword",
+      "pattern": "delta-9",
+      "case_sensitive": false,
+      "sources": ["name", "path", "content"]
+    },
+    {
+      "id": "seed-hhc",
+      "tag": "domain:hhc",
+      "type": "keyword",
+      "pattern": "hhc",
+      "case_sensitive": false,
+      "sources": ["name", "path", "content"]
+    },
+    {
+      "id": "seed-cbd",
+      "tag": "domain:cbd",
+      "type": "keyword",
+      "pattern": "cbd",
+      "case_sensitive": false,
+      "sources": ["name", "path", "content"]
+    },
+    {
+      "id": "seed-thc",
+      "tag": "domain:thc",
+      "type": "keyword",
+      "pattern": "thc",
+      "case_sensitive": false,
+      "sources": ["name", "path", "content"]
+    },
+    {
+      "id": "seed-lab-report",
+      "tag": "document:lab-report",
+      "type": "regex",
+      "pattern": "\\blab\\s+report\\b",
+      "flags": ["IGNORECASE"],
+      "sources": ["name", "path", "content"]
+    },
+    {
+      "id": "seed-case-number",
+      "tag": "legal:case-number",
+      "type": "regex",
+      "pattern": "\\b(?:case\\s*(?:no\\.?|number)?\\s*[:#-]?\\s*)?[A-Z]{1,5}-?\\d{2,6}(?:-\\d{1,6})?\\b",
+      "flags": ["IGNORECASE"],
+      "sources": ["name", "path", "content"]
+    },
+    {
+      "id": "seed-date",
+      "tag": "entity:date",
+      "type": "regex",
+      "pattern": "\\b(?:\\d{4}-\\d{2}-\\d{2}|\\d{1,2}/\\d{1,2}/\\d{2,4})\\b",
+      "sources": ["name", "path", "content"]
+    },
+    {
+      "id": "seed-person-name",
+      "tag": "entity:possible-name",
+      "type": "regex",
+      "pattern": "\\b[A-Z][a-z]{2,}\\s+[A-Z][a-z]{2,}\\b",
+      "sources": ["name", "content"]
+    }
+  ]
+}

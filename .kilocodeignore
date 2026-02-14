@@ -1,0 +1,16 @@
+# Secrets
+.env
+**/*.key
+**/*.pem
+**/*token*
+**/*secret*
+secrets/
+credentials/
+
+# Noise
+node_modules/
+dist/
+build/
+coverage/
+.qdrant/
+*.zip

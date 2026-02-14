@@ -1,0 +1,51 @@
+IMPORTANT: If the code you are referring to calls `onnxruntime.register_execution_provider_library()` or `onnxruntime_genai.register_execution_provider_library()` or `winml.register_execution_providers()`, then the code is using WinML, and you must do as in the following list when you write code to make sure it works properly with WinML (and you must ignore this list when no WinML code is involved in the referred code):
+- you must refer `sample_winml.py` located on `outputDir`.
+    - `sample_winml.py` has been copied to the `outputDir`. NEVER copy or modify `sample_winml.py` by yourself, because you have been provided correct one.
+    - IMPORTANT: NEVER search or copy `winml.py` or tweak to rename them!! You have been provided `sample_winml.py` which you must refer and complete the code.
+- you must run `import sample_winml` in your code.
+- you must call `sample_winml.register_execution_providers(ort=<using_ort>, ort_genai=<using_ort_genai>)` before your own code using onnxruntime/onnxruntime_genai, setting `ort` to True if your code uses `onnxruntime`, `ort_genai` to True if your code uses onnxruntime_genai; Directly use this function from the sample_winml module instead of calling it as a subprocess.
+- NEVER call `ort.register_execution_providers()` or `og.register_execution_providers()` in your own code as they are handled in the `sample_winml.register_execution_providers()` call;
+- For onnxruntime_genai code, no WinML-specific changes are required after calling `sample_winml.register_execution_providers`.
+- For onnxruntime code:
+    - NEVER use `ort.get_available_providers()` to check EP availability as it's inaccurate;
+    - NEVER pass `providers` argument to `ort.InferenceSession()`.
+    - ALWAYS use `add_ep_for_device` as follows to setup `ort.SessionOptions`, then pass `opts` to `ort.InferenceSession()`.
+```python
+def add_ep_for_device(session_options, ep_name, device_type, ep_options=None):
+    """Ensures correct EP device selection for WinML. NEVER modify this function.
+    ep_name is one of:
+        - "CPUExecutionProvider"
+        - "DmlExecutionProvider"
+        - "WebGpuExecutionProvider"
+        - "QNNExecutionProvider"
+        - "OpenVINOExecutionProvider"
+        - "VitisAIExecutionProvider"
+        - "NvTensorRTRTXExecutionProvider"
+
+    device_type is one of:
+        - ort.OrtHardwareDeviceType.CPU
+        - ort.OrtHardwareDeviceType.GPU
+        - ort.OrtHardwareDeviceType.NPU
+    """
+    ep_devices = ort.get_ep_devices()
+    for ep_device in ep_devices:
+        if ep_device.ep_name == ep_name and ep_device.device.type == device_type:
+            print(f"Adding {ep_name} for {device_type}")
+            session_options.add_provider_for_devices([ep_device], {} if ep_options is None else ep_options)
+            break
+
+opts = ort.SessionOptions()
+
+add_ep_for_device(opts, <ep_name_to_use>, <device_type_to_use>)
+assert opts.has_providers()
+session = ort.InferenceSession(onnx_model_path,
+    sess_options=opts
+)
+```
+
+- In the code you are referring to, you may see lines like the following. These lines were merely for demo purpose and are expected to be changed manually by user. In your own code instead, You MUST ignore the existing specific `add_ep_for_device` arguments, and pass provided parameters `executionProvider` and `deviceType`.
+```python
+ExecutionProvider="QNNExecutionProvider"
+...
+add_ep_for_device(session_options, ExecutionProvider, ort.OrtHardwareDeviceType.NPU)
+```

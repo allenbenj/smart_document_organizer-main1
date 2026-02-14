@@ -1,0 +1,96 @@
+[project]
+name = "smart-document-organizer"
+version = "0.1.0"
+description = "Legal AI Modular System for document organization and analysis"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[tool.black]
+line-length = 88
+target-version = ['py39']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+  | __pycache__
+  | \.pytest_cache
+  | \.vscode
+  | node_modules
+  | \.DS_Store
+  | \.env
+  | data/
+  | mem_db/data/
+  | documents/
+  | logs/
+  | watch/
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+known_first_party = ["smart_document_organizer", "agents", "routes", "core", "gui", "mem_db", "utils", "config", "diagnostics", "pipelines", "tools"]
+skip = ["__init__.py", ".env", "data/", "mem_db/data/", "documents/", "logs/", "watch/"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "PySide6.*",
+    "requests",
+    "pymupdf",
+    "python_docx",
+    "pandas",
+    "openpyxl",
+    "python_pptx",
+    "striprtf",
+    "markdown",
+    "sentence_transformers",
+    "transformers",
+    "scikit_learn",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-q --tb=short"
+
+# Naming conventions documentation
+# See AGENTS.md for full coding standards
+#
+# Module names: snake_case (e.g., document_processor.py)
+# Class names: PascalCase (e.g., DocumentProcessor)
+# Function names: snake_case (e.g., process_document)
+# Constants: UPPER_SNAKE_CASE (e.g., MAX_RETRIES)
+# Private methods: _leading_underscore (e.g., _internal_process)
+#
+# Routers: One resource per file under routes/, expose `router = APIRouter()`

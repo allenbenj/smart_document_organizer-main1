@@ -1,0 +1,11 @@
+spacy>=3.7
+gliner>=0.2
+# Optional: visualization/deps for knowledge graph features (only if needed)
+networkx>=3.2
+aiosqlite>=0.19
+python-igraph>=0.11 ; platform_system != "Windows"  # igraph binary availability varies
+python-louvain>=0.16
+plotly>=5.20
+pandas>=2.2
+scikit-learn>=1.4
+
