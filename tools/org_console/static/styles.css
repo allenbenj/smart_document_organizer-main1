@@ -1,0 +1,10 @@
+body{font-family:Arial;margin:14px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+.grid{display:grid;grid-template-columns:1.3fr 1fr;gap:10px}
+.panel{border:1px solid #ddd;border-radius:8px;padding:10px}
+small,.muted{color:#666}
+table{width:100%;border-collapse:collapse}
+th,td{border:1px solid #ddd;padding:5px;font-size:12px}
+tr:hover{background:#f7f7f7;cursor:pointer}
+input,textarea,select{width:100%}
+pre{white-space:pre-wrap;font-size:12px;max-height:200px;overflow:auto;background:#fafafa;padding:8px}

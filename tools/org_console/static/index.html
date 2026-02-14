@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Organization Console</title>
+  <link rel="stylesheet" href="/static/styles.css"/>
+</head>
+<body>
+  <h2>Organization Console</h2>
+  <div class='row'>
+    <button onclick='loadAll()'>Refresh All</button>
+    <button onclick='loadStartup()'>Refresh Startup Diagnostics</button>
+    <button onclick='gen()'>Generate Proposals</button>
+    <button onclick='clearScoped()'>Clear Scoped Proposals</button>
+    <button onclick='dryApply()'>Dry Apply (10)</button>
+    <button onclick='realApply()'>Real Apply (10)</button>
+    <label>Status <select id='status' onchange='loadProposals()'><option>proposed</option><option>approved</option><option>rejected</option><option>applied</option></select></label>
+    <label>Root scope (optional) <input id='rootprefix' placeholder='/mnt/e/.../Final Products' style='min-width:360px'/></label>
+    <label>Bulk approve conf >= <input id='minconf' value='0.8' style='width:80px'/></label>
+    <button onclick='bulkApprove()'>Bulk Approve</button>
+  </div>
+  <div class='row muted' id='stats'>stats loading...</div>
+  <div class='grid'>
+    <div class='panel'>
+      <h3>Proposals</h3>
+      <table><thead><tr><th>ID</th><th>Conf</th><th>From</th><th>Folder</th><th>Name</th><th>Src</th></tr></thead><tbody id='tb'></tbody></table>
+    </div>
+    <div class='panel'>
+      <h3>Selected</h3><div id='sel' class='muted'>none</div>
+      <label>Proposed folder</label><input id='folder'/>
+      <label>Proposed filename</label><input id='fname'/>
+      <label>Note</label><textarea id='note' rows='3'></textarea>
+      <div class='row'><button onclick='approve()'>Approve</button><button onclick='reject()'>Reject</button><button onclick='editApprove()'>Edit+Approve</button></div>
+      <pre id='out'></pre>
+    </div>
+  </div>
+  <div class='grid' style='margin-top:10px'>
+    <div class='panel'><h3>Recent Feedback</h3><pre id='feedback'></pre></div>
+    <div class='panel'><h3>Recent Actions</h3><pre id='actions'></pre></div>
+  </div>
+  <div class='grid' style='margin-top:10px'>
+    <div class='panel'><h3>Startup Steps (real state)</h3><pre id='startupSteps'></pre></div>
+    <div class='panel'><h3>Service + Environment Snapshot</h3><pre id='startupSvcEnv'></pre></div>
+  </div>
+  <div class='grid' style='margin-top:10px'>
+    <div class='panel'><h3>Admin Awareness Monitor</h3><pre id='startupAware'></pre></div>
+    <div class='panel'><h3>Service Latency Watch</h3><pre id='latencyWatch'></pre></div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -22,6 +22,7 @@ from app.contracts.workflow import (
 from services.dependencies import get_database_manager_strict_dep
 from services.file_index_service import FileIndexService
 from services.organization_service import OrganizationService
+from services.workflow_webhook_service import WorkflowWebhookService
 
 router = APIRouter()
 
@@ -219,6 +220,44 @@ def _persist_step_result(job: JobStatus, *, step_name: str, result: ResultSchema
     job.metadata["last_result_by_step"] = last_result
 
 
+def _deliver_workflow_callback(
+    db: Any,
+    *,
+    job: JobStatus,
+    event_type: str,
+    payload: Dict[str, Any],
+) -> None:
+    if not (job.webhook and job.webhook.enabled and job.webhook.url):
+        return
+
+    try:
+        svc = WorkflowWebhookService()
+        event_id = f"{job.job_id}:{event_type}:{uuid4().hex[:10]}"
+        result = svc.deliver(
+            url=str(job.webhook.url),
+            payload={
+                "event_id": event_id,
+                "event_type": event_type,
+                "job_id": job.job_id,
+                "workflow": job.workflow,
+                "status": job.status,
+                "current_step": job.current_step,
+                "payload": payload,
+                "emitted_at": datetime.utcnow().isoformat(),
+            },
+            event_id=event_id,
+        )
+        job.webhook.last_delivery_at = datetime.utcnow()
+        job.webhook.last_delivery_status = (
+            f"delivered:{result.get('status')}@attempt={result.get('attempt')}"
+            if result.get("ok")
+            else f"failed@attempt={result.get('attempt')}"
+        )
+        _save_job(db, job)
+    except Exception:
+        return
+
+
 def _execute_index_extract(db: Any, payload: Dict[str, Any]) -> ResultSchema:
     indexer = FileIndexService(db)
 
@@ -378,6 +417,12 @@ async def create_workflow_job(
         job.webhook.url = payload.webhook_url
 
     _save_job(db, job)
+    _deliver_workflow_callback(
+        db,
+        job=job,
+        event_type="job.created",
+        payload={"metadata": payload.metadata},
+    )
     body = JobStatusResponse(success=True, job=job)
     body_dict = body.model_dump(mode="json")
     _write_idempotent_response(db, scope, key, body_dict)
@@ -485,6 +530,12 @@ async def execute_workflow_step(
         _save_job(db, job)
         response = ResultResponse(success=False, job_id=job_id, step=step_name, result=result, errors=[str(e)])
         _write_idempotent_response(db, scope, key, response.model_dump(mode="json"))
+        _deliver_workflow_callback(
+            db,
+            job=job,
+            event_type="step.failed",
+            payload={"step": step_name, "errors": [str(e)]},
+        )
         return response
 
     _update_step_status(job, step_name, "complete")
@@ -494,6 +545,12 @@ async def execute_workflow_step(
 
     response = ResultResponse(success=True, job_id=job_id, step=step_name, result=result, errors=[])
     _write_idempotent_response(db, scope, key, response.model_dump(mode="json"))
+    _deliver_workflow_callback(
+        db,
+        job=job,
+        event_type="step.completed",
+        payload={"step": step_name, "summary": result.summary, "count": result.pagination.count},
+    )
     return response
 
 
