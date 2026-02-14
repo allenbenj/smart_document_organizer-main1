@@ -215,6 +215,24 @@ include_default_routers(
     record_router=_record_router,
 )
 
+# Web GUI migration Phase 1: Serve React frontend at /web (SPA mode)
+try:
+    import os
+    from fastapi.staticfiles import StaticFiles
+
+    dist_path = "frontend/dist"
+    if os.path.exists(dist_path):
+        app.mount("/web", StaticFiles(directory=dist_path, html=True), name="web_gui")
+        logger.info("Web GUI mounted at /web")
+        _record_router("web_gui", "/web", True)
+    else:
+        logger.warning(f"Web GUI dist not found: {dist_path}")
+        _record_router("web_gui", "/web", False, "dist missing")
+except Exception as e:
+    logger.warning(f"Failed to mount web GUI: {e}")
+    _record_router("web_gui", "/web", False, str(e))
+
+
 async def _taskmaster_scheduler_loop() -> None:
     from app.bootstrap.lifecycle import taskmaster_scheduler_loop  # noqa: E402
 
