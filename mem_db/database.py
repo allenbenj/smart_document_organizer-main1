@@ -685,6 +685,40 @@ class DatabaseManager:
                 )
             """)
 
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS workflow_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    workflow TEXT NOT NULL DEFAULT 'memory_first_v2',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    current_step TEXT NOT NULL DEFAULT 'sources',
+                    progress REAL NOT NULL DEFAULT 0,
+                    draft_state TEXT NOT NULL DEFAULT 'clean',
+                    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    idempotency_key TEXT,
+                    webhook_enabled INTEGER NOT NULL DEFAULT 0,
+                    webhook_url TEXT,
+                    webhook_last_delivery_status TEXT,
+                    webhook_last_delivery_at TIMESTAMP,
+                    stepper_json TEXT,
+                    pagination_json TEXT,
+                    undo_json TEXT,
+                    metadata_json TEXT
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS workflow_idempotency_keys (
+                    scope TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (scope, idempotency_key)
+                )
+            """)
+
             # Schema migrations (versioned, auditable)
             from mem_db.migrations.runner import apply_migrations  # noqa: E402
 
@@ -816,6 +850,12 @@ class DatabaseManager:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_org_actions_file_id ON organization_actions(file_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_workflow_jobs_status_updated ON workflow_jobs(status, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_workflow_jobs_idempotency_key ON workflow_jobs(idempotency_key)"
             )
 
             # Full-text search baseline over chunk titles/content
