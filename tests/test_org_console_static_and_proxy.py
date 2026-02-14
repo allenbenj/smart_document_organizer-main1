@@ -52,12 +52,12 @@ def test_org_console_proxy_error_shape(monkeypatch):
 
         base = f"http://127.0.0.1:{server.server_address[1]}"
         try:
-            urllib.request.urlopen(f"{base}/proxy/organization/stats", timeout=3)
+            urllib.request.urlopen(f"{base}/proxy/organization/stats?limit=5", timeout=3)
             assert False, "expected HTTPError"
         except urllib.error.HTTPError as e:
             payload = json.loads(e.read().decode("utf-8"))
             assert payload["error"] == "proxy_request_failed"
-            assert payload["target"].endswith("/api/organization/stats")
+            assert payload["target"].endswith("/api/organization/stats?limit=5")
 
 
 def test_org_console_static_404_and_path_traversal_guard(monkeypatch):
