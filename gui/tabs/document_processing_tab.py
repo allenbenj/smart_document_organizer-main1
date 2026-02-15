@@ -507,15 +507,11 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
 
     @staticmethod
     def _api_get(path: str, timeout: float = 30.0) -> dict:
-        r = requests.get(api_client.api_url(path), timeout=timeout)
-        r.raise_for_status()
-        return r.json() if r.text else {}
+        return api_client._make_request("GET", path, timeout=timeout)
 
     @staticmethod
     def _api_post(path: str, payload: dict, timeout: float = 120.0) -> dict:
-        r = requests.post(api_client.api_url(path), json=payload, timeout=timeout)
-        r.raise_for_status()
-        return r.json() if r.text else {}
+        return api_client._make_request("POST", path, timeout=timeout, json=payload)
 
     def org_pick_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Organization Folder", "")

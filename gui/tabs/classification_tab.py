@@ -102,27 +102,19 @@ class ClassificationTab(QWidget):
             QMessageBox.warning(self, "Warning", "Please enter text.")
             return
         try:
-            if not requests:
-                raise RuntimeError("requests not available")
             opts = {
                 "quality_gate": self.quality_gate.isChecked(),
                 "model_name": self.model_combo.currentText(),
             }
-            labels = [
+            labels_list = [
                 s.strip()
                 for s in (self.labels_edit.text() or "").split(",")
                 if s.strip()
             ]
-            if labels:
-                opts["labels"] = labels
-            r = requests.post(
-                f"{api_client.base_url}/api/agents/classify",
-                json={"text": t, "options": opts},
-                timeout=30,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            labels = r.json().get("data", {}).get("labels", [])
+            if labels_list:
+                opts["labels"] = labels_list
+            result = api_client.classify_text(t, opts)
+            labels = result.get("data", {}).get("labels", [])
             self.table.setRowCount(len(labels))
             for i, item in enumerate(labels):
                 self.table.setItem(i, 0, QTableWidgetItem(str(item.get("label", ""))))

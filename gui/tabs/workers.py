@@ -34,23 +34,8 @@ class UploadFileWorker(QThread):
                 return
             if not requests:
                 raise RuntimeError("requests not available")
-            mt, _ = mimetypes.guess_type(self.path)
-            with open(self.path, "rb") as f:
-                files = {
-                    "file": (
-                        os.path.basename(self.path),
-                        f,
-                        mt or "application/octet-stream",
-                    )
-                }
-                r = requests.post(
-                    f"{api_client.base_url}/api/agents/process-document",
-                    files=files,
-                    timeout=120,
-                )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            self.finished_ok.emit(r.json())
+            result = api_client.process_document(self.path)
+            self.finished_ok.emit(result)
         except Exception as e:
             self.finished_err.emit(str(e))
 
@@ -70,32 +55,15 @@ class UploadFolderWorker(QThread):
             if not requests:
                 raise RuntimeError("requests not available")
             # Collect all files in folder
-            files = []
+            file_paths = []
             for root, _, filenames in os.walk(self.path):
                 for filename in filenames:
                     filepath = os.path.join(root, filename)
-                    mt, _ = mimetypes.guess_type(filepath)
-                    with open(filepath, "rb") as f:
-                        files.append(
-                            (
-                                "files",
-                                (
-                                    os.path.relpath(filepath, self.path),
-                                    f.read(),
-                                    mt or "application/octet-stream",
-                                ),
-                            )
-                        )
-            if not files:
+                    file_paths.append(filepath)
+            if not file_paths:
                 raise RuntimeError("No files found in folder")
-            r = requests.post(
-                f"{api_client.base_url}/api/agents/process-documents",
-                files=files,
-                timeout=300,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            self.finished_ok.emit(r.json())
+            result = api_client.process_documents_batch(file_paths)
+            self.finished_ok.emit(result)
         except Exception as e:
             self.finished_err.emit(str(e))
 
@@ -115,31 +83,10 @@ class UploadManyFilesWorker(QThread):
                 return
             if not requests:
                 raise RuntimeError("requests not available")
-            files = []
-            for path in self.paths:
-                mt, _ = mimetypes.guess_type(path)
-                with open(path, "rb") as f:
-                    files.append(
-                        (
-                            "files",
-                            (
-                                os.path.basename(path),
-                                f.read(),
-                                mt or "application/octet-stream",
-                            ),
-                        )
-                    )
-            if not files:
+            if not self.paths:
                 raise RuntimeError("No files provided")
-            r = requests.post(
-                f"{api_client.base_url}/api/agents/process-documents",
-                files=files,
-                data={"options": json.dumps(self.options)} if self.options else None,
-                timeout=300,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            self.finished_ok.emit(r.json())
+            result = api_client.process_documents_batch(self.paths, self.options)
+            self.finished_ok.emit(result)
         except Exception as e:
             self.finished_err.emit(str(e))
 
@@ -158,14 +105,8 @@ class KGImportFromTextWorker(QThread):
                 return
             if not requests:
                 raise RuntimeError("requests not available")
-            r = requests.post(
-                f"{api_client.base_url}/api/knowledge/import-text",
-                json={"text": self.text},
-                timeout=120,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            self.finished_ok.emit(r.json())
+            result = api_client.import_text_to_knowledge(self.text)
+            self.finished_ok.emit(result)
         except Exception as e:
             self.finished_err.emit(str(e))
 
@@ -290,47 +231,18 @@ class SemanticAnalysisWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 # Upload the file to get content
-                mt, _ = mimetypes.guess_type(self.file_path)
-                with open(self.file_path, "rb") as f:
-                    files = {
-                        "file": (
-                            os.path.basename(self.file_path),
-                            f,
-                            mt or "application/octet-stream",
-                        )
-                    }
-                    r = requests.post(
-                        f"{api_client.base_url}/api/agents/process-document",
-                        files=files,
-                        timeout=120,
-                    )
-                if r.status_code != 200:
-                    raise RuntimeError(f"Process HTTP {r.status_code}: {r.text}")
-                content = (
-                    (r.json().get("data") or {})
-                    .get("processed_document", {})
-                    .get("content", "")
-                )
+                result = api_client.process_document(self.file_path)
+                content = result.get("content", "")
             if not content:
                 raise RuntimeError("No content to analyze")
             if self.isInterruptionRequested():
                 return
             # Call semantic endpoint
-            resp = requests.post(
-                f"{api_client.base_url}/api/agents/semantic",
-                json={
-                    "text": content,
-                    "options": {
-                        "analysis_type": self.analysis_type,
-                        "include_metadata": self.include_metadata,
-                        "deep_analysis": self.deep_analysis,
-                    },
-                },
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Semantic HTTP {resp.status_code}: {resp.text}")
-            body = resp.json()
+            body = api_client.analyze_semantic(content, {
+                "analysis_type": self.analysis_type,
+                "include_metadata": self.include_metadata,
+                "deep_analysis": self.deep_analysis,
+            })
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -361,46 +273,17 @@ class EntityExtractionWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 # Upload the file to get content
-                mt, _ = mimetypes.guess_type(self.file_path)
-                with open(self.file_path, "rb") as f:
-                    files = {
-                        "file": (
-                            os.path.basename(self.file_path),
-                            f,
-                            mt or "application/octet-stream",
-                        )
-                    }
-                    r = requests.post(
-                        f"{api_client.base_url}/api/agents/process-document",
-                        files=files,
-                        timeout=120,
-                    )
-                if r.status_code != 200:
-                    raise RuntimeError(f"Process HTTP {r.status_code}: {r.text}")
-                content = (
-                    (r.json().get("data") or {})
-                    .get("processed_document", {})
-                    .get("content", "")
-                )
+                result = api_client.process_document(self.file_path)
+                content = result.get("content", "")
             if not content:
                 raise RuntimeError("No content to analyze")
             if self.isInterruptionRequested():
                 return
             # Call entity extraction endpoint
-            resp = requests.post(
-                f"{api_client.base_url}/api/agents/entities",
-                json={
-                    "text": content,
-                    "options": {
-                        "extraction_type": self.extraction_type,
-                        **self.options,
-                    },
-                },
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Entities HTTP {resp.status_code}: {resp.text}")
-            body = resp.json()
+            body = api_client.extract_entities(content, {
+                "extraction_type": self.extraction_type,
+                **self.options,
+            })
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -431,46 +314,17 @@ class LegalReasoningWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 # Upload the file to get content
-                mt, _ = mimetypes.guess_type(self.file_path)
-                with open(self.file_path, "rb") as f:
-                    files = {
-                        "file": (
-                            os.path.basename(self.file_path),
-                            f,
-                            mt or "application/octet-stream",
-                        )
-                    }
-                    r = requests.post(
-                        f"{api_client.base_url}/api/agents/process-document",
-                        files=files,
-                        timeout=120,
-                    )
-                if r.status_code != 200:
-                    raise RuntimeError(f"Process HTTP {r.status_code}: {r.text}")
-                content = (
-                    (r.json().get("data") or {})
-                    .get("processed_document", {})
-                    .get("content", "")
-                )
+                result = api_client.process_document(self.file_path)
+                content = result.get("content", "")
             if not content:
                 raise RuntimeError("No content to analyze")
             if self.isInterruptionRequested():
                 return
             # Call legal reasoning endpoint
-            resp = requests.post(
-                f"{api_client.base_url}/api/agents/legal-reasoning",
-                json={
-                    "text": content,
-                    "options": {
-                        "reasoning_type": self.reasoning_type,
-                        **self.options,
-                    },
-                },
-                timeout=60,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Legal Reasoning HTTP {resp.status_code}: {resp.text}")
-            body = resp.json()
+            body = api_client.analyze_legal_reasoning(content, {
+                "reasoning_type": self.reasoning_type,
+                **self.options,
+            })
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -497,14 +351,7 @@ class EmbeddingWorker(QThread):
             if not requests:
                 raise RuntimeError("requests not available")
             # Call embedding endpoint
-            resp = requests.post(
-                f"{api_client.base_url}/api/agents/embeddings",
-                json={"text": self.text, "options": {"model": self.model_name, "operation": self.operation}},
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Embeddings HTTP {resp.status_code}: {resp.text}")
-            body = resp.json()
+            body = api_client.get_embeddings(self.text, {"model": self.model_name, "operation": self.operation})
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -534,40 +381,14 @@ class DocumentOrganizationWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 # Upload the file to get content
-                mt, _ = mimetypes.guess_type(self.file_path)
-                with open(self.file_path, "rb") as f:
-                    files = {
-                        "file": (
-                            os.path.basename(self.file_path),
-                            f,
-                            mt or "application/octet-stream",
-                        )
-                    }
-                    r = requests.post(
-                        f"{api_client.base_url}/api/agents/process-document",
-                        files=files,
-                        timeout=120,
-                    )
-                if r.status_code != 200:
-                    raise RuntimeError(f"Process HTTP {r.status_code}: {r.text}")
-                content = (
-                    (r.json().get("data") or {})
-                    .get("processed_document", {})
-                    .get("content", "")
-                )
+                result = api_client.process_document(self.file_path)
+                content = result.get("content", "")
             if not content:
                 raise RuntimeError("No content to organize")
             if self.isInterruptionRequested():
                 return
             # Call document organization endpoint
-            resp = requests.post(
-                f"{api_client.base_url}/api/agents/organize",
-                json={"text": content, "options": {}},
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Organize HTTP {resp.status_code}: {resp.text}")
-            body = resp.json()
+            body = api_client.organize_document(content)
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -596,40 +417,14 @@ class VectorIndexWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 # Upload the file to get content
-                mt, _ = mimetypes.guess_type(self.file_path)
-                with open(self.file_path, "rb") as f:
-                    files = {
-                        "file": (
-                            os.path.basename(self.file_path),
-                            f,
-                            mt or "application/octet-stream",
-                        )
-                    }
-                    r = requests.post(
-                        f"{api_client.base_url}/api/agents/process-document",
-                        files=files,
-                        timeout=120,
-                    )
-                if r.status_code != 200:
-                    raise RuntimeError(f"Process HTTP {r.status_code}: {r.text}")
-                content = (
-                    (r.json().get("data") or {})
-                    .get("processed_document", {})
-                    .get("content", "")
-                )
+                result = api_client.process_document(self.file_path)
+                content = result.get("content", "")
             if not content:
                 raise RuntimeError("No content to index")
             if self.isInterruptionRequested():
                 return
             # Call vector index endpoint
-            resp = requests.post(
-                f"{api_client.base_url}/api/vector/index",
-                json={"text": content, "options": {}},
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Vector Index HTTP {resp.status_code}: {resp.text}")
-            body = resp.json()
+            body = api_client.index_to_vector(content)
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -675,17 +470,7 @@ class PipelineRunnerWorker(QThread):
                 return
             if not requests:
                 raise RuntimeError("requests not available")
-            payload = {
-                "steps": self.preset.get("steps", []),
-                "context": (
-                    {"path": self.path} if self.path else self.preset.get("context", {})
-                ),
-            }
-            r = requests.post(
-                f"{api_client.base_url}/api/pipeline/run", json=payload, timeout=120
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            self.finished_ok.emit(r.json())
+            result = api_client.run_pipeline(self.preset, self.path)
+            self.finished_ok.emit(result)
         except Exception as e:
             self.finished_err.emit(str(e))

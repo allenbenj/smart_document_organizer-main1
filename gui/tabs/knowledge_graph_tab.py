@@ -173,18 +173,14 @@ class KnowledgeGraphTab(QWidget):
         self.kg_import_btn.clicked.connect(self.kg_import_triples)
         # Load ontology types for KG
         try:
-            if requests:
-                r = requests.get(
-                    f"{api_client.base_url}/api/ontology/entities", timeout=5
-                )
-                if r.status_code == 200:
-                    items = r.json().get("items", [])
-                    labels = [
-                        it.get("label", "").strip() for it in items if it.get("label")
-                    ]
-                    if labels:
-                        self.kg_type_combo.clear()
-                        self.kg_type_combo.addItems(labels)
+            result = api_client.get_ontology_entities()
+            items = result.get("items", [])
+            labels = [
+                it.get("label", "").strip() for it in items if it.get("label")
+            ]
+            if labels:
+                self.kg_type_combo.clear()
+                self.kg_type_combo.addItems(labels)
         except Exception:
             pass
         # Hook proposal buttons
@@ -203,16 +199,7 @@ class KnowledgeGraphTab(QWidget):
             QMessageBox.warning(self, "Warning", "Please enter an entity name.")
             return
         try:
-            if not requests:
-                raise RuntimeError("requests not available")
-            resp = requests.post(
-                f"{api_client.base_url}/api/knowledge/entities",
-                json={"name": name, "entity_type": self.kg_type_combo.currentText()},
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
-            data = resp.json()
+            data = api_client.add_knowledge_entity(name, self.kg_type_combo.currentText())
             self.graph_results.append(f"Added entity: {name} (id={data.get('id')})")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to add entity: {e}")
@@ -220,14 +207,7 @@ class KnowledgeGraphTab(QWidget):
     def find_relations(self):
         """List entities via API (temporary action)."""
         try:
-            if not requests:
-                raise RuntimeError("requests not available")
-            resp = requests.get(
-                f"{api_client.base_url}/api/knowledge/entities", timeout=10
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
-            data = resp.json()
+            data = api_client.get_knowledge_entities()
             items = data.get("items", [])
             self.graph_results.append(f"Entities ({len(items)}):")
             for it in items[:50]:
@@ -297,16 +277,8 @@ class KnowledgeGraphTab(QWidget):
             )
             return
         try:
-            if not requests:
-                raise RuntimeError("requests not available")
-            r = requests.post(
-                f"{api_client.base_url}/api/agents/legal",
-                json={"text": text, "options": {"analysis_type": "KG", "timeout": 6.0}},
-                timeout=12,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            data = r.json().get("data", {})
+            result = api_client.analyze_legal_kg(text, {"timeout": 6.0})
+            data = result.get("data", {})
             triples = (data.get("knowledge_graph") or {}).get("triples", [])
             # cache last triples for import
             self._last_triples = list(triples)
@@ -340,14 +312,12 @@ class KnowledgeGraphTab(QWidget):
                 "create_missing": True,
                 "use_heuristics": bool(self.kg_heuristics_cb.isChecked()),
             }
-            r = requests.post(
-                f"{api_client.base_url}/api/knowledge/import_triples",
-                json=payload,
-                timeout=15,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            res = r.json()
+            res = api_client.import_triples(triples, {
+                "entity_type": "generic",
+                "entity_type_label": default_label,
+                "create_missing": True,
+                "use_heuristics": bool(self.kg_heuristics_cb.isChecked()),
+            })
             ce = res.get("created_entities", 0)
             cr = res.get("created_relationships", 0)
             QMessageBox.information(
@@ -358,14 +328,8 @@ class KnowledgeGraphTab(QWidget):
 
     def load_proposals(self):
         try:
-            if not requests:
-                raise RuntimeError("requests not available")
-            r = requests.get(
-                f"{api_client.base_url}/api/knowledge/proposals", timeout=10
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            items = r.json().get("items", [])
+            result = api_client.get_knowledge_proposals()
+            items = result.get("items", [])
             self.proposals_table.setRowCount(len(items))
             for i, it in enumerate(items):
                 self.proposals_table.setItem(
@@ -397,13 +361,7 @@ class KnowledgeGraphTab(QWidget):
             if pid is None:
                 QMessageBox.information(self, "Info", "Select a proposal to approve.")
                 return
-            r = requests.post(
-                f"{api_client.base_url}/api/knowledge/proposals/approve",
-                json={"id": pid},
-                timeout=10,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
+            api_client.approve_proposal(pid)
             QMessageBox.information(
                 self, "Approved", "Proposal approved and added to knowledge."
             )
@@ -417,13 +375,7 @@ class KnowledgeGraphTab(QWidget):
             if pid is None:
                 QMessageBox.information(self, "Info", "Select a proposal to reject.")
                 return
-            r = requests.post(
-                f"{api_client.base_url}/api/knowledge/proposals/reject",
-                json={"id": pid},
-                timeout=10,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
+            api_client.reject_proposal(pid)
             QMessageBox.information(self, "Rejected", "Proposal rejected.")
             self.load_proposals()
         except Exception as e:

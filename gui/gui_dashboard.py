@@ -170,6 +170,10 @@ class LegalAIDashboard(QMainWindow):
         self.health_strip = SystemHealthStrip()
         main_layout.addWidget(self.health_strip)
 
+        workflow_label = QLabel("Suggested Workflow:\n1. Ingest documents in 'Document Organization' tab.\n2. Analyze in 'Semantic Analysis', 'Entity Extraction', 'Legal Reasoning' tabs.\n3. Organize/Apply in 'Classification', 'Pipelines' tabs.")
+        workflow_label.setWordWrap(True)
+        main_layout.addWidget(workflow_label)
+
         splitter = QSplitter(Qt.Orientation.Vertical)
         main_layout.addWidget(splitter)
 
@@ -184,6 +188,7 @@ class LegalAIDashboard(QMainWindow):
         splitter.setSizes([100, 560, 180])
 
         tabs = [
+            ("Document Organization", lambda: DocumentOrganizationTab()),
             (
                 "Semantic Analysis",
                 lambda: SemanticAnalysisTab(asyncio_thread=self.asyncio_thread),
@@ -194,9 +199,8 @@ class LegalAIDashboard(QMainWindow):
             ("Knowledge Graph", lambda: KnowledgeGraphTab(self.asyncio_thread)),
             ("Vector Search", lambda: VectorSearchTab()),
             ("Classification", lambda: ClassificationTab()),
-            ("Document Organization", lambda: DocumentOrganizationTab()),
-            ("Expert Prompts", lambda: ExpertPromptsTab()),
             ("Pipelines", lambda: PipelinesTab()),
+            ("Expert Prompts", lambda: ExpertPromptsTab()),
             ("Contradictions", lambda: ContradictionsTab()),
             ("Violations", lambda: ViolationsTab()),
             ("Memory Review", lambda: MemoryReviewTab()),

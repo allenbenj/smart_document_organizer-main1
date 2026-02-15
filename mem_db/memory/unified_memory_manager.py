@@ -203,8 +203,12 @@ class UnifiedMemoryManager(MemoryProvider):
         );
         """
         async with self._get_db_connection() as db:
-            await db.executescript(schema)
-            await db.commit()
+            if self._async_db:
+                await db.executescript(schema)
+                await db.commit()
+            else:
+                db.executescript(schema)
+                db.commit()
         logger.debug("SQLite schema initialized for unified memory")
 
     async def _init_chromadb(self) -> None:

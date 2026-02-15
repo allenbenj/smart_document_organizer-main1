@@ -62,6 +62,11 @@ def print_install_help(py_exe: str) -> None:
 def check_backend_health(
     url: str = "http://127.0.0.1:8000/api/health", retries: int = 30, delay: float = 0.5
 ) -> bool:
+    """Return True once API responds with HTTP 200.
+
+    For local/dev startup we treat both `healthy` and `degraded` as boot-success,
+    so strict optional-service gates do not block the launcher UX.
+    """
     try:
         import urllib.request  # noqa: E402
 
@@ -69,9 +74,7 @@ def check_backend_health(
             try:
                 with urllib.request.urlopen(url, timeout=1.5) as resp:
                     if resp.status == 200:
-                        data = json.loads(resp.read().decode("utf-8"))
-                        if data.get("status") == "healthy":
-                            return True
+                        return True
             except Exception:
                 pass
             time.sleep(delay)
@@ -139,9 +142,16 @@ def main() -> int:
         return 1
 
     env = os.environ.copy()
+    # Default to permissive local-dev startup unless the caller explicitly sets values.
+    env.setdefault("STRICT_PRODUCTION_STARTUP", "0")
+    env.setdefault("API_KEY", "")
+    env.setdefault("RATE_LIMIT_REQUESTS_PER_MINUTE", "0")
+    env.setdefault("REQUIRED_PRODUCTION_AGENTS", "")
+
     pyside_available = importlib.util.find_spec("PySide6") is not None
 
     print("[+] Starting backend API (uvicorn Start:app) ...")
+    print("[i] Launcher defaults: permissive local mode (strict startup off, API key off, rate limit off)")
     backend = subprocess.Popen(
         [py, "-m", "uvicorn", "Start:app", "--host", "127.0.0.1", "--port", "8000"],
         cwd=str(project_root),

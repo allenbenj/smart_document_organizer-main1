@@ -217,9 +217,14 @@ try:
     from fastapi.staticfiles import StaticFiles
 
     dist_path = "frontend/dist"
+    assets_path = os.path.join(dist_path, "assets")
     if os.path.exists(dist_path):
+        # SPA entrypoint
         app.mount("/web", StaticFiles(directory=dist_path, html=True), name="web_gui")
-        logger.info("Web GUI mounted at /web")
+        # Vite build currently emits absolute /assets/* paths; serve them explicitly.
+        if os.path.exists(assets_path):
+            app.mount("/assets", StaticFiles(directory=assets_path), name="web_gui_assets")
+        logger.info("Web GUI mounted at /web (with /assets)")
         _record_router("web_gui", "/web", True)
     else:
         logger.warning(f"Web GUI dist not found: {dist_path}")

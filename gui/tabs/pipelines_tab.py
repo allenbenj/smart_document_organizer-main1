@@ -168,12 +168,8 @@ class PipelinesTab(QWidget):
 
     def load_presets(self):
         try:
-            if not requests:
-                raise RuntimeError("requests not available")
-            r = requests.get(f"{api_client.base_url}/api/pipeline/presets", timeout=10)
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            data = r.json().get("items", [])
+            result = api_client.get_pipeline_presets()
+            data = result.get("items", [])
             self.presets = data
             self.preset_combo.clear()
             for p in data:

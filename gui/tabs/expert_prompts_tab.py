@@ -106,19 +106,7 @@ class ExpertPromptsTab(QWidget):
             or "Analyze the provided material and prepare a research memo."
         )
         try:
-            if not requests:
-                raise RuntimeError("requests not available")
-            r = requests.post(
-                f"{api_client.base_url}/api/experts/prompt",
-                json={
-                    "agent_name": agent_name,
-                    "task_type": task_type,
-                    "task_data": task_data,
-                },
-                timeout=15,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}: {r.text}")
-            self.prompt_view.setPlainText(r.json().get("prompt", ""))
+            result = api_client.get_expert_prompt(agent_name, task_type, task_data)
+            self.prompt_view.setPlainText(result.get("prompt", ""))
         except Exception as e:
             QMessageBox.critical(self, "Expert Prompt Error", str(e))

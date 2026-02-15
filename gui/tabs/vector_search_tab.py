@@ -83,20 +83,17 @@ class VectorSearchTab(QWidget):
 
     def _refresh_status_banner(self):
         try:
-            if requests is not None:
-                r = requests.get(f"{api_client.base_url}/api/vector", timeout=3)
-                if r.status_code == 200:
-                    data = r.json()
-                    if not data.get("available"):
-                        deg = data.get("degradation") or {}
-                        lost = (
-                            ", ".join(deg.get("lost_features", [])) or "vector features"
-                        )
-                        self.status_banner.setText(
-                            f"Vector Store Unavailable — Lost: {lost} — See Memory menu for guidance"
-                        )
-                        self.status_banner.show()
-                        return
+            data = api_client.get_vector_status()
+            if not data.get("available"):
+                deg = data.get("degradation") or {}
+                lost = (
+                    ", ".join(deg.get("lost_features", [])) or "vector features"
+                )
+                self.status_banner.setText(
+                    f"Vector Store Unavailable — Lost: {lost} — See Memory menu for guidance"
+                )
+                self.status_banner.show()
+                return
         except Exception:
             pass
         self.status_banner.setText("")
@@ -113,29 +110,12 @@ class VectorSearchTab(QWidget):
             QMessageBox.warning(self, "Warning", "Please enter query text.")
             return
         try:
-            if not requests:
-                raise RuntimeError("requests not available")
-            r = requests.post(
-                f"{api_client.base_url}/api/agents/embed",
-                json={
-                    "texts": [text],
-                    "options": {"model": self.search_model_combo.currentText()},
-                },
-                timeout=15,
-            )
-            if r.status_code != 200:
-                raise RuntimeError(f"Embed HTTP {r.status_code}: {r.text}")
-            emb = r.json().get("data", {}).get("embeddings", [])
+            embed_result = api_client.embed_texts([text], {"model": self.search_model_combo.currentText()})
+            emb = embed_result.get("data", {}).get("embeddings", [])
             if not emb:
                 raise RuntimeError("No embedding returned")
-            r2 = requests.post(
-                f"{api_client.base_url}/api/vector/search",
-                json={"embedding": emb[0], "top_k": 5},
-                timeout=15,
-            )
-            if r2.status_code != 200:
-                raise RuntimeError(f"Search HTTP {r2.status_code}: {r2.text}")
-            data = r2.json().get("results", [])
+            search_result = api_client.vector_search(emb[0], top_k=5)
+            data = search_result.get("results", [])
             self.results_table.setRowCount(len(data))
             for i, item in enumerate(data):
                 self.results_table.setItem(
