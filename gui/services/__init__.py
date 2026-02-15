@@ -34,7 +34,7 @@ class ApiClient:
             retry_strategy = Retry(
                 total=max_retries,
                 status_forcelist=[429, 500, 502, 503, 504],  # Retry on these status codes
-                method_whitelist=["HEAD", "GET", "OPTIONS", "POST"],  # Methods to retry
+                allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],  # urllib3 v2+
                 backoff_factor=1,  # Exponential backoff: 1, 2, 4 seconds
                 raise_on_status=False  # Don't raise immediately on bad status
             )
