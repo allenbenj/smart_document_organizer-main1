@@ -155,9 +155,9 @@ class ApiClient:
         data = {"text": text, "options": options or {}}
         return self._make_request("POST", "/api/analysis/semantic", timeout=30.0, json=data)
 
-    def extract_entities(self, text: str, entity_types: Optional[list] = None) -> Dict[str, Any]:
+    def extract_entities(self, text: str, entity_types: Optional[list] = None, extraction_type: str = "ner") -> Dict[str, Any]:
         """Extract entities from text."""
-        data = {"text": text, "options": {}}
+        data = {"text": text, "options": {}, "extraction_type": extraction_type}
         if entity_types:
             data["options"]["entity_types"] = entity_types
         return self._make_request("POST", "/api/extraction/run", timeout=30.0, json=data)

@@ -4,6 +4,7 @@ Integrates with Agent Registry and existing orchestrators.
 """
 
 import inspect
+import os
 from dataclasses import dataclass
 from enum import Enum  # noqa: E402
 from typing import Any, Dict, List, Optional, Type  # noqa: E402
@@ -21,81 +22,104 @@ from .agent_registry import AgentCapability, AgentRegistry  # noqa: E402
 # Import base components
 from .base_agent import AgentStatus, BaseAgent, TaskPriority  # noqa: E402
 
-# Import existing production agents for integration
-try:
-    from ..analysis.semantic_analyzer import (  # noqa: E402
-        LegalSemanticAnalyzer,
-        create_legal_semantic_analyzer,
-    )
+# Import existing production agents for integration.
+# To keep startup fast and robust, eager heavy imports are disabled by default.
+_EAGER_AGENT_IMPORTS = os.getenv("EAGER_AGENT_IMPORTS", "0").strip().lower() in {"1", "true", "yes", "on"}
 
-    SEMANTIC_ANALYZER_AVAILABLE = True
-except ImportError:
-    LegalSemanticAnalyzer = None
-    create_legal_semantic_analyzer = None
-    SEMANTIC_ANALYZER_AVAILABLE = False
+LegalSemanticAnalyzer = None
+create_legal_semantic_analyzer = None
+SEMANTIC_ANALYZER_AVAILABLE = False
 
-try:
-    from ..legal.precedent_analyzer import (  # noqa: E402
-        LegalPrecedentAnalyzer,
-        create_legal_precedent_analyzer,
-    )
+LegalPrecedentAnalyzer = None
+create_legal_precedent_analyzer = None
+PRECEDENT_ANALYZER_AVAILABLE = False
 
-    PRECEDENT_ANALYZER_AVAILABLE = True
-except ImportError:
-    LegalPrecedentAnalyzer = None
-    create_legal_precedent_analyzer = None
-    PRECEDENT_ANALYZER_AVAILABLE = False
+LegalEntityExtractor = None
+create_legal_entity_extractor = None
+ENTITY_EXTRACTOR_AVAILABLE = False
 
-try:
-    from ..extractors.entity_extractor import (  # noqa: E402
-        LegalEntityExtractor,
-        create_legal_entity_extractor,
-    )
+UnifiedEmbeddingAgent = None
+EMBEDDING_AGENT_AVAILABLE = False
 
-    ENTITY_EXTRACTOR_AVAILABLE = True
-except ImportError:
-    LegalEntityExtractor = None
-    create_legal_entity_extractor = None
-    ENTITY_EXTRACTOR_AVAILABLE = False
+CITATION_ANALYZER_AVAILABLE = False
+COMPLIANCE_CHECKER_AVAILABLE = False
+CONTRACT_ANALYZER_AVAILABLE = False
 
-try:
-    from ..embedding.unified_embedding_agent import UnifiedEmbeddingAgent  # noqa: E402
+if _EAGER_AGENT_IMPORTS:
+    try:
+        from agents.analysis.semantic_analyzer import (  # noqa: E402
+            LegalSemanticAnalyzer,
+            create_legal_semantic_analyzer,
+        )
 
-    EMBEDDING_AGENT_AVAILABLE = True
-except ImportError:
-    UnifiedEmbeddingAgent = None
-    EMBEDDING_AGENT_AVAILABLE = False
+        SEMANTIC_ANALYZER_AVAILABLE = True
+    except Exception:
+        LegalSemanticAnalyzer = None
+        create_legal_semantic_analyzer = None
+        SEMANTIC_ANALYZER_AVAILABLE = False
 
-# Optional analyzers (stubs available)
-try:
-    from ..legal.citation_analyzer import (  # type: ignore  # noqa: E402, F401
-        CitationAnalyzer,
-        create_citation_analyzer,
-    )
+    try:
+        from agents.legal.precedent_analyzer import (  # noqa: E402
+            LegalPrecedentAnalyzer,
+            create_legal_precedent_analyzer,
+        )
 
-    CITATION_ANALYZER_AVAILABLE = True
-except ImportError:
-    CITATION_ANALYZER_AVAILABLE = False
+        PRECEDENT_ANALYZER_AVAILABLE = True
+    except Exception:
+        LegalPrecedentAnalyzer = None
+        create_legal_precedent_analyzer = None
+        PRECEDENT_ANALYZER_AVAILABLE = False
 
-try:
-    from ..legal.compliance_checker import (  # type: ignore  # noqa: E402, F401
-        ComplianceChecker,
-        create_compliance_checker,
-    )
+    try:
+        from agents.extractors.entity_extractor import (  # noqa: E402
+            LegalEntityExtractor,
+            create_legal_entity_extractor,
+        )
 
-    COMPLIANCE_CHECKER_AVAILABLE = True
-except ImportError:
-    COMPLIANCE_CHECKER_AVAILABLE = False
+        ENTITY_EXTRACTOR_AVAILABLE = True
+    except Exception:
+        LegalEntityExtractor = None
+        create_legal_entity_extractor = None
+        ENTITY_EXTRACTOR_AVAILABLE = False
 
-try:
-    from ..legal.contract_analyzer import (  # type: ignore  # noqa: E402, F401
-        ContractAnalyzer,
-        create_contract_analyzer,
-    )
+    try:
+        from agents.embedding.unified_embedding_agent import UnifiedEmbeddingAgent  # noqa: E402
 
-    CONTRACT_ANALYZER_AVAILABLE = True
-except ImportError:
-    CONTRACT_ANALYZER_AVAILABLE = False
+        EMBEDDING_AGENT_AVAILABLE = True
+    except Exception:
+        UnifiedEmbeddingAgent = None
+        EMBEDDING_AGENT_AVAILABLE = False
+
+    # Optional analyzers (stubs available)
+    try:
+        from agents.legal.citation_analyzer import (  # type: ignore  # noqa: E402, F401
+            CitationAnalyzer,
+            create_citation_analyzer,
+        )
+
+        CITATION_ANALYZER_AVAILABLE = True
+    except Exception:
+        CITATION_ANALYZER_AVAILABLE = False
+
+    try:
+        from agents.legal.compliance_checker import (  # type: ignore  # noqa: E402, F401
+            ComplianceChecker,
+            create_compliance_checker,
+        )
+
+        COMPLIANCE_CHECKER_AVAILABLE = True
+    except Exception:
+        COMPLIANCE_CHECKER_AVAILABLE = False
+
+    try:
+        from agents.legal.contract_analyzer import (  # type: ignore  # noqa: E402, F401
+            ContractAnalyzer,
+            create_contract_analyzer,
+        )
+
+        CONTRACT_ANALYZER_AVAILABLE = True
+    except Exception:
+        CONTRACT_ANALYZER_AVAILABLE = False
 
 # Initialize logger
 factory_logger = get_detailed_logger("EnhancedAgentFactory", LogCategory.AGENT)

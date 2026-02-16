@@ -21,14 +21,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QWidget,
 )
 
-try:
-    import requests  # noqa: E402
-except Exception:
-    requests = None
-
-
-API_BASE = "http://127.0.0.1:8000/api"
-
+from gui.services import api_client
 
 class MemoryReviewTab(QWidget):
     def __init__(self, parent=None):
@@ -69,24 +62,10 @@ class MemoryReviewTab(QWidget):
 
         self.setLayout(layout)
 
-    def _get(self, path: str) -> Dict[str, Any]:
-        if requests is None:
-            raise RuntimeError("requests not available")
-        r = requests.get(API_BASE + path, timeout=5)
-        r.raise_for_status()
-        return r.json()
-
-    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        if requests is None:
-            raise RuntimeError("requests not available")
-        r = requests.post(API_BASE + path, json=payload, timeout=5)
-        r.raise_for_status()
-        return r.json()
-
     def refresh(self):
         try:
             filt = (self.filter_input.text() or "").strip().lower()
-            data = self._get("/agents/memory/proposals")
+            data = api_client._make_request("GET", "/api/agents/memory/proposals", params={"limit": 50})
             items: List[Dict[str, Any]] = data.get("proposals", [])
             if filt:
                 items = [
@@ -131,7 +110,7 @@ class MemoryReviewTab(QWidget):
             QMessageBox.information(self, "Approve", "Select a proposal first")
             return
         try:
-            self._post("/agents/memory/proposals/approve", {"proposal_id": pid})
+            api_client._make_request("POST", "/api/agents/memory/proposals/approve", json={"proposal_id": pid})
             self.refresh()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Approve failed: {e}")
@@ -142,7 +121,7 @@ class MemoryReviewTab(QWidget):
             QMessageBox.information(self, "Reject", "Select a proposal first")
             return
         try:
-            self._post("/agents/memory/proposals/reject", {"proposal_id": pid})
+            api_client._make_request("POST", "/api/agents/memory/proposals/reject", json={"proposal_id": pid})
             self.refresh()
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Reject failed: {e}")

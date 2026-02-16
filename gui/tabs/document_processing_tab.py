@@ -1,23 +1,35 @@
 """
-Document Processing Tab - GUI component for document processing operations
+Document Processing Tab - Content extraction and preparation pipeline
 
-This tab provides the interface for processing documents using
-the legal AI agents.
+This tab provides the centralized interface for uploading, extracting, and
+preparing document content. It serves as the second step in the document
+management pipeline, processing raw files into structured data that all
+other tabs can leverage.
+
+Key Features:
+- File upload (drag-drop, browse)
+- Content extraction from multiple formats
+- Metadata extraction
+- Content analysis
+- Summary generation
+- Vector indexing for search
+- Export processed results
 """
 
+import json
 import os
-import re
-from typing import Any, Optional
+from typing import Any
 
-import requests
-
-from ..services import api_client
+try:
+    import requests
+except ImportError:
+    requests = None  # type: ignore
 
 # Runtime imports with fallback
 PYSIDE6_AVAILABLE = False
 
 try:
-    from PySide6.QtWidgets import (  # noqa: E402
+    from PySide6.QtWidgets import (
         QWidget,
         QVBoxLayout,
         QHBoxLayout,
@@ -32,16 +44,12 @@ try:
         QCheckBox,
         QListWidget,
         QListWidgetItem,
-        QTextEdit,
-        QLineEdit,
-        QTableWidget,
-        QTableWidgetItem,
     )
-    from PySide6.QtCore import Qt, Signal, QThread  # noqa: E402
-    from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent, QPalette, QColor  # noqa: E402
+    from PySide6.QtCore import Qt, Signal, QThread
+    from PySide6.QtGui import QFont, QDragEnterEvent, QDropEvent
     PYSIDE6_AVAILABLE = True
 except ImportError:
-    # Runtime fallback - use Any to avoid type errors
+    # Fallback types
     QWidget = Any  # type: ignore[misc,assignment]
     QVBoxLayout = Any  # type: ignore[misc,assignment]
     QHBoxLayout = Any  # type: ignore[misc,assignment]
@@ -56,27 +64,36 @@ except ImportError:
     QCheckBox = Any  # type: ignore[misc,assignment]
     QListWidget = Any  # type: ignore[misc,assignment]
     QListWidgetItem = Any  # type: ignore[misc,assignment]
-    QTextEdit = Any  # type: ignore[misc,assignment]
-    QLineEdit = Any  # type: ignore[misc,assignment]
-    QTableWidget = Any  # type: ignore[misc,assignment]
-    QTableWidgetItem = Any  # type: ignore[misc,assignment]
     Qt = Any  # type: ignore[misc,assignment]
     Signal = Any  # type: ignore[misc,assignment]
     QThread = Any  # type: ignore[misc,assignment]
     QFont = Any  # type: ignore[misc,assignment]
-    QPalette = Any  # type: ignore[misc,assignment]
-    QColor = Any  # type: ignore[misc,assignment]
     QDragEnterEvent = Any  # type: ignore[misc,assignment]
     QDropEvent = Any  # type: ignore[misc,assignment]
 
 from .status_presenter import TabStatusPresenter  # noqa: E402
 if PYSIDE6_AVAILABLE:
-    from ..ui import JobStatusWidget, ResultsSummaryBox  # noqa: E402
+    from ..ui import JobStatusWidget, ResultsSummaryBox, DocumentPreviewWidget  # noqa: E402
 from .workers import UploadManyFilesWorker  # noqa: E402
 
 
-class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
-    """Tab for document processing operations."""
+class DocumentProcessingTab(QWidget):  # type: ignore[misc]
+    """
+    Tab for document content extraction and processing.
+    
+    This tab handles the document processing pipeline:
+    1. Upload/select files for processing
+    2. Extract text content from various formats
+    3. Extract metadata (author, date, etc.)
+    4. Analyze content structure
+    5. Generate summaries
+    6. Index to vector store for search
+    7. Export processed results
+    
+    Processed documents are stored in the shared knowledge base
+    for consumption by all other tabs (Semantic Analysis, Entity
+    Extraction, Legal Reasoning, etc.)
+    """
 
     # Signals
     processing_completed = Signal(dict)  # type: ignore[misc]
@@ -87,8 +104,6 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
         self.worker = None
         self.current_results = None
         self.selected_files = []
-        self.proposals_cache = []
-        self.selected_proposal = None
         self.setup_ui()
         self.connect_signals()
 
@@ -101,6 +116,15 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         layout.addWidget(title)
 
+        # Description
+        desc = QLabel(
+            "Upload and process documents: Extract content, metadata, and structure. "
+            "Processed documents are indexed to the shared knowledge base for all tabs to use."
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #666; padding: 5px 0;")
+        layout.addWidget(desc)
+
         # Main splitter
         splitter = QSplitter(Qt.Horizontal)
         layout.addWidget(splitter)
@@ -110,21 +134,53 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
         left_layout = QVBoxLayout(left_widget)
 
         # File selection group
-        file_group = QGroupBox("Document Files")
+        file_group = QGroupBox("Select Documents")
         file_layout = QVBoxLayout(file_group)
+
+        # Instructions
+        instructions = QLabel("Drag & drop files here, or use the buttons below:")
+        instructions.setStyleSheet("color: #888; font-style: italic;")
+        file_layout.addWidget(instructions)
 
         # File list
         self.file_list = QListWidget()
         self.file_list.setAcceptDrops(True)
         self.file_list.setDragEnabled(True)
         self.file_list.setSelectionMode(QListWidget.MultiSelection)
+        self.file_list.setMinimumHeight(200)
         file_layout.addWidget(self.file_list)
 
         # File buttons
         file_buttons_layout = QHBoxLayout()
 
-        self.add_files_button = QPushButton("Add Files...")
+        self.add_files_button = QPushButton("📁 Add Files...")
+        self.add_files_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2196F3;
+                color: white;
+                padding: 6px 12px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #1976D2;
+            }
+        """)
         file_buttons_layout.addWidget(self.add_files_button)
+
+        self.add_folder_button = QPushButton("📂 Add Folder...")
+        self.add_folder_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                padding: 6px 12px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        self.add_folder_button.setToolTip("Add all documents from a folder")
+        file_buttons_layout.addWidget(self.add_folder_button)
 
         self.remove_files_button = QPushButton("Remove Selected")
         file_buttons_layout.addWidget(self.remove_files_button)
@@ -141,90 +197,53 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
 
         self.extract_text_checkbox = QCheckBox("Extract Text Content")
         self.extract_text_checkbox.setChecked(True)
+        self.extract_text_checkbox.setToolTip("Extract raw text from documents")
         options_layout.addWidget(self.extract_text_checkbox)
 
         self.extract_metadata_checkbox = QCheckBox("Extract Metadata")
         self.extract_metadata_checkbox.setChecked(True)
+        self.extract_metadata_checkbox.setToolTip("Extract author, date, keywords, etc.")
         options_layout.addWidget(self.extract_metadata_checkbox)
 
-        self.analyze_content_checkbox = QCheckBox("Analyze Content")
+        self.analyze_content_checkbox = QCheckBox("Analyze Content Structure")
         self.analyze_content_checkbox.setChecked(True)
+        self.analyze_content_checkbox.setToolTip("Identify sections, headings, tables, etc.")
         options_layout.addWidget(self.analyze_content_checkbox)
 
         self.generate_summary_checkbox = QCheckBox("Generate Summary")
+        self.generate_summary_checkbox.setToolTip("AI-powered summary generation")
         options_layout.addWidget(self.generate_summary_checkbox)
 
+        self.index_vector_checkbox = QCheckBox("Index to Vector Store")
+        self.index_vector_checkbox.setChecked(True)
+        self.index_vector_checkbox.setToolTip("Enable semantic search across tabs")
+        options_layout.addWidget(self.index_vector_checkbox)
+
         left_layout.addWidget(options_group)
-
-        # Organization workflow group (review/manage/refine)
-        org_group = QGroupBox("Organization Workflow")
-        org_layout = QVBoxLayout(org_group)
-
-        root_row = QHBoxLayout()
-        root_row.addWidget(QLabel("Folder scope:"))
-        self.org_root_input = QLineEdit()
-        self.org_root_input.setPlaceholderText(r"E:\... or /mnt/e/...")
-        root_row.addWidget(self.org_root_input)
-        self.org_browse_button = QPushButton("Browse Folder...")
-        root_row.addWidget(self.org_browse_button)
-        org_layout.addLayout(root_row)
-
-        org_btn_row = QHBoxLayout()
-        self.org_load_button = QPushButton("Review Proposals")
-        self.org_generate_button = QPushButton("Generate Scoped")
-        self.org_clear_button = QPushButton("Clear Scoped")
-        org_btn_row.addWidget(self.org_load_button)
-        org_btn_row.addWidget(self.org_generate_button)
-        org_btn_row.addWidget(self.org_clear_button)
-        org_layout.addLayout(org_btn_row)
-
-        self.org_table = QTableWidget(0, 5)
-        self.org_table.setHorizontalHeaderLabels(["ID", "Conf", "Current Path", "Folder", "Filename"])
-        org_layout.addWidget(self.org_table)
-
-        refine_row = QHBoxLayout()
-        refine_row.addWidget(QLabel("Folder"))
-        self.org_folder_input = QLineEdit()
-        refine_row.addWidget(self.org_folder_input)
-        refine_row.addWidget(QLabel("Filename"))
-        self.org_filename_input = QLineEdit()
-        refine_row.addWidget(self.org_filename_input)
-        org_layout.addLayout(refine_row)
-
-        self.org_note_input = QTextEdit()
-        self.org_note_input.setPlaceholderText("Optional note...")
-        self.org_note_input.setMaximumHeight(60)
-        org_layout.addWidget(self.org_note_input)
-
-        action_row = QHBoxLayout()
-        self.org_approve_button = QPushButton("Approve")
-        self.org_reject_button = QPushButton("Reject")
-        self.org_edit_approve_button = QPushButton("Refine + Approve")
-        action_row.addWidget(self.org_approve_button)
-        action_row.addWidget(self.org_reject_button)
-        action_row.addWidget(self.org_edit_approve_button)
-        org_layout.addLayout(action_row)
-
-        left_layout.addWidget(org_group)
 
         # Control buttons
         button_layout = QHBoxLayout()
 
-        self.process_button = QPushButton("Process Documents")
+        self.process_button = QPushButton("⚡ Process Documents")
         self.process_button.setStyleSheet("""
             QPushButton {
                 background-color: #FF9800;
                 color: white;
-                padding: 8px 16px;
+                padding: 10px 20px;
                 border: none;
                 border-radius: 4px;
                 font-weight: bold;
+                font-size: 14px;
             }
             QPushButton:hover {
                 background-color: #F57C00;
             }
             QPushButton:pressed {
                 background-color: #EF6C00;
+            }
+            QPushButton:disabled {
+                background-color: #CCCCCC;
+                color: #666666;
             }
         """)
         button_layout.addWidget(self.process_button)
@@ -237,40 +256,80 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
         self.progress_bar.setVisible(False)
         left_layout.addWidget(self.progress_bar)
 
-        self.status_label = QLabel("Ready")
+        # Status
+        self.status_label = QLabel("Ready - Add documents to begin")
+        self.status_label.setStyleSheet("padding: 5px; background-color: #f5f5f5; border-radius: 3px;")
         left_layout.addWidget(self.status_label)
+        
         self.status = TabStatusPresenter(self, self.status_label, source="Document Processing")
+        
         if PYSIDE6_AVAILABLE:
             self.job_status = JobStatusWidget("Document Processing Job")
             left_layout.addWidget(self.job_status)
             self.results_summary = ResultsSummaryBox()
             left_layout.addWidget(self.results_summary)
 
+        left_layout.addStretch()
         splitter.addWidget(left_widget)
 
-        # Right panel - Results
+        # Right panel - Preview and Results
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
 
-        # Results group
-        results_group = QGroupBox("Processing Results")
-        results_layout = QVBoxLayout(results_group)
+        # Add document preview widget
+        if PYSIDE6_AVAILABLE:
+            preview_group = QGroupBox("Document Preview & Results")
+            preview_layout = QVBoxLayout(preview_group)
+            
+            # Create tabbed interface
+            self.preview_tabs = QSplitter(Qt.Vertical)
+            
+            # Document preview widget
+            self.document_preview = DocumentPreviewWidget()
+            self.document_preview.document_loaded.connect(self.on_document_previewed)
+            self.document_preview.preview_error.connect(self.on_preview_error)
+            self.preview_tabs.addWidget(self.document_preview)
+            
+            # Processing results browser
+            results_widget = QWidget()
+            results_layout = QVBoxLayout(results_widget)
+            results_label = QLabel("Processing Results")
+            results_label.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+            results_layout.addWidget(results_label)
+            
+            self.results_browser = QTextBrowser()
+            self.results_browser.setOpenExternalLinks(True)
+            results_layout.addWidget(self.results_browser)
+            
+            self.preview_tabs.addWidget(results_widget)
+            
+            # Set proportions (preview larger)
+            self.preview_tabs.setSizes([500, 300])
+            
+            preview_layout.addWidget(self.preview_tabs)
+            right_layout.addWidget(preview_group)
+        else:
+            # Fallback without preview
+            results_group = QGroupBox("Processing Results")
+            results_layout = QVBoxLayout(results_group)
 
-        self.results_browser = QTextBrowser()
-        self.results_browser.setOpenExternalLinks(True)
-        results_layout.addWidget(self.results_browser)
+            self.results_browser = QTextBrowser()
+            self.results_browser.setOpenExternalLinks(True)
+            results_layout.addWidget(self.results_browser)
 
-        right_layout.addWidget(results_group)
+            right_layout.addWidget(results_group)
 
         # Export buttons
         export_layout = QHBoxLayout()
 
-        self.export_json_button = QPushButton("Export JSON")
+        self.export_json_button = QPushButton("💾 Export JSON")
         self.export_json_button.setEnabled(False)
+        self.export_json_button.setToolTip("Export processing results as JSON")
         export_layout.addWidget(self.export_json_button)
 
-        self.export_text_button = QPushButton("Export Text")
+        self.export_text_button = QPushButton("📄 Export Text")
         self.export_text_button.setEnabled(False)
+        self.export_text_button.setToolTip("Export processing results as text")
         export_layout.addWidget(self.export_text_button)
 
         export_layout.addStretch()
@@ -284,24 +343,23 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
     def connect_signals(self):
         """Connect UI signals to handlers."""
         self.add_files_button.clicked.connect(self.add_files)
+        self.add_folder_button.clicked.connect(self.add_folder)
         self.remove_files_button.clicked.connect(self.remove_selected_files)
         self.clear_files_button.clicked.connect(self.clear_files)
         self.process_button.clicked.connect(self.start_processing)
         self.export_json_button.clicked.connect(self.export_json)
         self.export_text_button.clicked.connect(self.export_text)
 
-        self.org_browse_button.clicked.connect(self.org_pick_folder)
-        self.org_load_button.clicked.connect(self.org_load_proposals)
-        self.org_generate_button.clicked.connect(self.org_generate_scoped)
-        self.org_clear_button.clicked.connect(self.org_clear_scoped)
-        self.org_approve_button.clicked.connect(self.org_approve_selected)
-        self.org_reject_button.clicked.connect(self.org_reject_selected)
-        self.org_edit_approve_button.clicked.connect(self.org_edit_approve_selected)
-        self.org_table.itemSelectionChanged.connect(self.org_on_selection_changed)
+        # File list selection - preview document
+        self.file_list.itemSelectionChanged.connect(self.on_file_selected)
 
         # Drag and drop
         self.file_list.dragEnterEvent = self.drag_enter_event
         self.file_list.dropEvent = self.drop_event
+
+    # -------------------------------------------------------------------------
+    # File Management
+    # -------------------------------------------------------------------------
 
     def drag_enter_event(self, event: QDragEnterEvent):
         """Handle drag enter events for file drops."""
@@ -319,313 +377,363 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
 
     def add_files(self):
         """Add files through file dialog."""
+        from .default_paths import get_default_dialog_dir
+
+        default_path = get_default_dialog_dir()
+        
         file_paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select Documents",
-            "",
-            "All Files (*);;PDF Files (*.pdf);;Word Files (*.docx);;Text Files (*.txt)"
+            "Select Documents to Process",
+            default_path,
+            "All Files (*);;PDF Files (*.pdf);;Word Files (*.docx *.doc);;Text Files (*.txt);;Markdown Files (*.md)"
         )
 
         for file_path in file_paths:
             self.add_file_to_list(file_path)
+
+    def add_folder(self):
+        """Add all files from a folder through folder dialog."""
+        from .default_paths import get_default_dialog_dir
+
+        default_path = get_default_dialog_dir()
+        
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder to Process",
+            default_path
+        )
+
+        if not folder_path:
+            return
+
+        # Supported file extensions
+        supported_extensions = {
+            '.pdf', '.docx', '.doc', '.txt', '.html', '.htm', '.rtf', '.md',
+            '.xlsx', '.xls', '.csv', '.pptx', '.ppt', '.png', '.jpg', '.jpeg',
+            '.tif', '.bmp', '.mp4', '.mov', '.avi', '.mp3', '.wav'
+        }
+
+        # Walk through directory and add all supported files
+        added_count = 0
+        for root, _, files in os.walk(folder_path):
+            for file in files:
+                file_ext = os.path.splitext(file)[1].lower()
+                if file_ext in supported_extensions:
+                    file_path = os.path.join(root, file)
+                    self.add_file_to_list(file_path)
+                    added_count += 1
+
+        if added_count > 0:
+            self.status.success(f"Added {added_count} file(s) from folder")
+        else:
+            self.status.info("No supported files found in folder")
 
     def add_file_to_list(self, file_path: str):
         """Add a file to the list widget."""
         if file_path not in self.selected_files:
             self.selected_files.append(file_path)
             file_name = os.path.basename(file_path)
-            item = QListWidgetItem(file_name)
+            item = QListWidgetItem(f"📄 {file_name}")
             item.setToolTip(file_path)
             self.file_list.addItem(item)
+            self.status.info(f"Added: {file_name}")
 
     def remove_selected_files(self):
         """Remove selected files from the list."""
         selected_items = self.file_list.selectedItems()
+        if not selected_items:
+            self.status.info("No files selected to remove")
+            return
+        
         for item in selected_items:
             row = self.file_list.row(item)
             if row < len(self.selected_files):
+                removed_file = self.selected_files[row]
                 del self.selected_files[row]
+                self.status.info(f"Removed: {os.path.basename(removed_file)}")
             self.file_list.takeItem(row)
 
     def clear_files(self):
         """Clear all files from the list."""
+        count = len(self.selected_files)
         self.file_list.clear()
         self.selected_files.clear()
+        self.status.info(f"Cleared {count} files")
+        
+        # Clear preview
+        if PYSIDE6_AVAILABLE and hasattr(self, 'document_preview'):
+            self.document_preview.clear()
+
+    def on_file_selected(self):
+        """Handle file selection - show preview."""
+        if not PYSIDE6_AVAILABLE or not hasattr(self, 'document_preview'):
+            return
+        
+        selected_items = self.file_list.selectedItems()
+        if not selected_items:
+            return
+        
+        # Get the first selected item
+        item = selected_items[0]
+        row = self.file_list.row(item)
+        
+        if row < len(self.selected_files):
+            file_path = self.selected_files[row]
+            self.document_preview.load_document(file_path)
+    
+    def on_document_previewed(self, file_path: str):
+        """Handle successful document preview load."""
+        self.status.info(f"Previewing: {os.path.basename(file_path)}")
+    
+    def on_preview_error(self, error_msg: str):
+        """Handle preview error."""
+        self.status.error(f"Preview error: {error_msg}")
+
+    # -------------------------------------------------------------------------
+    # Document Processing
+    # -------------------------------------------------------------------------
 
     def start_processing(self):
         """Start document processing."""
         if not self.selected_files:
-            self.status.warn("Please select at least one document to process.")
+            self.status.error("No files selected. Please add documents first.")
+            QMessageBox.warning(
+                self,
+                "No Files",
+                "Please add documents to process."
+            )
             return
 
-        # Get processing options
+        if self.worker and self.worker.isRunning():
+            self.status.error("Processing already in progress")
+            return
+
+        # Disable buttons during processing
+        self.process_button.setEnabled(False)
+        self.add_files_button.setEnabled(False)
+        self.remove_files_button.setEnabled(False)
+        self.clear_files_button.setEnabled(False)
+
+        # Show progress bar
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)  # Indeterminate
+
+        # Update status
+        file_count = len(self.selected_files)
+        self.status.info(f"Processing {file_count} document(s)...")
+
+        # Create and configure worker
         options = {
             "extract_text": self.extract_text_checkbox.isChecked(),
             "extract_metadata": self.extract_metadata_checkbox.isChecked(),
             "analyze_content": self.analyze_content_checkbox.isChecked(),
             "generate_summary": self.generate_summary_checkbox.isChecked(),
+            "index_vector": self.index_vector_checkbox.isChecked(),
         }
+        self.worker = UploadManyFilesWorker(
+            paths=self.selected_files,
+            options=options
+        )
 
-        if self.worker is not None and self.worker.isRunning():
-            self.status.warn("Processing already running. Please wait for completion.")
-            return
-
-        # Show progress
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # Indeterminate progress
-        self.process_button.setEnabled(False)
-        self.process_button.setText("Processing...")
-        if hasattr(self, "job_status"):
-            self.job_status.set_status("running", "Processing selected documents")
-        self.status.loading("Processing documents...")
-
-        # Start worker thread
-        self.worker = UploadManyFilesWorker(self.selected_files, options=options)
+        # Connect signals
         self.worker.finished_ok.connect(self.on_processing_finished)
         self.worker.finished_err.connect(self.on_processing_error)
+
+        # Start processing
         self.worker.start()
 
+    def on_progress_update(self, message: str):
+        """Handle progress updates from worker."""
+        self.status.info(message)
+
     def on_processing_finished(self, results):
-        """Handle successful processing completion."""
-        normalized = results
-        if isinstance(results, dict) and "data" in results and isinstance(results["data"], dict):
-            normalized = results["data"]
+        """Handle processing completion."""
+        # Fix for API mismatch: Backend returns 'results', GUI expects 'files'
+        if 'results' in results and 'files' not in results:
+            results['files'] = results['results']
 
-        self.current_results = normalized
-        self.display_results(normalized)
-        self.cleanup_worker()
-        if hasattr(self, "job_status"):
-            self.job_status.set_status("success", "Completed")
-        if hasattr(self, "results_summary"):
-            self.results_summary.set_summary(
-                "Document processing completed successfully",
-                "Displayed in Processing Results (export JSON/Text optional)",
-                "Run Console",
-            )
-        self.status.success("Document processing complete")
-
-        # Emit signal
-        self.processing_completed.emit(normalized if isinstance(normalized, dict) else {})
-
-    def on_processing_error(self, error_msg):
-        """Handle processing error."""
-        if hasattr(self, "job_status"):
-            self.job_status.set_status("failed", "Processing failed")
-        if hasattr(self, "results_summary"):
-            self.results_summary.set_summary(
-                f"Document processing failed: {error_msg}",
-                "No output generated",
-                "Run Console",
-            )
-        self.status.error(f"Failed to process documents: {error_msg}")
-        self.cleanup_worker()
-
-        # Emit signal
-        self.processing_error.emit(error_msg)
-
-    def cleanup_worker(self):
-        """Clean up worker thread."""
-        if self.worker:
-            self.worker.deleteLater()
-            self.worker = None
-
+        self.current_results = results
+        
+        # Hide progress bar
         self.progress_bar.setVisible(False)
-        self.process_button.setEnabled(True)
-        self.process_button.setText("Process Documents")
 
-    def display_results(self, results):
-        """Display processing results."""
-        # Format results as HTML for better display
-        html_content = self.format_results_html(results)
-        self.results_browser.setHtml(html_content)
+        # Re-enable buttons
+        self.process_button.setEnabled(True)
+        self.add_files_button.setEnabled(True)
+        self.remove_files_button.setEnabled(True)
+        self.clear_files_button.setEnabled(True)
 
         # Enable export buttons
         self.export_json_button.setEnabled(True)
         self.export_text_button.setEnabled(True)
 
-    def format_results_html(self, results):  # noqa: C901
+        # Display results
+        self.display_results(results)
+
+        # Emit completion signal
+        self.processing_completed.emit(results)
+
+        # Update status
+        files_count = len(results.get('files', []))
+        self.status.success(f"✓ Successfully processed {files_count} document(s)")
+
+    def on_processing_error(self, error_msg):
+        """Handle processing errors."""
+        # Hide progress bar
+        self.progress_bar.setVisible(False)
+
+        # Re-enable buttons
+        self.process_button.setEnabled(True)
+        self.add_files_button.setEnabled(True)
+        self.remove_files_button.setEnabled(True)
+        self.clear_files_button.setEnabled(True)
+
+        # Display error
+        self.results_browser.setHtml(f"""
+            <div style='color: #f44336; padding: 10px; background-color: #ffebee; border-radius: 4px;'>
+                <strong>Processing Error:</strong><br>
+                {error_msg}
+            </div>
+        """)
+
+        # Update status
+        self.status.error(f"Processing failed: {error_msg}")
+
+        # Emit error signal
+        self.processing_error.emit(error_msg)
+
+    def cleanup_worker(self):
+        """Clean up worker thread after processing completes."""
+        if self.worker:
+            self.worker.deleteLater()
+            self.worker = None
+
+    # -------------------------------------------------------------------------
+    # Results Display
+    # -------------------------------------------------------------------------
+
+    def display_results(self, results):
+        """Display processing results in the browser."""
+        html = self.format_results_html(results)
+        self.results_browser.setHtml(html)
+
+        # Update summary box if available
+        if PYSIDE6_AVAILABLE and hasattr(self, 'results_summary'):
+            files_count = len(results.get('files', []))
+            success_count = sum(1 for f in results.get('files', []) if 'error' not in f)
+            error_count = files_count - success_count
+            
+            summary_text = f"Processed: {success_count}/{files_count}"
+            if error_count > 0:
+                summary_text += f" ({error_count} errors)"
+            
+            self.results_summary.set_summary(summary_text)
+
+    def format_results_html(self, results):
         """Format results as HTML for display."""
-        html = ["<html><body>"]
+        html = """
+        <html>
+        <head>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 10px; }
+                h2 { color: #2196F3; border-bottom: 2px solid #2196F3; padding-bottom: 5px; }
+                h3 { color: #666; margin-top: 20px; }
+                .file { background-color: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 4px; }
+                .success { border-left: 4px solid #4CAF50; }
+                .error { border-left: 4px solid #f44336; background-color: #ffebee; }
+                .metadata { color: #666; font-size: 0.9em; margin: 5px 0; }
+                .content-preview {
+                    background-color: white;
+                    padding: 10px;
+                    margin: 10px 0;
+                    border-radius: 3px;
+                    max-height: 200px;
+                    overflow-y: auto;
+                    font-family: monospace;
+                    font-size: 0.85em;
+                }
+                .summary {
+                    background-color: #e3f2fd;
+                    padding: 10px;
+                    margin: 10px 0;
+                    border-radius: 3px;
+                    border-left: 4px solid #2196F3;
+                }
+            </style>
+        </head>
+        <body>
+            <h2>📊 Processing Results</h2>
+        """
 
-        # Process summary
-        html.append("<h2>Document Processing Results</h2>")
-        html.append(f"<p><strong>Files Processed:</strong> {len(results.get('files', []))}</p>")
+        files = results.get('files', [])
+        if not files:
+            html += "<p>No files were processed.</p>"
+        else:
+            for file_result in files:
+                file_name = file_result.get('filename', 'Unknown')
+                
+                if 'error' in file_result:
+                    html += f"""
+                    <div class='file error'>
+                        <h3>❌ {file_name}</h3>
+                        <p class='metadata'>Status: <strong>Error</strong></p>
+                        <p style='color: #f44336;'>{file_result['error']}</p>
+                    </div>
+                    """
+                else:
+                    html += f"""
+                    <div class='file success'>
+                        <h3>✓ {file_name}</h3>
+                        <p class='metadata'>Status: <strong>Success</strong></p>
+                    """
+                    
+                    # Metadata
+                    if 'metadata' in file_result:
+                        metadata = file_result['metadata']
+                        if metadata:
+                            html += "<p class='metadata'><strong>Metadata:</strong> "
+                            meta_items = [f"{k}: {v}" for k, v in metadata.items() if v]
+                            html += ", ".join(meta_items[:5])  # Show first 5 items
+                            html += "</p>"
+                    
+                    # Summary
+                    if 'summary' in file_result and file_result['summary']:
+                        html += f"""
+                        <div class='summary'>
+                            <strong>Summary:</strong><br>
+                            {file_result['summary']}
+                        </div>
+                        """
+                    
+                    # Content preview
+                    if 'content' in file_result and file_result['content']:
+                        content = file_result['content']
+                        preview = content[:500] + "..." if len(content) > 500 else content
+                        # Escape HTML
+                        preview = preview.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                        html += f"""
+                        <div class='content-preview'>
+                            <strong>Content Preview:</strong><br>
+                            {preview}
+                        </div>
+                        """
+                    
+                    html += "</div>"
 
-        # Individual file results
-        for file_result in results.get('files', []):
-            file_name = file_result.get('filename', 'Unknown')
-            html.append(f"<h3>{file_name}</h3>")
+        html += """
+        </body>
+        </html>
+        """
+        return html
 
-            if 'error' in file_result:
-                html.append(f"<p style='color: red;'><strong>Error:</strong> {file_result['error']}</p>")
-                continue
-
-            # Metadata
-            if 'metadata' in file_result:
-                metadata = file_result['metadata']
-                html.append("<h4>Metadata</h4><ul>")
-                for key, value in metadata.items():
-                    html.append(f"<li><strong>{key}:</strong> {value}</li>")
-                html.append("</ul>")
-
-            # Content preview
-            if 'content' in file_result:
-                content = file_result['content']
-                preview = content[:500] + "..." if len(content) > 500 else content
-                html.append("<h4>Content Preview</h4>")
-                html.append(f"<pre>{preview}</pre>")
-
-            # Analysis results
-            if 'analysis' in file_result:
-                analysis = file_result['analysis']
-                html.append("<h4>Analysis</h4>")
-                if 'entities' in analysis:
-                    html.append("<p><strong>Entities Found:</strong></p><ul>")
-                    for entity in analysis['entities'][:10]:  # Limit to 10
-                        html.append(f"<li>{entity.get('text', '')} ({entity.get('label', '')})</li>")
-                    if len(analysis['entities']) > 10:
-                        html.append(f"<li>... and {len(analysis['entities']) - 10} more</li>")
-                    html.append("</ul>")
-
-            # Summary
-            if 'summary' in file_result:
-                html.append("<h4>Summary</h4>")
-                html.append(f"<p>{file_result['summary']}</p>")
-
-        html.append("</body></html>")
-        return "\n".join(html)
-
-    @staticmethod
-    def _normalize_root_scope(path_str: str) -> str:
-        s = str(path_str or "").strip().strip('"').strip("'")
-        m = re.match(r"^([A-Za-z]):[\\/](.*)$", s)
-        if m:
-            drive = m.group(1).lower()
-            rest = m.group(2).replace("\\", "/").lstrip("/")
-            return f"/mnt/{drive}/{rest}"
-        return s.replace("\\", "/")
-
-    @staticmethod
-    def _api_get(path: str, timeout: float = 30.0) -> dict:
-        return api_client._make_request("GET", path, timeout=timeout)
-
-    @staticmethod
-    def _api_post(path: str, payload: dict, timeout: float = 120.0) -> dict:
-        return api_client._make_request("POST", path, timeout=timeout, json=payload)
-
-    def org_pick_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Organization Folder", "")
-        if folder:
-            self.org_root_input.setText(folder)
-
-    def org_load_proposals(self):
-        try:
-            root = self._normalize_root_scope(self.org_root_input.text())
-            data = self._api_get("/organization/proposals?status=proposed&limit=1000&offset=0", timeout=30.0)
-            items = data.get("items", []) if isinstance(data, dict) else []
-            if root:
-                items = [x for x in items if str(x.get("current_path") or "").replace("\\", "/").startswith(root)]
-            self.proposals_cache = items
-            self.org_table.setRowCount(len(items))
-            for i, p in enumerate(items):
-                self.org_table.setItem(i, 0, QTableWidgetItem(str(p.get("id") or "")))
-                self.org_table.setItem(i, 1, QTableWidgetItem(f"{float(p.get('confidence') or 0.0):.2f}"))
-                self.org_table.setItem(i, 2, QTableWidgetItem(str(p.get("current_path") or "")))
-                self.org_table.setItem(i, 3, QTableWidgetItem(str(p.get("proposed_folder") or "")))
-                self.org_table.setItem(i, 4, QTableWidgetItem(str(p.get("proposed_filename") or "")))
-            self.results_browser.setPlainText(f"Loaded {len(items)} scoped proposals")
-        except Exception as e:
-            self.status.error(f"Failed to load proposals: {e}")
-
-    def org_generate_scoped(self):
-        try:
-            root = self._normalize_root_scope(self.org_root_input.text())
-            payload = {"limit": 500, "root_prefix": root or None}
-            out = self._api_post("/organization/proposals/generate", payload, timeout=180.0)
-            self.results_browser.setPlainText(str(out))
-            self.org_load_proposals()
-        except Exception as e:
-            self.status.error(f"Failed to generate scoped proposals: {e}")
-
-    def org_clear_scoped(self):
-        try:
-            root = self._normalize_root_scope(self.org_root_input.text())
-            payload = {"status": "proposed", "root_prefix": root or None, "note": "gui_clear"}
-            out = self._api_post("/organization/proposals/clear", payload, timeout=120.0)
-            self.results_browser.setPlainText(str(out))
-            self.org_load_proposals()
-        except Exception as e:
-            self.status.error(f"Failed to clear scoped proposals: {e}")
-
-    def org_on_selection_changed(self):
-        row = self.org_table.currentRow()
-        if row < 0 or row >= len(self.proposals_cache):
-            self.selected_proposal = None
-            return
-        p = self.proposals_cache[row]
-        self.selected_proposal = p
-        self.org_folder_input.setText(str(p.get("proposed_folder") or ""))
-        self.org_filename_input.setText(str(p.get("proposed_filename") or ""))
-
-    def _selected_proposal_id(self) -> Optional[int]:
-        if not self.selected_proposal:
-            return None
-        try:
-            return int(self.selected_proposal.get("id"))
-        except Exception:
-            return None
-
-    def org_approve_selected(self):
-        pid = self._selected_proposal_id()
-        if pid is None:
-            self.status.info("Select a proposal first")
-            return
-        try:
-            out = self._api_post(f"/organization/proposals/{pid}/approve", {}, timeout=60.0)
-            self.results_browser.setPlainText(str(out))
-            self.org_load_proposals()
-        except Exception as e:
-            self.status.error(f"Approve failed: {e}")
-
-    def org_reject_selected(self):
-        pid = self._selected_proposal_id()
-        if pid is None:
-            self.status.info("Select a proposal first")
-            return
-        try:
-            out = self._api_post(
-                f"/organization/proposals/{pid}/reject",
-                {"note": (self.org_note_input.toPlainText() or None)},
-                timeout=60.0,
-            )
-            self.results_browser.setPlainText(str(out))
-            self.org_load_proposals()
-        except Exception as e:
-            self.status.error(f"Reject failed: {e}")
-
-    def org_edit_approve_selected(self):
-        pid = self._selected_proposal_id()
-        if pid is None:
-            self.status.info("Select a proposal first")
-            return
-        try:
-            out = self._api_post(
-                f"/organization/proposals/{pid}/edit",
-                {
-                    "proposed_folder": self.org_folder_input.text(),
-                    "proposed_filename": self.org_filename_input.text(),
-                    "note": (self.org_note_input.toPlainText() or None),
-                },
-                timeout=60.0,
-            )
-            self.results_browser.setPlainText(str(out))
-            self.org_load_proposals()
-        except Exception as e:
-            self.status.error(f"Refine+Approve failed: {e}")
+    # -------------------------------------------------------------------------
+    # Export
+    # -------------------------------------------------------------------------
 
     def export_json(self):
         """Export results to JSON file."""
         if not self.current_results:
+            self.status.info("No results to export")
             return
 
         try:
@@ -633,16 +741,27 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
                 self, "Save JSON", "", "JSON files (*.json)"
             )
             if file_path:
-                import json  # noqa: E402
                 with open(file_path, 'w', encoding='utf-8') as f:
                     json.dump(self.current_results, f, indent=2, ensure_ascii=False)
-                QMessageBox.information(self, "Export Successful", "Results exported to JSON.")
+                
+                self.status.success(f"Exported to: {os.path.basename(file_path)}")
+                QMessageBox.information(
+                    self,
+                    "Export Successful",
+                    f"Results exported to:\n{file_path}"
+                )
         except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to export JSON: {e}")
+            self.status.error(f"Export failed: {e}")
+            QMessageBox.critical(
+                self,
+                "Export Error",
+                f"Failed to export JSON:\n{e}"
+            )
 
-    def export_text(self):
+    def export_text(self):  # noqa: C901
         """Export results to text file."""
         if not self.current_results:
+            self.status.info("No results to export")
             return
 
         try:
@@ -651,31 +770,54 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
             )
             if file_path:
                 with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write("Document Processing Results\n")
-                    f.write("=" * 50 + "\n\n")
+                    f.write("=" * 70 + "\n")
+                    f.write("DOCUMENT PROCESSING RESULTS\n")
+                    f.write("=" * 70 + "\n\n")
 
                     for file_result in self.current_results.get('files', []):
                         file_name = file_result.get('filename', 'Unknown')
-                        f.write(f"File: {file_name}\n")
-                        f.write("-" * 30 + "\n")
+                        f.write(f"\nFile: {file_name}\n")
+                        f.write("-" * 70 + "\n")
 
                         if 'error' in file_result:
+                            f.write("Status: ERROR\n")
                             f.write(f"Error: {file_result['error']}\n\n")
                             continue
 
-                        if 'content' in file_result:
-                            f.write("Content Preview:\n")
-                            content = file_result['content']
-                            preview = content[:1000] + "..." if len(content) > 1000 else content
-                            f.write(f"{preview}\n\n")
+                        f.write("Status: SUCCESS\n\n")
 
-                        if 'summary' in file_result:
-                            f.write(f"Summary: {file_result['summary']}\n\n")
+                        if 'metadata' in file_result and file_result['metadata']:
+                            f.write("Metadata:\n")
+                            for key, value in file_result['metadata'].items():
+                                if value:
+                                    f.write(f"  {key}: {value}\n")
+                            f.write("\n")
+
+                        if 'summary' in file_result and file_result['summary']:
+                            f.write(f"Summary:\n{file_result['summary']}\n\n")
+
+                        if 'content' in file_result and file_result['content']:
+                            f.write("Content:\n")
+                            content = file_result['content']
+                            preview = content[:2000] + "\n[... truncated ...]" if len(content) > 2000 else content
+                            f.write(f"{preview}\n\n")
 
                         f.write("\n")
 
-                QMessageBox.information(self, "Export Successful", "Results exported to text file.")
+                self.status.success(f"Exported to: {os.path.basename(file_path)}")
+                QMessageBox.information(
+                    self,
+                    "Export Successful",
+                    f"Results exported to:\n{file_path}"
+                )
         except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to export text: {e}")
+            self.status.error(f"Export failed: {e}")
+            QMessageBox.critical(
+                self,
+                "Export Error",
+                f"Failed to export text:\n{e}"
+            )
 
-# Import workers
+
+# Legacy alias for backward compatibility
+DocumentOrganizationTab = DocumentProcessingTab

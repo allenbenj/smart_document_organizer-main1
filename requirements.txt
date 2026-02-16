@@ -1,23 +1,108 @@
+# ============================================================================
+# Smart Document Organizer - Production Dependencies
+# ============================================================================
+# Install: pip install -r requirements.txt
+# See requirements-dev.txt for development tools
+# See requirements-optional.txt for advanced features
+# ============================================================================
+
+# --- CORE WEB FRAMEWORK ---
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2.6
 python-multipart>=0.0.9
-requests>=2.31
-httpx>=0.27
-PySide6>=6.6
+python-dotenv>=1.0
 jsonschema>=4.22
 
-# Document processing
+# --- HTTP CLIENTS ---
+requests>=2.31
+httpx>=0.27
+aiohttp>=3.9
+
+# --- GUI FRAMEWORK ---
+PySide6>=6.6
+
+# --- DOCUMENT PROCESSING ---
 pymupdf>=1.23
 python-docx>=1.1
-pandas>=2.2
 openpyxl>=3.1
 python-pptx>=0.6
 striprtf>=0.0.26
 markdown>=3.5
 
-# NLP / ML
+# --- DATA PROCESSING ---
+pandas>=2.2
+numpy>=2.4
+
+# --- NLP & ML CORE ---
 sentence-transformers>=2.6
 transformers>=4.40
 scikit-learn>=1.4
+torch>=2.10
+
+# --- NLP SPECIALIZED (recommended) ---
+spacy>=3.7
+gliner>=0.2
+
+# --- DATABASES ---
+aiosqlite>=0.19
+
+# --- KNOWLEDGE GRAPH (optional) ---
+networkx>=3.2
+plotly>=5.20
+
+pytest>=7.4
+pytest-asyncio>=0.21
+pytest-cov>=4.1
+pytest-qt>=4.2
+
+# Code Quality
+black>=23.12
+isort>=5.13
+mypy>=1.8
+flake8>=7.0
+pre-commit>=3.5
+
+# Development Tools
+python-dotenv>=1.0
+types-requests>=2.31
+types-PySide6>=6.6 Strawberry
+
+# Documentation (optional)
+mkdocs>=1.5
+mkdocs-material>=9.4
+
+# Security scanning (optional)
+bandit>=1.7
+safety>=2.3
+
+# Optional ML & GUI dependencies for development (install if you work with embeddings / GUI)
+numpy>=2.4
+torch>=2.10
+sentence-transformers>=2.0
+faiss-cpu>=1.13
+
+# HTTP / Async clients used by simple manager and logging
+aiohttp>=3.9
+
+# Tools used by fixer scripts and linters
+autopep8>=2.0
+autoflake>=2.0
+
+# Observability / Tracing
+opentelemetry-api>=1.16.0
+opentelemetry-sdk>=1.16.0
+opentelemetry-exporter-otlp>=1.16.0
+opentelemetry-instrumentation-fastapi>=0.36
+opentelemetry-instrumentation-requests>=0.36
+opentelemetry-instrumentation-logging>=0.36
+
+# ============================================================================
+
+# INSTALLATION NOTES:
+# Minimal: pip install fastapi uvicorn pydantic PySide6
+# Standard: pip install -r requirements.txt (this file)
+# Full: pip install -r requirements.txt -r requirements-optional.txt
+# Development: pip install -r requirements.txt -r requirements-dev.txt
+# ============================================================================
 

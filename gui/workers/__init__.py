@@ -23,6 +23,7 @@ try:
 except ImportError:
     requests = None
 
+from ..services import api_client
 
 class SemanticAnalysisWorker(QThread):
     """Worker thread for semantic analysis operations."""
@@ -56,38 +57,23 @@ class SemanticAnalysisWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 # Upload the file to get content
-                mt, _ = mimetypes.guess_type(self.file_path)
-                with open(self.file_path, "rb") as f:
-                    files = {
-                        "file": (
-                            os.path.basename(self.file_path),
-                            f,
-                            mt or "application/octet-stream",
-                        )
-                    }
-                    r = requests.post(
-                        "http://127.0.0.1:8000/api/agents/process-document",
-                        files=files,
-                        timeout=120,
-                    )
-                if r.status_code != 200:
-                    raise RuntimeError(f"Process HTTP {r.status_code}: {r.text}")
-                content = (
-                    (r.json().get("data") or {})
-                    .get("processed_document", {})
-                    .get("content", "")
-                )
+                resp = api_client.process_document(self.file_path)
+                data = resp.get("data", {})
+                if isinstance(data, dict):
+                    # Check for nested value (v2 schema)
+                    if "value" in data and isinstance(data["value"], dict):
+                        data = data["value"]
+                    content = data.get("content") or data.get("text") or ""
+
             if not content:
                 raise RuntimeError("No content to analyze")
+            
             # Call semantic endpoint
-            resp = requests.post(
-                "http://127.0.0.1:8000/api/agents/semantic",
-                json={"text": content, "options": {}},
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"Semantic HTTP {resp.status_code}: {resp.text}")
-            body = resp.json()
+            body = api_client.analyze_semantic(content, {
+                "analysis_type": self.analysis_type,
+                "include_metadata": self.include_metadata,
+                "deep_analysis": self.deep_analysis
+            })
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))

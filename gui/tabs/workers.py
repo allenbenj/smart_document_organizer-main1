@@ -306,7 +306,12 @@ class SemanticAnalysisWorker(QThread):
                 "deep_analysis": self.deep_analysis,
             })
             print("[SemanticInfoWorker] Analysis complete.")
-            self.result_ready.emit(body.get("data") or {})
+            print("[SemanticInfoWorker] Analysis complete.")
+            data = body.get("data")
+            if not data:
+                # Fallback: check for direct 'details' or use body itself
+                data = body.get("details") or body
+            self.result_ready.emit(data)
         except Exception as e:
             print(f"[SemanticInfoWorker] Error: {e}")
             self.error_occurred.emit(str(e))
@@ -353,7 +358,7 @@ class EntityExtractionWorker(QThread):
             if not entity_types and self.extraction_type and self.extraction_type != "All":
                 entity_types = [self.extraction_type]
 
-            body = api_client.extract_entities(content, entity_types=entity_types)
+            body = api_client.extract_entities(content, entity_types=entity_types, extraction_type=self.extraction_type)
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -396,7 +401,11 @@ class LegalReasoningWorker(QThread):
                 "reasoning_type": self.reasoning_type,
                 **self.options,
             })
-            self.result_ready.emit(body.get("data") or {})
+            data = body.get("data")
+            if not data:
+                # Fallback: check for direct 'details' or use body itself
+                data = body.get("details") or body
+            self.result_ready.emit(data)
         except Exception as e:
             self.error_occurred.emit(str(e))
 

@@ -5,7 +5,7 @@ This module provides the UI for vector search operations including
 embedding generation and similarity search.
 """
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
@@ -33,7 +33,8 @@ class VectorSearchTab(QWidget):
     def __init__(self):
         super().__init__()
         self.init_ui()
-        self._refresh_status_banner()
+        # Defer the API call so the UI appears immediately
+        QTimer.singleShot(0, self._refresh_status_banner)
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -81,6 +82,12 @@ class VectorSearchTab(QWidget):
         layout.addWidget(results_group)
         self.setLayout(layout)
 
+        # Connect button signals here so they are always wired up
+        self.search_btn.clicked.connect(self.do_search)
+        self.clear_btn.clicked.connect(
+            lambda: (self.query_text.clear(), self.results_table.setRowCount(0))
+        )
+
     def _refresh_status_banner(self):
         try:
             data = api_client.get_vector_status()
@@ -98,11 +105,6 @@ class VectorSearchTab(QWidget):
             pass
         self.status_banner.setText("")
         self.status_banner.hide()
-
-        self.search_btn.clicked.connect(self.do_search)
-        self.clear_btn.clicked.connect(
-            lambda: (self.query_text.clear(), self.results_table.setRowCount(0))
-        )
 
     def do_search(self):
         text = self.query_text.toPlainText().strip()

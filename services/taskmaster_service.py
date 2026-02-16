@@ -185,6 +185,15 @@ class TaskMasterService:
                 category="persona",
             )
 
+        # Start a TaskMaster tracing span (best-effort)
+        try:
+            from opentelemetry import trace as _otel_trace  # type: ignore
+            _tm_tracer = _otel_trace.get_tracer(__name__)
+            _tm_span_ctx = _tm_tracer.start_as_current_span("taskmaster.run_file_pipeline", attributes={"mode": mode, "requested_persona": requested_persona_name})
+            _tm_span_ctx.__enter__()
+        except Exception:
+            _tm_span_ctx = None
+
         try:
             if mode == "index":
                 task_id = self.db.taskmaster_create_task(run_id, "index_roots", payload=payload)
@@ -383,6 +392,13 @@ class TaskMasterService:
             self.db.taskmaster_complete_run(run_id, status="failed", summary={"error": str(e)})
             run = self.db.taskmaster_get_run(run_id)
             return {"success": False, "error": str(e), "run": run}
+        finally:
+            # Ensure TaskMaster span is closed (best-effort)
+            try:
+                if _tm_span_ctx is not None:
+                    _tm_span_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
 
     def list_runs(
         self,

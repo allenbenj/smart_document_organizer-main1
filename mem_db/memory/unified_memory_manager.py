@@ -95,6 +95,7 @@ class UnifiedMemoryManager(MemoryProvider):
             self.enable_vector_search = False
         else:
             self.enable_vector_search = True
+        self._async_db = AIOSQLITE_AVAILABLE
 
         # Storage components
         self._db_connection: Optional[
@@ -151,14 +152,32 @@ class UnifiedMemoryManager(MemoryProvider):
 
             try:
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
-                await self._init_sqlite()
+                try:
+                    from opentelemetry import trace as _otel_trace  # type: ignore
+                    _um_tracer = _otel_trace.get_tracer(__name__)
+                except Exception:
+                    _um_tracer = None
+
+                if _um_tracer:
+                    with _um_tracer.start_as_current_span("unified_memory._init_sqlite", attributes={"db_path": str(self.db_path)}):
+                        await self._init_sqlite()
+                else:
+                    await self._init_sqlite()
 
                 if self.enable_vector_search:
                     self.vector_store_path.mkdir(parents=True, exist_ok=True)
                     if self.vector_backend == "chromadb":
-                        await self._init_chromadb()
+                        if _um_tracer:
+                            with _um_tracer.start_as_current_span("unified_memory._init_chromadb"):
+                                await self._init_chromadb()
+                        else:
+                            await self._init_chromadb()
                     elif self.vector_backend == "faiss":
-                        await self._init_faiss()
+                        if _um_tracer:
+                            with _um_tracer.start_as_current_span("unified_memory._init_faiss"):
+                                await self._init_faiss()
+                        else:
+                            await self._init_faiss()
 
                 self._initialized = True
                 logger.info("UnifiedMemoryManager successfully initialized")
@@ -241,14 +260,28 @@ class UnifiedMemoryManager(MemoryProvider):
         if not self._initialized:
             await self.initialize()
 
+        try:
+            from opentelemetry import trace as _otel_trace  # type: ignore
+            _um_tracer = _otel_trace.get_tracer(__name__)
+        except Exception:
+            _um_tracer = None
+
         record.record_id = record.record_id or str(uuid.uuid4())
 
         async with self._get_db_connection() as db:
-            await self._store_sqlite(db, record)
+            if _um_tracer:
+                with _um_tracer.start_as_current_span("unified_memory._store_sqlite", attributes={"record_id": record.record_id, "namespace": record.namespace}):
+                    await self._store_sqlite(db, record)
+            else:
+                await self._store_sqlite(db, record)
             await db.commit()
 
         if self.enable_vector_search:
-            await self._store_vector(record)
+            if _um_tracer:
+                with _um_tracer.start_as_current_span("unified_memory._store_vector", attributes={"record_id": record.record_id}):
+                    await self._store_vector(record)
+            else:
+                await self._store_vector(record)
 
         self._record_cache[record.record_id] = record
         self._manage_cache()
@@ -336,32 +369,55 @@ class UnifiedMemoryManager(MemoryProvider):
     ) -> List[SearchResult]:
         self._stats["total_searches"] += 1
 
-        if isinstance(query, str):
-            class _Q: pass
-            q=_Q()
-            q.query_text=query
-            q.memory_type=memory_type
-            q.namespace=namespace
-            q.agent_id=agent_id
-            q.limit=limit
-            q.min_similarity=min_similarity
-            query=q
+        try:
+            from opentelemetry import trace as _otel_trace  # type: ignore
+            _um_tracer = _otel_trace.get_tracer(__name__)
+        except Exception:
+            _um_tracer = None
 
-        # Keyword search from SQLite
-        keyword_results = await self._search_sqlite(query)
+        _span_ctx = None
+        if _um_tracer:
+            try:
+                _span_ctx = _um_tracer.start_as_current_span("unified_memory.search", attributes={"query": (query if isinstance(query, str) else getattr(query, 'query_text', None))})
+                _span_ctx.__enter__()
+            except Exception:
+                _span_ctx = None
 
-        # Semantic search from vector store
-        semantic_results = []
-        if self.enable_vector_search and query.query_text:
-            semantic_results = await self._search_vector(query)
+        try:
+            if isinstance(query, str):
+                class _Q:
+                    pass
 
-        # Combine and rank results
-        combined_results = self._combine_search_results(
-            keyword_results, semantic_results
-        )
-        combined_results.sort(key=lambda x: x.combined_score, reverse=True)
+                q = _Q()
+                q.query_text = query
+                q.memory_type = memory_type
+                q.namespace = namespace
+                q.agent_id = agent_id
+                q.limit = limit
+                q.min_similarity = min_similarity
+                query = q
 
-        return combined_results[: query.limit]
+            # Keyword search from SQLite
+            keyword_results = await self._search_sqlite(query)
+
+            # Semantic search from vector store
+            semantic_results = []
+            if self.enable_vector_search and query.query_text:
+                semantic_results = await self._search_vector(query)
+
+            # Combine and rank results
+            combined_results = self._combine_search_results(
+                keyword_results, semantic_results
+            )
+            combined_results.sort(key=lambda x: x.combined_score, reverse=True)
+
+            return combined_results[: query.limit]
+        finally:
+            if _span_ctx is not None:
+                try:
+                    _span_ctx.__exit__(None, None, None)
+                except Exception:
+                    pass
 
     async def _search_sqlite(self, query: MemoryQuery) -> List[SearchResult]:
         conditions = []

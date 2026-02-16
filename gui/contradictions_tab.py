@@ -14,8 +14,7 @@ try:
 except Exception:
     requests = None
 
-
-API_BASE = "http://127.0.0.1:8000/api"
+from gui.services import api_client
 
 
 class ContradictionsTab(QWidget):
@@ -69,9 +68,9 @@ class ContradictionsTab(QWidget):
             if requests is None:
                 QMessageBox.critical(self, "Error", "requests module not available")
                 return
-            r = requests.post(
-                API_BASE + "/agents/contradictions", json={"text": txt}, timeout=15
+            result = api_client._make_request(
+                "POST", "/api/agents/contradictions", timeout=15.0, json={"text": txt}
             )
-            self.result.setPlainText(r.text)
+            self.result.setPlainText(str(result))
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))

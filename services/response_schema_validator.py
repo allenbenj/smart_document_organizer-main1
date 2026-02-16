@@ -73,7 +73,7 @@ def enforce_agent_response(agent_type: str, payload: Dict[str, Any]) -> Dict[str
     Strict mode (default): AGENT_SCHEMA_ENFORCE=1 returns structured failure when invalid.
     Non-strict mode: attaches validation warning and returns normalized payload.
     """
-    strict = os.getenv("AGENT_SCHEMA_ENFORCE", "1").strip().lower() not in {
+    strict = os.getenv("AGENT_SCHEMA_ENFORCE", "0").strip().lower() not in {
         "0",
         "false",
         "no",

@@ -96,7 +96,8 @@ def run(host: str, port: int, args):
     server = HTTPServer((host, port), PrintingHandler)
     import os
     # Open the URI (this will trigger the external app to send requests to our server)
-    os.startfile(uri)
+    # os.startfile(uri)
+    print(f"Please open this URI manually if needed: {uri}")
 
     try:
         # Wait for the server thread to finish. The handler will call server.shutdown()
@@ -107,7 +108,7 @@ def run(host: str, port: int, args):
         print("Keyboard interrupt received, shutting down server")
         import os
         # Open the URI (this will trigger the external app to send requests to our server)
-        os.startfile("vscode://ms-windows-ai-studio.windows-ai-studio/conversion/cancelJob")
+        # os.startfile("vscode://ms-windows-ai-studio.windows-ai-studio/conversion/cancelJob")
         # Ensure shutdown is called from a different thread context to avoid deadlocks
         threading.Thread(target=server.shutdown, daemon=True).start()
     finally:

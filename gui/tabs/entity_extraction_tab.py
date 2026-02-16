@@ -29,6 +29,8 @@ try:
         QListWidget,
         QListWidgetItem,
         QMessageBox,
+        QFileDialog,
+        QLineEdit,
     )
     from PySide6.QtCore import Qt, Signal, QThread  # noqa: E402
     from PySide6.QtGui import QFont, QPalette, QColor  # noqa: E402
@@ -37,13 +39,14 @@ except ImportError:
     QWidget = object
     QVBoxLayout = QHBoxLayout = QLabel = QTextEdit = QPushButton = object
     QComboBox = QCheckBox = QGroupBox = QProgressBar = QSplitter = object
-    QListWidget = QListWidgetItem = QMessageBox = object
+    QListWidget = QListWidgetItem = QMessageBox = QFileDialog = QLineEdit = object
     Qt = QThread = Signal = object
     QFont = QPalette = QColor = object
 
 from .status_presenter import TabStatusPresenter  # noqa: E402
 from ..ui import JobStatusWidget, ResultsSummaryBox  # noqa: E402
-from .workers import EntityExtractionWorker  # noqa: E402
+from .default_paths import get_default_dialog_dir  # noqa: E402
+from .workers import EntityExtractionWorker, FetchOntologyWorker  # noqa: E402
 
 
 class EntityExtractionTab(QWidget):
@@ -56,9 +59,36 @@ class EntityExtractionTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.worker = None
+        self.ontology_worker = None
         self.current_results = None
         self.setup_ui()
         self.connect_signals()
+        # self.fetch_ontology() - Defer until backend is ready
+
+    def fetch_ontology(self):
+        """Fetch ontology entities dynamically."""
+        self.ontology_worker = FetchOntologyWorker()
+        self.ontology_worker.finished_ok.connect(self.populate_entity_types)
+        self.ontology_worker.finished_err.connect(lambda e: print(f"Ontology fetch error: {e}"))
+        self.ontology_worker.start()
+
+    def populate_entity_types(self, items: list):
+        """Populate combo box with fetched ontology entities."""
+        current_text = self.entity_types_combo.currentText()
+        self.entity_types_combo.clear()
+        self.entity_types_combo.addItem("All")
+        
+        # items is a list of dicts: {"label": "Person", "attributes": [...], "prompt_hint": ...}
+        # We'll use the label for the combo box
+        labels = sorted([item.get("label", str(item)) for item in items])
+        self.entity_types_combo.addItems(labels)
+        
+        # Restore previous selection if possible, else default to "All"
+        index = self.entity_types_combo.findText(current_text)
+        if index >= 0:
+            self.entity_types_combo.setCurrentIndex(index)
+        else:
+            self.entity_types_combo.setCurrentText("All")
 
     def setup_ui(self):
         """Setup the user interface."""
@@ -77,12 +107,41 @@ class EntityExtractionTab(QWidget):
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
 
+        # File/Folder Selection
+        file_group = QGroupBox("File Input")
+        file_layout = QVBoxLayout(file_group)
+        
+        # File selection
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("File:"))
+        self.file_path = QLineEdit()
+        self.file_path.setPlaceholderText("Select a file to extract entities from...")
+        file_row.addWidget(self.file_path)
+        self.browse_file_btn = QPushButton("Browse File")
+        self.browse_file_btn.clicked.connect(self.browse_file)
+        file_row.addWidget(self.browse_file_btn)
+        file_layout.addLayout(file_row)
+        
+        # Folder selection
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("Folder:"))
+        self.folder_path = QLineEdit()
+        self.folder_path.setPlaceholderText("Or select a folder to process all files...")
+        folder_row.addWidget(self.folder_path)
+        self.browse_folder_btn = QPushButton("Browse Folder")
+        self.browse_folder_btn.clicked.connect(self.browse_folder)
+        folder_row.addWidget(self.browse_folder_btn)
+        file_layout.addLayout(folder_row)
+        
+        left_layout.addWidget(file_group)
+
         # Input group
-        input_group = QGroupBox("Input Text")
+        input_group = QGroupBox("Or Enter Text Directly")
         input_layout = QVBoxLayout(input_group)
 
         self.input_text = QTextEdit()
         self.input_text.setPlaceholderText("Enter text to extract entities from...")
+        self.input_text.setMaximumHeight(120)
         input_layout.addWidget(self.input_text)
 
         # Entity types selection
@@ -90,17 +149,7 @@ class EntityExtractionTab(QWidget):
         types_layout.addWidget(QLabel("Entity Types:"))
 
         self.entity_types_combo = QComboBox()
-        self.entity_types_combo.addItems([
-            "All",
-            "PERSON",
-            "ORG",
-            "GPE",
-            "MONEY",
-            "DATE",
-            "LAW",
-            "CASE",
-            "STATUTE"
-        ])
+        self.entity_types_combo.addItem("All")
         self.entity_types_combo.setCurrentText("All")
         types_layout.addWidget(self.entity_types_combo)
 
@@ -200,6 +249,31 @@ class EntityExtractionTab(QWidget):
         self.export_csv_button.clicked.connect(self.export_csv)
         self.custom_types_checkbox.toggled.connect(self.toggle_custom_types)
 
+    def browse_file(self):
+        """Browse for a single file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Document",
+            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
+            "All Files (*);;Text Files (*.txt);;PDF Files (*.pdf);;Word Files (*.docx);;Markdown (*.md)",
+        )
+        if file_path:
+            self.file_path.setText(file_path)
+            self.folder_path.clear()
+            self.input_text.clear()
+
+    def browse_folder(self):
+        """Browse for a folder."""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder",
+            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
+        )
+        if folder_path:
+            self.folder_path.setText(folder_path)
+            self.file_path.clear()
+            self.input_text.clear()
+
     def toggle_custom_types(self, checked):
         """Handle custom types checkbox toggle."""
         # For now, just enable/disable the combo box
@@ -208,8 +282,11 @@ class EntityExtractionTab(QWidget):
     def start_extraction(self):
         """Start entity extraction process."""
         text = self.input_text.toPlainText().strip()
-        if not text:
-            self.status.warn("Please enter text to extract entities from.")
+        file_path = self.file_path.text().strip()
+        folder_path = self.folder_path.text().strip()
+        
+        if not text and not file_path and not folder_path:
+            self.status.warn("Please enter text, select a file, or select a folder.")
             return
 
         # Get entity types
@@ -235,7 +312,7 @@ class EntityExtractionTab(QWidget):
         self.status.loading("Extracting entities...")
         self.worker = EntityExtractionWorker(
             asyncio_thread=None,
-            file_path="",
+            file_path=file_path,
             text_input=text,
             extraction_type=extraction_type,
             options={
@@ -317,6 +394,8 @@ class EntityExtractionTab(QWidget):
     def clear_results(self):
         """Clear all results and input."""
         self.input_text.clear()
+        self.file_path.clear()
+        self.folder_path.clear()
         self.results_list.clear()
         self.results_info.setText("No entities extracted yet.")
         self.export_json_button.setEnabled(False)

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 
 from PySide6.QtCore import QThread, QTimer  # noqa: E402
 from PySide6.QtGui import QFont  # noqa: E402
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QTableWidget,
     QTableWidgetItem,
@@ -23,7 +24,6 @@ from PySide6.QtWidgets import (  # noqa: E402
     QWidget,
     QLabel,
     QPushButton,
-    Qt,
 )
 
 
@@ -110,16 +110,16 @@ class AgentStatusWidget(QWidget):
                     status = (
                         "Active" if health.get("system_initialized") else "Inactive"
                     )
-                    healthtext = (
+                    health_text = (
                         "Healthy" if health.get("system_initialized") else "Unhealthy"
                     )
                 except Exception:
                     status = "Unknown"
-                    healthtext = "Unknown"  # noqa: F841
+                    health_text = "Unknown"
 
                 self.status_table.setItem(i, 0, QTableWidgetItem(name))
                 self.status_table.setItem(i, 1, QTableWidgetItem(status))
-                self.status_table.setItem(i, 2, QTableWidgetItem(health_text))  # noqa: F821
+                self.status_table.setItem(i, 2, QTableWidgetItem(health_text))
                 self.status_table.setItem(i, 3, QTableWidgetItem("Just now"))
 
         except Exception as e:

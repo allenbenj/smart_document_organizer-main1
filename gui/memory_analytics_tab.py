@@ -21,9 +21,7 @@ try:
 except Exception:
     requests = None
 
-
-API_BASE = "http://127.0.0.1:8000/api"
-
+from gui.services import api_client
 
 class MemoryAnalyticsTab(QWidget):
     def __init__(self, parent=None):
@@ -62,8 +60,8 @@ class MemoryAnalyticsTab(QWidget):
 
     def refresh(self):
         try:
-            stats = self._get("/agents/memory/stats")
-            flags = self._get("/agents/memory/flags")
+            stats = api_client._make_request("GET", "/api/agents/memory/stats")
+            flags = api_client._make_request("GET", "/api/agents/memory/flags")
             total = int(stats.get("proposals_total") or stats.get("total") or 0)
             self.total_lbl.setText(f"Total proposals: {total}")
             self.flags_lbl.setText(f"Flags: {flags.get('flags', {})}")

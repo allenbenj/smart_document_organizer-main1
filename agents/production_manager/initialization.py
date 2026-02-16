@@ -15,9 +15,13 @@ from .runtime import (
     create_document_processor,
     create_irac_analyzer,
     create_legal_entity_extractor,
-    create_legal_precedent_analyzer,
     create_legal_reasoning_engine,
 )
+
+if PRECEDENT_ANALYZER_AVAILABLE:
+    from .runtime import create_legal_precedent_analyzer
+else:
+    create_legal_precedent_analyzer = None
 
 
 class InitializationMixin:

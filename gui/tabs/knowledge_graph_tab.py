@@ -8,7 +8,7 @@ entity management, relationship queries, and graph visualization.
 import os
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -42,6 +42,8 @@ class KnowledgeGraphTab(QWidget):
         super().__init__()
         self.asyncio_thread = asyncio_thread
         self.init_ui()
+        # Defer API calls so the UI appears immediately
+        QTimer.singleShot(0, self._load_ontology_types)
 
     def init_ui(self):
         """Initialize the knowledge graph tab UI."""
@@ -171,7 +173,17 @@ class KnowledgeGraphTab(QWidget):
         self.clear_graph_btn.clicked.connect(self.clear_graph_results)
         self.kg_reason_btn.clicked.connect(self.kg_reason_over_text)
         self.kg_import_btn.clicked.connect(self.kg_import_triples)
-        # Load ontology types for KG
+        # Hook proposal buttons
+        self.load_props_btn.clicked.connect(self.load_proposals)
+        self.approve_btn.clicked.connect(self.approve_selected)
+        self.reject_btn.clicked.connect(self.reject_selected)
+        # Ingest controls
+        self.kg_add_file_btn.clicked.connect(self._kg_add_file)
+        self.kg_add_folder_btn.clicked.connect(self._kg_add_folder)
+        self.kg_process_btn.clicked.connect(self._kg_process_files)
+
+    def _load_ontology_types(self):
+        """Load ontology types from backend (deferred from constructor)."""
         try:
             result = api_client.get_ontology_entities()
             items = result.get("items", [])
@@ -183,14 +195,6 @@ class KnowledgeGraphTab(QWidget):
                 self.kg_type_combo.addItems(labels)
         except Exception:
             pass
-        # Hook proposal buttons
-        self.load_props_btn.clicked.connect(self.load_proposals)
-        self.approve_btn.clicked.connect(self.approve_selected)
-        self.reject_btn.clicked.connect(self.reject_selected)
-        # Ingest controls
-        self.kg_add_file_btn.clicked.connect(self._kg_add_file)
-        self.kg_add_folder_btn.clicked.connect(self._kg_add_folder)
-        self.kg_process_btn.clicked.connect(self._kg_process_files)
 
     def add_entity(self):  # noqa: C901
         """Add entity to knowledge graph via API."""
@@ -393,4 +397,4 @@ class KnowledgeGraphTab(QWidget):
 
 
 # Import here to avoid circular imports
-from .workers import KGFromFilesWorker
+from .workers import KGFromFilesWorker  # noqa: E402

@@ -322,6 +322,10 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
             "ocr_used_count": 0,
             "errors_encountered": 0,
         }
+        
+        # Auto-detect Tesseract on Windows
+        if OCR_AVAILABLE:
+            self._detect_tesseract()
 
         # Document format handlers
         self.format_handlers = {
@@ -433,6 +437,31 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
             logger.info(
                 f"Unavailable optional dependencies: {', '.join(unavailable)}. Some file types may not be processed."
             )
+
+    def _detect_tesseract(self):
+        """Detect Tesseract executable on Windows."""
+        if os.name != "nt":
+            return
+            
+        # Check if already set
+        if pytesseract.tesseract_cmd != 'tesseract':
+             return
+
+        # Common paths
+        possible_paths = [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+            os.path.expandvars(r"%LOCALAPPDATA%\Tesseract-OCR\tesseract.exe"),
+            os.path.expandvars(r"%APPDATA%\Local\Programs\Tesseract-OCR\tesseract.exe"),
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                logger.info(f"Found Tesseract at: {path}")
+                pytesseract.tesseract_cmd = path
+                return
+        
+        logger.warning("Tesseract executable not found in common locations. OCR may fail.")
 
     async def _process_task(  # noqa: C901
         self, task_data: Any, metadata: Dict[str, Any]

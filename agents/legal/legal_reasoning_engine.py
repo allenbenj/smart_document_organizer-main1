@@ -29,7 +29,7 @@ from utils.logging import (  # noqa: E402
 )
 
 # Import core components
-from ..base.core_integration import EnhancedCoreAgent  # noqa: E402
+from agents.base.core_integration import EnhancedCoreAgent  # noqa: E402
 
 try:
     import importlib
@@ -44,7 +44,7 @@ except Exception:
             self._args = args
             self._kwargs = kwargs
 
-from ..extractors.ontology import LegalEntityType  # noqa: E402
+from agents.extractors.ontology import LegalEntityType  # noqa: E402
 
 # Initialize logger
 reasoning_logger = get_detailed_logger("LegalReasoningEngine", LogCategory.AGENT)

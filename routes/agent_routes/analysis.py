@@ -243,7 +243,11 @@ async def extract_entities(
     service: AgentService = Depends(get_agent_service)
 ) -> Dict[str, Any]:
     try:
-        result = await service.dispatch_task("extract_entities", {"text": payload.text})
+        task_payload = {"text": payload.text}
+        if payload.options:
+            task_payload.update(payload.options)
+        
+        result = await service.dispatch_task("extract_entities", task_payload)
 
         if isinstance(result, dict):
             if not result.get("success", True):
@@ -254,10 +258,10 @@ async def extract_entities(
                     "metadata": {"recoverable": True},
                 })
             return _v("entity_extractor", {
-                "success": True,
-                "data": result.get("data", {}),
-                "error": None,
-                "metadata": result.get("metadata", {}),
+                 "success": True,
+                 "data": result.get("data", {}),
+                 "error": None,
+                 "metadata": result.get("metadata", {}),
             })
 
         return _v("entity_extractor", {

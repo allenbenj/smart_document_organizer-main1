@@ -39,7 +39,7 @@ class PipelinesTab(QWidget):
         super().__init__()
         self.presets = []
         self.init_ui()
-        self.load_presets()
+        # self.load_presets() - Defer until backend is ready
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -168,15 +168,19 @@ class PipelinesTab(QWidget):
 
     def load_presets(self):
         try:
+            print("[PipelinesTab] Fetching pipeline presets...")
             result = api_client.get_pipeline_presets()
             data = result.get("items", [])
+            print(f"[PipelinesTab] Loaded {len(data)} presets.")
             self.presets = data
             self.preset_combo.clear()
             for p in data:
                 self.preset_combo.addItem(p.get("name", "Preset"))
         except Exception as e:
-            self.results_text.setPlainText(f"Failed to load presets: {e}")
-            self.status.error(f"Failed to load presets: {e}")
+            msg = f"Failed to load presets: {e}"
+            print(f"[PipelinesTab] ERROR: {msg}")
+            self.results_text.setPlainText(msg)
+            self.status.error(msg)
 
     def current_preset(self) -> dict:
         idx = self.preset_combo.currentIndex()

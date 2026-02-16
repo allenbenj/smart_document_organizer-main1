@@ -33,7 +33,7 @@ try:
     from agents.legal.toulmin_analyzer import ToulminAnalyzer  # noqa: E402
 
     PRODUCTION_AGENTS_AVAILABLE = True
-except ImportError as e:
+except Exception as e:
     logger.warning(f"Production agents not available: {e}")
     EnhancedAgentFactory = None  # type: ignore
     create_legal_entity_extractor = None  # type: ignore

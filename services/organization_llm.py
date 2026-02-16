@@ -41,14 +41,19 @@ class OrganizationLLMPolicy:
             or "xai"
         ).strip().lower()
 
-        if provider_name not in {"xai", "deepseek"}:
-            provider_name = "xai"
+        if provider_name not in {"xai", "deepseek", "local"}:
+            # Default to local if no API keys are present, otherwise xai
+            if not os.getenv("XAI_API_KEY") and not os.getenv("DEEPSEEK_API_KEY"):
+                provider_name = "local"
+            else:
+                provider_name = "xai"
 
         resolved_model = (
             model
             or runtime_model
             or os.getenv("ORGANIZER_LLM_MODEL")
-            or (os.getenv("DEEPSEEK_MODEL", "deepseek-chat") if provider_name == "deepseek" else os.getenv("LLM_MODEL", "grok-4-fast-reasoning"))
+            or (os.getenv("DEEPSEEK_MODEL", "deepseek-chat") if provider_name == "deepseek" else 
+                ("heuristic" if provider_name == "local" else os.getenv("LLM_MODEL", "grok-4-fast-reasoning")))
         )
 
         return OrganizationLLMConfig(provider=provider_name, model=str(resolved_model).strip())
@@ -58,4 +63,5 @@ class OrganizationLLMPolicy:
         return {
             "xai": bool(os.getenv("XAI_API_KEY", "").strip()),
             "deepseek": bool(os.getenv("DEEPSEEK_API_KEY", "").strip()),
+            "local": True,
         }

@@ -585,6 +585,13 @@ class FileIndexService:
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
         should_stop: Optional[Callable[[], bool]] = None,
     ) -> Dict[str, Any]:
+        # best-effort tracer (do not fail if opentelemetry not available)
+        try:
+            from opentelemetry import trace as _otel_trace  # type: ignore
+            _file_index_tracer = _otel_trace.get_tracer(__name__)
+        except Exception:
+            _file_index_tracer = None
+
         indexed = 0
         errors = 0
         scanned = 0
@@ -711,7 +718,12 @@ class FileIndexService:
                             skipped += 1
                             continue
 
-                        ingest = self.ingest_pipeline.ingest_file(self, root_norm=root_norm, path=p, ext=ext, st=st)
+                        if _file_index_tracer:
+                            with _file_index_tracer.start_as_current_span("file_index.ingest_file", attributes={"path": str(p), "ext": ext}):
+                                ingest = self.ingest_pipeline.ingest_file(self, root_norm=root_norm, path=p, ext=ext, st=st)
+                        else:
+                            ingest = self.ingest_pipeline.ingest_file(self, root_norm=root_norm, path=p, ext=ext, st=st)
+
                         if ingest.success:
                             indexed += 1
                         else:

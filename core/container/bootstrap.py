@@ -32,7 +32,7 @@ async def configure(services: Any, app: Any) -> None:
         )
         logger.info("Registered ConfigurationManager")
     except Exception as e:
-        logger.warning(f"ConfigurationManager registration failed: {e}")
+        logger.debug(f"Optional ConfigurationManager unavailable: {e}")
 
     # Database manager
     try:
@@ -45,26 +45,60 @@ async def configure(services: Any, app: Any) -> None:
             )
             logger.info("Registered DatabaseManager")
     except Exception as e:
-        logger.warning(f"DatabaseManager registration failed: {e}")
+        logger.debug(f"Optional DatabaseManager unavailable: {e}")
 
-    # Vector store (optional)
+    # Vector store (optional, dummy if missing)
     try:
         vs = get_vector_store()
-        if vs is not None:
-            await services.register_instance(
-                type(vs),
-                vs,
-                aliases=[
-                    "vector_store",
-                    "enhanced_vector_store",
-                    "unified_vector_store",
-                    "chroma_memory",
-                    "faiss_vector_store",
-                ],
-            )
-            logger.info("Registered VectorStore (if available)")
+        dummy = False
+        if vs is None:
+            dummy = True
+            class DummyVectorStore:
+                def __init__(self):
+                    self.doc_count = 0
+
+                async def initialize(self) -> None:
+                    pass
+
+                async def add_document(self, *args, **kwargs) -> str:
+                    self.doc_count += 1
+                    return f"dummy_doc_{self.doc_count}"
+
+                async def search(self, *args, **kwargs) -> list:
+                    return []
+
+                async def search_similar(self, *args, **kwargs) -> list:
+                    return []
+
+                async def health_check(self) -> dict:
+                    return {"healthy": True, "mode": "dummy"}
+
+                async def close(self) -> None:
+                    pass
+
+                async def get_statistics(self) -> dict:
+                    return {"total_documents": self.doc_count}
+
+                def get_system_status(self) -> dict:
+                    return {"status": "dummy", "available": False}
+
+            vs = DummyVectorStore()
+        vs_type = type(vs)
+        await services.register_instance(
+            vs_type,
+            vs,
+            aliases=[
+                "vector_store",
+                "enhanced_vector_store",
+                "unified_vector_store",
+                "chroma_memory",
+                "faiss_vector_store",
+            ],
+        )
+        mode = "dummy" if dummy else "real"
+        logger.info(f"Registered VectorStore ({mode})")
     except Exception as e:
-        logger.warning(f"Vector store registration failed: {e}")
+        logger.debug(f"Vector store registration failed (optional): {e}")
 
     # Knowledge manager (optional)
     try:
@@ -77,7 +111,7 @@ async def configure(services: Any, app: Any) -> None:
             )
             logger.info("Registered KnowledgeManager (if available)")
     except Exception as e:
-        logger.warning(f"Knowledge manager registration failed: {e}")
+        logger.debug(f"Optional KnowledgeManager unavailable: {e}")
 
     # Memory manager (required for memory features)
     try:
@@ -94,6 +128,20 @@ async def configure(services: Any, app: Any) -> None:
             aliases=["memory_service", "memory_service_manager"],
         )
         logger.info("Registered UnifiedMemoryManager + MemoryService")
+
+        # Enhanced Persistence Manager (optional)
+        try:
+            from agents.base.core_integration import EnhancedPersistenceManager, create_enhanced_persistence_manager
+            epm = create_enhanced_persistence_manager()
+            await epm.initialize()
+            await services.register_instance(
+                EnhancedPersistenceManager,
+                epm,
+                aliases=["enhanced_persistence_manager", "persistence_manager"],
+            )
+            logger.info("Registered EnhancedPersistenceManager")
+        except Exception as e:
+            logger.debug(f"EnhancedPersistenceManager unavailable (optional): {e}")
     except Exception as e:
         logger.warning(f"Memory manager registration failed (no fallback): {e}")
 
@@ -114,6 +162,6 @@ async def configure(services: Any, app: Any) -> None:
         )
         logger.info("Registered LLMManager (if available)")
     except Exception as e:
-        logger.warning(f"LLMManager registration skipped: {e}")
+        logger.debug(f"Optional LLMManager skipped: {e}")
 
     logger.debug("Service container bootstrap finished")

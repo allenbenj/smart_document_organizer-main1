@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QFileDialog,
 )
 
 try:
@@ -29,6 +30,7 @@ except ImportError:
     requests = None  # type: ignore
 
 from ..services import api_client
+from .default_paths import get_default_dialog_dir
 
 
 class ClassificationTab(QWidget):
@@ -45,8 +47,32 @@ class ClassificationTab(QWidget):
 
         input_group = QGroupBox("Text Input")
         input_layout = QVBoxLayout()
+        
+        # File/Folder Selection
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("File:"))
+        self.file_path = QLineEdit()
+        self.file_path.setPlaceholderText("Select a file...")
+        file_row.addWidget(self.file_path)
+        self.browse_file_btn = QPushButton("Browse File")
+        self.browse_file_btn.clicked.connect(self.browse_file)
+        file_row.addWidget(self.browse_file_btn)
+        input_layout.addLayout(file_row)
+        
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("Folder:"))
+        self.folder_path = QLineEdit()
+        self.folder_path.setPlaceholderText("Or select a folder...")
+        folder_row.addWidget(self.folder_path)
+        self.browse_folder_btn = QPushButton("Browse Folder")
+        self.browse_folder_btn.clicked.connect(self.browse_folder)
+        folder_row.addWidget(self.browse_folder_btn)
+        input_layout.addLayout(folder_row)
+        
+        input_layout.addWidget(QLabel("Or enter text directly:"))
         self.text = QTextEdit()
         self.text.setPlaceholderText("Enter text to classify...")
+        self.text.setMaximumHeight(100)
         input_layout.addWidget(self.text)
         options_row = QHBoxLayout()
         self.quality_gate = QCheckBox("Quality gate")
@@ -92,9 +118,39 @@ class ClassificationTab(QWidget):
         self.setLayout(layout)
 
         self.run_btn.clicked.connect(self.do_classify)
-        self.clear_btn.clicked.connect(
-            lambda: (self.text.clear(), self.table.setRowCount(0))
+        self.clear_btn.clicked.connect(self.clear_all)
+
+    def browse_file(self):
+        """Browse for a single file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Document",
+            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
+            "All Files (*);;Text Files (*.txt);;PDF Files (*.pdf);;Word Files (*.docx);;Markdown (*.md)",
         )
+        if file_path:
+            self.file_path.setText(file_path)
+            self.folder_path.clear()
+            self.text.clear()
+
+    def browse_folder(self):
+        """Browse for a folder."""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder",
+            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
+        )
+        if folder_path:
+            self.folder_path.setText(folder_path)
+            self.file_path.clear()
+            self.text.clear()
+
+    def clear_all(self):
+        """Clear all inputs and results."""
+        self.text.clear()
+        self.file_path.clear()
+        self.folder_path.clear()
+        self.table.setRowCount(0)
 
     def do_classify(self):
         t = self.text.toPlainText().strip()

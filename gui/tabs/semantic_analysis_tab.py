@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QVBoxLayout,
     QWidget,
 )
+from .default_paths import get_default_dialog_dir  # noqa: E402
 
 
 class SemanticAnalysisTab(QWidget):
@@ -58,12 +59,23 @@ class SemanticAnalysisTab(QWidget):
         file_layout = QHBoxLayout()
         self.file_path = QLineEdit()
         self.file_path.setPlaceholderText("Select document file...")
-        self.browse_btn = QPushButton("Browse")
+        self.browse_btn = QPushButton("Browse File")
         self.browse_btn.clicked.connect(self.browse_file)
         file_layout.addWidget(QLabel("File:"))
         file_layout.addWidget(self.file_path)
         file_layout.addWidget(self.browse_btn)
         input_layout.addLayout(file_layout)
+
+        # Folder selection
+        folder_layout = QHBoxLayout()
+        self.folder_path = QLineEdit()
+        self.folder_path.setPlaceholderText("Or select folder...")
+        self.browse_folder_btn = QPushButton("Browse Folder")
+        self.browse_folder_btn.clicked.connect(self.browse_folder)
+        folder_layout.addWidget(QLabel("Folder:"))
+        folder_layout.addWidget(self.folder_path)
+        folder_layout.addWidget(self.browse_folder_btn)
+        input_layout.addLayout(folder_layout)
 
         # Text input
         input_layout.addWidget(QLabel("Or enter text directly:"))
@@ -156,11 +168,23 @@ class SemanticAnalysisTab(QWidget):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Document",
-            "",
-            "All Files (*);;Text Files (*.txt);;PDF Files (*.pdf);;Word Files (*.docx)",
+            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
+            "All Files (*);;Text Files (*.txt);;PDF Files (*.pdf);;Word Files (*.docx);;Markdown (*.md)",
         )
         if file_path:
             self.file_path.setText(file_path)
+            self.folder_path.clear()
+
+    def browse_folder(self):
+        """Browse for a folder."""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder",
+            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
+        )
+        if folder_path:
+            self.folder_path.setText(folder_path)
+            self.file_path.clear()
 
     def analyze_document(self):
         """Analyze document using semantic analyzer."""

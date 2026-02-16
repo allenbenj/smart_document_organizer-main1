@@ -22,12 +22,14 @@ try:
         QTextEdit,
         QPushButton,
         QComboBox,
+        QCheckBox,
         QGroupBox,
         QProgressBar,
         QSplitter,
         QTextBrowser,
         QMessageBox,
-        QCheckBox,
+        QFileDialog,
+        QLineEdit,
     )
     from PySide6.QtCore import Qt, Signal, QThread  # noqa: E402
     from PySide6.QtGui import QFont, QPalette, QColor  # noqa: E402
@@ -35,13 +37,14 @@ except ImportError:
     # Fallback for systems without PySide6
     QWidget = object
     QVBoxLayout = QHBoxLayout = QLabel = QTextEdit = QPushButton = object
-    QComboBox = QGroupBox = QProgressBar = QSplitter = QTextBrowser = object
-    QMessageBox = QCheckBox = object
+    QComboBox = QCheckBox = QGroupBox = QProgressBar = QSplitter = QTextBrowser = object
+    QMessageBox = QFileDialog = QLineEdit = object
     Qt = QThread = Signal = object
     QFont = QPalette = QColor = object
 
 from .status_presenter import TabStatusPresenter  # noqa: E402
 from ..ui import JobStatusWidget, ResultsSummaryBox  # noqa: E402
+from .default_paths import get_default_dialog_dir  # noqa: E402
 from .workers import LegalReasoningWorker  # noqa: E402
 
 
@@ -76,12 +79,39 @@ class LegalReasoningTab(QWidget):
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
 
+        # File/Folder Selection
+        file_group = QGroupBox("File Input")
+        file_layout = QVBoxLayout(file_group)
+        
+        file_row = QHBoxLayout()
+        file_row.addWidget(QLabel("File:"))
+        self.file_path = QLineEdit()
+        self.file_path.setPlaceholderText("Select a file...")
+        file_row.addWidget(self.file_path)
+        self.browse_file_btn = QPushButton("Browse File")
+        self.browse_file_btn.clicked.connect(self.browse_file)
+        file_row.addWidget(self.browse_file_btn)
+        file_layout.addLayout(file_row)
+        
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("Folder:"))
+        self.folder_path = QLineEdit()
+        self.folder_path.setPlaceholderText("Or select a folder...")
+        folder_row.addWidget(self.folder_path)
+        self.browse_folder_btn = QPushButton("Browse Folder")
+        self.browse_folder_btn.clicked.connect(self.browse_folder)
+        folder_row.addWidget(self.browse_folder_btn)
+        file_layout.addLayout(folder_row)
+        
+        left_layout.addWidget(file_group)
+
         # Input group
-        input_group = QGroupBox("Legal Query")
+        input_group = QGroupBox("Or Enter Legal Query Directly")
         input_layout = QVBoxLayout(input_group)
 
         self.input_text = QTextEdit()
         self.input_text.setPlaceholderText("Enter legal question or scenario to analyze...")
+        self.input_text.setMaximumHeight(120)
         input_layout.addWidget(self.input_text)
 
         # Reasoning options
@@ -203,11 +233,39 @@ class LegalReasoningTab(QWidget):
         self.export_json_button.clicked.connect(self.export_json)
         self.export_html_button.clicked.connect(self.export_html)
 
+    def browse_file(self):
+        """Browse for a single file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Document",
+            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
+            "All Files (*);;Text Files (*.txt);;PDF Files (*.pdf);;Word Files (*.docx);;Markdown (*.md)",
+        )
+        if file_path:
+            self.file_path.setText(file_path)
+            self.folder_path.clear()
+            self.input_text.clear()
+
+    def browse_folder(self):
+        """Browse for a folder."""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder",
+            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
+        )
+        if folder_path:
+            self.folder_path.setText(folder_path)
+            self.file_path.clear()
+            self.input_text.clear()
+
     def start_reasoning(self):
         """Start legal reasoning process."""
         text = self.input_text.toPlainText().strip()
-        if not text:
-            self.status.warn("Please enter a legal question or scenario to analyze.")
+        file_path = self.file_path.text().strip()
+        folder_path = self.folder_path.text().strip()
+        
+        if not text and not file_path and not folder_path:
+            self.status.warn("Please enter text, select a file, or select a folder.")
             return
 
         # Get reasoning options
@@ -233,7 +291,7 @@ class LegalReasoningTab(QWidget):
         self.status.loading("Running legal analysis...")
         self.worker = LegalReasoningWorker(
             asyncio_thread=None,
-            file_path="",
+            file_path=file_path,
             text_input=text,
             reasoning_type=options.get("reasoning_type", "General Analysis"),
             options=options,
@@ -347,6 +405,8 @@ class LegalReasoningTab(QWidget):
     def clear_results(self):
         """Clear all results and input."""
         self.input_text.clear()
+        self.file_path.clear()
+        self.folder_path.clear()
         self.results_browser.clear()
         self.export_json_button.setEnabled(False)
         self.export_html_button.setEnabled(False)

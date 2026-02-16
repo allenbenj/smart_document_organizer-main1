@@ -64,7 +64,7 @@ try:
     from spacy.matcher import Matcher  # noqa: E402
 
     SPACY_AVAILABLE = True
-except ImportError:
+except Exception:
     spacy = None
     Matcher = None
     SPACY_AVAILABLE = False

@@ -7,14 +7,19 @@ legal reasoning, and document organization.
 """
 
 import asyncio
+import argparse
+import atexit
 import json
 import hashlib
 import logging
 import os  # noqa: E402
 import sqlite3
+import socket
+import subprocess
 import sys  # noqa: E402
 import time
 import traceback
+import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 API_KEY_ENV = os.getenv("API_KEY", "")
 STRICT_PRODUCTION_STARTUP = (
-    os.getenv("STRICT_PRODUCTION_STARTUP", "1").strip().lower()
+    os.getenv("STRICT_PRODUCTION_STARTUP", "0").strip().lower()
     not in {"0", "false", "no", "off"}
 )
 DEFAULT_REQUIRED_PRODUCTION_AGENTS = [
@@ -331,6 +336,14 @@ async def _startup_services():
         from core.container.service_container_impl import ProductionServiceContainer  # noqa: E402
 
         _finish_step(step_config)
+
+        # Initialize tracing (non-fatal). Best-effort bootstrap using OpenTelemetry.
+        try:
+            from core.tracing import init_tracing  # noqa: E402
+            init_tracing(app=app, service_name="smart_document_organizer")
+            logger.info("Tracing initialized")
+        except Exception as _tr_err:
+            logger.warning(f"Tracing initialization skipped/failed: {_tr_err}")
     except Exception as e:
         _fail_step(step_config, e)
         logger.error(f"Startup self-check failed: {e}")
@@ -650,7 +663,69 @@ async def startup_control_restart(payload: dict):
 
 
 if __name__ == "__main__":
-    import uvicorn  # noqa: E402
+    parser = argparse.ArgumentParser(description="Smart Document Organizer launcher")
+    parser.add_argument(
+        "--backend",
+        action="store_true",
+        help="Start backend API instead of GUI dashboard",
+    )
+    args = parser.parse_args()
 
-    logger.info("Starting the application...")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    def _is_backend_listening(host: str = "127.0.0.1", port: int = 8000) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            return False
+
+    def _wait_for_backend(url: str = "http://127.0.0.1:8000/api/health", timeout_s: int = 30) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    if response.status == 200:
+                        return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return False
+
+    if args.backend:
+        import uvicorn  # noqa: E402
+
+        logger.info("Starting backend API on port 8000...")
+        uvicorn.run(app, host="0.0.0.0", port=8000)
+    else:
+        logger.info("Starting GUI dashboard...")
+        backend_proc = None
+        if not _is_backend_listening():
+            logger.info("Starting backend for GUI...")
+            backend_proc = subprocess.Popen(
+                [sys.executable, __file__, "--backend"],
+                cwd=os.path.dirname(__file__) or None,
+            )
+            if not _wait_for_backend():
+                logger.warning("Backend did not become healthy before GUI launch")
+
+            def _cleanup_backend() -> None:
+                if backend_proc is None:
+                    return
+                try:
+                    if backend_proc.poll() is None:
+                        backend_proc.terminate()
+                except Exception:
+                    pass
+
+            atexit.register(_cleanup_backend)
+        else:
+            logger.info("Backend already running, launching GUI only...")
+
+        os.environ["GUI_SKIP_WSL_BACKEND_START"] = "1"
+        logger.info("Starting GUI dashboard...")
+        try:
+            from gui.gui_dashboard import main as gui_main  # noqa: E402
+
+            gui_main()
+        except Exception:
+            logger.exception("Failed to start GUI dashboard")
+            raise

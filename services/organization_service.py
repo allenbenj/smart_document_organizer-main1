@@ -190,13 +190,16 @@ class OrganizationService:
             folder = self._infer_folder(name, preview)
             fname = self._infer_filename(rec)
 
-            llm = self._llm_suggest(
-                provider=provider_name,
-                model=model_name,
-                file_name=name,
-                current_path=str(rec.get("normalized_path") or ""),
-                preview=preview,
-            )
+            llm = None
+            if provider_name != "local":
+                llm = self._llm_suggest(
+                    provider=provider_name,
+                    model=model_name,
+                    file_name=name,
+                    current_path=str(rec.get("normalized_path") or ""),
+                    preview=preview,
+                )
+
             if isinstance(llm, dict) and llm.get("proposed_folder") and llm.get("proposed_filename"):
                 folder, fname = self._sanitize_path_parts(
                     str(llm.get("proposed_folder")),
@@ -211,6 +214,7 @@ class OrganizationService:
                 rationale = "Heuristic classification by filename/content preview"
                 alternatives = ["Inbox/Review"]
                 source = "heuristic"
+
 
             proposal = {
                 "run_id": run_id,
