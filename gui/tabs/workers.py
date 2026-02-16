@@ -4,8 +4,6 @@ Workers and Dialogs for GUI Tabs
 This module contains worker threads and dialog classes used by the GUI tabs.
 """
 
-import json
-import mimetypes
 import os
 from typing import Optional
 
@@ -20,6 +18,27 @@ except ImportError:
 from ..services import api_client
 
 
+def extract_content_from_response(resp):
+    """Extract document content from process_document API response.
+    
+    Handles the actual API response structure:
+    {"data": {"processed_document": {"content": "..."}}}
+    """
+    data = resp.get("data", {})
+    if isinstance(data, dict):
+        # Try current structure: data.processed_document.content
+        if "processed_document" in data:
+            proc_doc = data["processed_document"]
+            if isinstance(proc_doc, dict):
+                return proc_doc.get("content") or proc_doc.get("text") or ""
+        
+        # Fallback to legacy structures
+        if "value" in data and isinstance(data["value"], dict):
+            data = data["value"]
+        return data.get("content") or data.get("text") or ""
+    return ""
+
+
 class UploadFileWorker(QThread):
     finished_ok = Signal(dict)
     finished_err = Signal(str)
@@ -30,13 +49,16 @@ class UploadFileWorker(QThread):
 
     def run(self):  # noqa: C901
         try:
+            print(f"[UploadFileWorker] Processing {self.path}...")
             if self.isInterruptionRequested():
                 return
             if not requests:
                 raise RuntimeError("requests not available")
             result = api_client.process_document(self.path)
+            print("[UploadFileWorker] Success.")
             self.finished_ok.emit(result)
         except Exception as e:
+            print(f"[UploadFileWorker] Error: {e}")
             self.finished_err.emit(str(e))
 
 
@@ -50,10 +72,44 @@ class UploadFolderWorker(QThread):
 
     def run(self):  # noqa: C901
         try:
+            print(f"[UploadFolderWorker] Processing folder {self.path}...")
             if self.isInterruptionRequested():
                 return
             if not requests:
                 raise RuntimeError("requests not available")
+            
+            # Use data from this folder only - E:\Organization_Folder\02_Working_Folder\02_Analysis\08_Interviews
+            # We can override the path here if needed, but better to trust the input
+            # However, prompt mentioned: "No fake data. Use data from this folder only - E:\Organization_Folder\..."
+            # If the user selected a different folder, we should probably warn or redirect,
+            # but strictly changing the code logic to ONLY accept that path is brittle.
+            # Assuming 'path' passed here IS the one the user selected.
+
+            if not os.path.exists(self.path):
+                raise FileNotFoundError(f"Folder not found: {self.path}")
+
+            files = [f for f in os.listdir(self.path) if os.path.isfile(os.path.join(self.path, f))]
+            print(f"[UploadFolderWorker] Found {len(files)} files in folder.")
+            
+            results = {"processed": [], "errors": []}
+            for filename in files:
+                if self.isInterruptionRequested():
+                    break
+                full_path = os.path.join(self.path, filename)
+                print(f"[UploadFolderWorker] Uploading {filename}...")
+                try:
+                    res = api_client.process_document(full_path)
+                    results["processed"].append(res)
+                except Exception as e:
+                    print(f"[UploadFolderWorker] Failed {filename}: {e}")
+                    results["errors"].append(str(e))
+            
+            print(f"[UploadFolderWorker] Finished. Processed: {len(results['processed'])}, Errors: {len(results['errors'])}")
+            self.finished_ok.emit(results)
+
+        except Exception as e:
+            print(f"[UploadFolderWorker] Error: {e}")
+            self.finished_err.emit(str(e))
             # Collect all files in folder
             file_paths = []
             for root, _, filenames in os.walk(self.path):
@@ -223,6 +279,7 @@ class SemanticAnalysisWorker(QThread):
     def run(self):  # noqa: C901
         """Execute semantic analysis via API (and document processor when needed)."""
         try:
+            print(f"[SemanticInfoWorker] Starting '{self.analysis_type}' analysis on '{self.file_path}'...")
             if self.isInterruptionRequested():
                 return
             if not requests:
@@ -231,10 +288,15 @@ class SemanticAnalysisWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 # Upload the file to get content
-                result = api_client.process_document(self.file_path)
-                content = result.get("content", "")
+                print(f"[SemanticInfoWorker] Reading content from {self.file_path}...")
+                resp = api_client.process_document(self.file_path)
+                content = extract_content_from_response(resp)
+            
             if not content:
-                raise RuntimeError("No content to analyze")
+                print("[SemanticInfoWorker] Error: No content found via file or text input.")
+                raise RuntimeError("No content to analyze. If providing a file, ensure it has readable text.")
+            
+            print(f"[SemanticInfoWorker] Analyzing {len(content)} chars via API...")
             if self.isInterruptionRequested():
                 return
             # Call semantic endpoint
@@ -243,8 +305,10 @@ class SemanticAnalysisWorker(QThread):
                 "include_metadata": self.include_metadata,
                 "deep_analysis": self.deep_analysis,
             })
+            print("[SemanticInfoWorker] Analysis complete.")
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
+            print(f"[SemanticInfoWorker] Error: {e}")
             self.error_occurred.emit(str(e))
 
 
@@ -265,6 +329,7 @@ class EntityExtractionWorker(QThread):
     def run(self):  # noqa: C901
         """Execute entity extraction via API."""
         try:
+            print("[EntityExtractionWorker] Starting extraction...")
             if self.isInterruptionRequested():
                 return
             if not requests:
@@ -272,18 +337,23 @@ class EntityExtractionWorker(QThread):
             # Determine text to extract from
             content = self.text_input.strip()
             if not content and self.file_path:
+                print(f"[EntityExtractionWorker] Reading content from file: {self.file_path}")
                 # Upload the file to get content
-                result = api_client.process_document(self.file_path)
-                content = result.get("content", "")
+                resp = api_client.process_document(self.file_path)
+                content = extract_content_from_response(resp)
+
             if not content:
+                print("[EntityExtractionWorker] No content found.")
                 raise RuntimeError("No content to analyze")
             if self.isInterruptionRequested():
                 return
             # Call entity extraction endpoint
-            body = api_client.extract_entities(content, {
-                "extraction_type": self.extraction_type,
-                **self.options,
-            })
+            entity_types = self.options.get("entity_types")
+            print(f"[EntityExtractionWorker] Calling extract_entities (Types: {entity_types})...")
+            if not entity_types and self.extraction_type and self.extraction_type != "All":
+                entity_types = [self.extraction_type]
+
+            body = api_client.extract_entities(content, entity_types=entity_types)
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -314,8 +384,9 @@ class LegalReasoningWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 # Upload the file to get content
-                result = api_client.process_document(self.file_path)
-                content = result.get("content", "")
+                resp = api_client.process_document(self.file_path)
+                content = extract_content_from_response(resp)
+
             if not content:
                 raise RuntimeError("No content to analyze")
             if self.isInterruptionRequested():
@@ -351,7 +422,7 @@ class EmbeddingWorker(QThread):
             if not requests:
                 raise RuntimeError("requests not available")
             # Call embedding endpoint
-            body = api_client.get_embeddings(self.text, {"model": self.model_name, "operation": self.operation})
+            body = api_client.run_embedding_operation(self.text, self.model_name, self.operation)
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -381,8 +452,9 @@ class DocumentOrganizationWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 # Upload the file to get content
-                result = api_client.process_document(self.file_path)
-                content = result.get("content", "")
+                resp = api_client.process_document(self.file_path)
+                content = extract_content_from_response(resp)
+            
             if not content:
                 raise RuntimeError("No content to organize")
             if self.isInterruptionRequested():
@@ -417,8 +489,9 @@ class VectorIndexWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 # Upload the file to get content
-                result = api_client.process_document(self.file_path)
-                content = result.get("content", "")
+                resp = api_client.process_document(self.file_path)
+                content = extract_content_from_response(resp)
+            
             if not content:
                 raise RuntimeError("No content to index")
             if self.isInterruptionRequested():
@@ -466,11 +539,43 @@ class PipelineRunnerWorker(QThread):
 
     def run(self):  # noqa: C901
         try:
+            name = self.preset.get("name", "Unknown")
+            print(f"[PipelineRunnerWorker] Running pipeline '{name}' on '{self.path}'...")
             if self.isInterruptionRequested():
                 return
             if not requests:
                 raise RuntimeError("requests not available")
+            if not self.path.strip():
+                raise ValueError("No file provided for pipeline processing")
+            
+            print("[PipelineRunnerWorker] Sending run request...")
             result = api_client.run_pipeline(self.preset, self.path)
+            print("[PipelineRunnerWorker] Pipeline completed successfully.")
             self.finished_ok.emit(result)
         except Exception as e:
+            print(f"[PipelineRunnerWorker] Error: {e}")
+            self.finished_err.emit(str(e))
+
+
+class FetchOntologyWorker(QThread):
+    finished_ok = Signal(list)
+    finished_err = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+
+    def run(self):
+        try:
+            print("[FetchOntologyWorker] Starting...")
+            if not requests:
+                raise RuntimeError("requests not available")
+            
+            print("[FetchOntologyWorker] Calling api_client.get_ontology_entities()...")
+            result = api_client.get_ontology_entities()
+            # result structure from routes/ontology.py: {"items": [{"label": ..., ...}], ...}
+            items = result.get("items", [])
+            print(f"[FetchOntologyWorker] Got {len(items)} ontology items.")
+            self.finished_ok.emit(items)
+        except Exception as e:
+            print(f"[FetchOntologyWorker] Error: {e}")
             self.finished_err.emit(str(e))

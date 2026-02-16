@@ -57,6 +57,7 @@ class ApiClient:
             return f"{self.api_base_url}{path}"
         return f"{self.api_base_url}/{path}"
 
+
     def _make_request(self, method: str, endpoint: str, timeout: Optional[float] = None, **kwargs) -> Dict[str, Any]:
         """Make HTTP request with robust error handling and retries."""
         if not self.session:
@@ -68,26 +69,37 @@ class ApiClient:
         # Ensure timeout is set in kwargs
         kwargs.setdefault('timeout', actual_timeout)
 
+        print(f"[API] {method} {url} (timeout={actual_timeout}s)...")
         try:
+            start_time = time.time()
             response = self.session.request(method, url, **kwargs)
+            duration = time.time() - start_time
+            print(f"[API] Response {response.status_code} in {duration:.2f}s")
+            
             response.raise_for_status()
-            return response.json() if response.content else {}
+            data = response.json() if response.content else {}
+            # print(f"[API] Parsed payload bytes: {len(response.content)}")
+            return data
         except requests.Timeout as e:
+            print(f"[API] TIMEOUT: {e}")
             raise RuntimeError(
                 f"API request timed out after {actual_timeout}s [{method} {endpoint}]. "
                 f"The backend may be overloaded or unresponsive. Try again later."
             ) from e
         except requests.ConnectionError as e:
+            print(f"[API] CONNECTION ERROR: {e}")
             raise RuntimeError(
                 f"Cannot connect to backend at {self.base_url} [{method} {endpoint}]. "
                 f"Check that the server is running and network is available."
             ) from e
         except requests.HTTPError as e:
-            status = e.response.status_code if e.response else None
-            body = (e.response.text or "")[:500] if e.response else ""
+            status = e.response.status_code if e.response is not None else None
+            body = (e.response.text or "")[:500] if e.response is not None else ""
 
             # Provide actionable error messages based on status code
-            if status == 400:
+            if status is None:
+                error_msg = f"HTTP error on {endpoint} (no response received)"
+            elif status == 400:
                 error_msg = f"Bad request to {endpoint}. Check your input data."
             elif status == 401:
                 error_msg = f"Authentication required for {endpoint}. Check API credentials."
@@ -100,7 +112,7 @@ class ApiClient:
             elif status >= 500:
                 error_msg = f"Backend server error on {endpoint}. The service may be experiencing issues."
             else:
-                error_msg = f"HTTP {status or 'unknown'} error on {endpoint}"
+                error_msg = f"HTTP {status} error on {endpoint}"
 
             if body:
                 error_msg += f" Details: {body}"
@@ -118,6 +130,22 @@ class ApiClient:
                 f"{response.text[:200] if 'response' in locals() else 'unknown'}"
             ) from e
 
+    def get(self, endpoint: str, timeout: Optional[float] = None, **kwargs) -> Dict[str, Any]:
+        """Generic GET request."""
+        return self._make_request("GET", endpoint, timeout=timeout, **kwargs)
+
+    def post(self, endpoint: str, json: Optional[Dict] = None, timeout: Optional[float] = None, **kwargs) -> Dict[str, Any]:
+        """Generic POST request."""
+        return self._make_request("POST", endpoint, json=json, timeout=timeout, **kwargs)
+
+    def put(self, endpoint: str, json: Optional[Dict] = None, timeout: Optional[float] = None, **kwargs) -> Dict[str, Any]:
+        """Generic PUT request."""
+        return self._make_request("PUT", endpoint, json=json, timeout=timeout, **kwargs)
+
+    def delete(self, endpoint: str, timeout: Optional[float] = None, **kwargs) -> Dict[str, Any]:
+        """Generic DELETE request."""
+        return self._make_request("DELETE", endpoint, timeout=timeout, **kwargs)
+
     def get_health(self) -> Dict[str, Any]:
         """Get system health status."""
         return self._make_request("GET", "/api/health", timeout=10.0)
@@ -125,14 +153,14 @@ class ApiClient:
     def analyze_semantic(self, text: str, options: Optional[Dict] = None) -> Dict[str, Any]:
         """Perform semantic analysis."""
         data = {"text": text, "options": options or {}}
-        return self._make_request("POST", "/api/agents/semantic", timeout=30.0, json=data)
+        return self._make_request("POST", "/api/analysis/semantic", timeout=30.0, json=data)
 
     def extract_entities(self, text: str, entity_types: Optional[list] = None) -> Dict[str, Any]:
         """Extract entities from text."""
-        data = {"text": text}
+        data = {"text": text, "options": {}}
         if entity_types:
-            data["entity_types"] = entity_types
-        return self._make_request("POST", "/api/agents/entities", timeout=30.0, json=data)
+            data["options"]["entity_types"] = entity_types
+        return self._make_request("POST", "/api/extraction/run", timeout=30.0, json=data)
 
     def process_document(self, file_path: str) -> Dict[str, Any]:
         """Process document file."""
@@ -153,7 +181,7 @@ class ApiClient:
     def classify_text(self, text: str, options: Optional[Dict] = None) -> Dict[str, Any]:
         """Classify text using the classification agent."""
         data = {"text": text, "options": options or {}}
-        return self._make_request("POST", "/api/agents/classify", timeout=30.0, json=data)
+        return self._make_request("POST", "/api/classification/run", timeout=30.0, json=data)
 
     def get_expert_prompt(self, agent_name: str, task_type: str, task_data: Dict[str, Any]) -> Dict[str, Any]:
         """Get expert prompt for a task."""
@@ -181,7 +209,7 @@ class ApiClient:
     def analyze_legal_reasoning(self, text: str, options: Optional[Dict] = None) -> Dict[str, Any]:
         """Perform legal reasoning analysis."""
         data = {"text": text, "options": options or {}}
-        return self._make_request("POST", "/api/agents/legal-reasoning", timeout=30.0, json=data)
+        return self._make_request("POST", "/api/reasoning/legal", timeout=30.0, json=data)
 
     def import_triples(self, triples: list, options: Optional[Dict] = None) -> Dict[str, Any]:
         """Import knowledge triples."""
@@ -233,34 +261,43 @@ class ApiClient:
         import mimetypes  # noqa: E402
         import os  # noqa: E402
 
-        files = {}
-        for i, file_path in enumerate(file_paths):
+        # FastAPI expects all files under the same field name "files"
+        # requests needs a list of (field_name, (filename, fh, content_type)) tuples
+        file_handles = []
+        files_list = []
+        for file_path in file_paths:
             mt, _ = mimetypes.guess_type(file_path)
-            files[f"file_{i}"] = (
-                os.path.basename(file_path),
-                open(file_path, "rb"),
-                mt or "application/octet-stream",
+            fh = open(file_path, "rb")
+            file_handles.append(fh)
+            files_list.append(
+                ("files", (os.path.basename(file_path), fh, mt or "application/octet-stream"))
             )
 
         try:
-            result = self._make_request("POST", "/api/agents/process-documents",
-                                      timeout=300.0, files=files,
-                                      data={"options": options} if options else None)
+            result = self._make_request(
+                "POST", "/api/agents/process-documents",
+                timeout=300.0, files=files_list,
+                data={"options": options} if options else None,
+            )
             return result
         finally:
-            # Close all file handles
-            for file_tuple in files.values():
-                file_tuple[1].close()
+            for fh in file_handles:
+                fh.close()
 
     def import_text_to_knowledge(self, text: str) -> Dict[str, Any]:
         """Import text to knowledge base."""
         data = {"text": text}
         return self._make_request("POST", "/api/knowledge/import-text", timeout=120.0, json=data)
 
-    def get_embeddings(self, text: str, options: Optional[Dict] = None) -> Dict[str, Any]:
+    def fetch_embeddings(self, text: str, options: Optional[Dict] = None) -> Dict[str, Any]:
         """Get embeddings for text."""
         data = {"text": text, "options": options or {}}
-        return self._make_request("POST", "/api/agents/embeddings", timeout=30.0, json=data)
+        return self._make_request("POST", "/api/embeddings/", timeout=30.0, json=data)
+
+    def run_embedding_operation(self, text: str, model_name: str, operation: str, options: Optional[Dict] = None) -> Dict[str, Any]:
+        """Run a specific embedding operation."""
+        data = {"text": text, "model_name": model_name, "operation": operation, "options": options or {}}
+        return self._make_request("POST", "/api/embeddings/run_operation", timeout=30.0, json=data)
 
     def organize_document(self, text: str, options: Optional[Dict] = None) -> Dict[str, Any]:
         """Organize document content."""
