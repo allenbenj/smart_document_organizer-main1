@@ -33,10 +33,7 @@ from mem_db.memory.unified_memory_manager import (  # noqa: E402
     UnifiedMemoryManager,
     create_unified_memory_manager,
 )
-try:
-    from mem_db.vector_store.unified_vector_store import UnifiedVectorStore  # type: ignore
-except Exception:
-    UnifiedVectorStore = None  # type: ignore
+from mem_db.vector_store.unified_vector_store import UnifiedVectorStore  # noqa: E402
 from core.container.service_container_impl import ProductionServiceContainer  # noqa: E402
 from .agent_registry import AgentRegistry  # noqa: E402
 
@@ -44,19 +41,7 @@ from .agent_registry import AgentRegistry  # noqa: E402
 # Import enhanced agent framework
 from .base_agent import BaseAgent as CoreBaseAgent  # noqa: E402
 from .enhanced_agent_factory import EnhancedAgentFactory  # noqa: E402
-try:
-    import importlib
-
-    KnowledgeDrivenAgentSystem = getattr(
-        importlib.import_module("agents.base.knowledge_driven_agent_system"),
-        "KnowledgeDrivenAgentSystem",
-    )
-except Exception:
-    class KnowledgeDrivenAgentSystem:  # type: ignore
-        """Fallback placeholder when optional module is unavailable."""
-
-        def __init__(self, *args, **kwargs):
-            pass
+from .knowledge_driven_agent_system import KnowledgeDrivenAgentSystem  # noqa: E402
 
 
 # Placeholder for AgentTask (not defined in base_agent.py)
@@ -79,42 +64,30 @@ class AgentTask:
 # Placeholder imports for modules that don't exist yet
 # TODO: Implement or find actual implementations for these
 class EnhancedVectorStore:
-    """Placeholder - EnhancedVectorStore implementation needed."""
-
-    async def search_similar(self, query, k, search_type, min_similarity):
-        return []
-
-    async def initialize(self) -> None:
-        return None
-
-    def get_system_status(self) -> Dict[str, Any]:
-        return {"status": "placeholder"}
-
-    async def close(self) -> None:
-        return None
+    """Compatibility alias to UnifiedVectorStore."""
 
 
 class EnhancedPersistenceManager:
-    """Placeholder - EnhancedPersistenceManager implementation needed."""
+    """Persistence manager contract required by integration layer."""
 
     connection_pool: Optional["ConnectionPool"] = None
 
     async def initialize(self) -> None:
-        return None
+        raise RuntimeError("EnhancedPersistenceManager.initialize is not implemented")
 
     async def health_check(self) -> Dict[str, Any]:
-        return {"status": "placeholder"}
+        raise RuntimeError("EnhancedPersistenceManager.health_check is not implemented")
 
     async def close(self) -> None:
-        return None
+        raise RuntimeError("EnhancedPersistenceManager.close is not implemented")
 
 
 class ConnectionPool:
-    """Placeholder - ConnectionPool implementation needed."""
+    """ConnectionPool contract required by integration layer."""
 
 
 class VectorStoreManager:
-    """Placeholder - VectorStoreManager implementation needed."""
+    """VectorStoreManager contract required by integration layer."""
 
 
 class LegalAISettings:
@@ -134,17 +107,17 @@ settings = LegalAISettings()
 
 def create_enhanced_vector_store(*args, **kwargs):
     """Factory function for EnhancedVectorStore."""
-    return EnhancedVectorStore()
+    return UnifiedVectorStore(*args, **kwargs)
 
 
 def create_enhanced_persistence_manager(*args, **kwargs):
     """Factory function for EnhancedPersistenceManager."""
-    return EnhancedPersistenceManager()
+    raise RuntimeError("EnhancedPersistenceManager implementation is required")
 
 
 def create_vector_store_manager(*args, **kwargs):
     """Factory function for VectorStoreManager."""
-    return VectorStoreManager()
+    raise RuntimeError("VectorStoreManager implementation is required")
 
 
 class IntegrationServiceContainer:
@@ -170,6 +143,7 @@ def get_service_container(*args, **kwargs) -> IntegrationServiceContainer:
 
 def register_core_services(*args, **kwargs):
     """Register core services."""
+    raise RuntimeError("register_core_services implementation is required")
 
 
 # Initialize logger
@@ -245,10 +219,7 @@ class EnhancedCoreAgent(CoreBaseAgent):
         self.config_manager: Optional[ConfigurationManager] = None
 
         # Initialize core services if an event loop is available.
-        try:
-            asyncio.create_task(self._initialize_core_services())
-        except RuntimeError:
-            pass
+        asyncio.create_task(self._initialize_core_services())
 
         integration_logger.info(
             "Enhanced core agent initialized",
@@ -263,53 +234,35 @@ class EnhancedCoreAgent(CoreBaseAgent):
     @detailed_log_function(LogCategory.AGENT)
     async def _initialize_core_services(self):
         """Initialize core service integrations."""
-        try:
-            if self.service_container:
-                # Get core services from container using type-keys where possible
-                self.config_manager = await self._get_service_async(ConfigurationManager)
-                if UnifiedVectorStore is not None:
-                    self.vector_store = await self._get_service_async(UnifiedVectorStore)
-                else:
-                    self.vector_store = None
-                self.memory_manager = await self._get_service_async(UnifiedMemoryManager)
-                self.persistence_manager = await self._get_service_async(
-                    EnhancedPersistenceManager
-                )
+        if not self.service_container:
+            raise RuntimeError("No service container provided for enhanced core agent")
+        self.config_manager = await self._get_service_async(ConfigurationManager)
+        self.vector_store = await self._get_service_async(UnifiedVectorStore)
+        self.memory_manager = await self._get_service_async(UnifiedMemoryManager)
+        self.persistence_manager = await self._get_service_async(
+            EnhancedPersistenceManager
+        )
 
-                integration_logger.info(
-                    "Core services initialized for agent",
-                    parameters={"agent_name": self.name},
-                )
-            else:
-                integration_logger.warning(
-                    "No service container provided - running in standalone mode",
-                    parameters={"agent_name": self.name},
-                )
-        except Exception as e:
-            integration_logger.error(
-                "Failed to initialize core services",
-                parameters={"agent_name": self.name},
-                exception=e,
-            )
+        integration_logger.info(
+            "Core services initialized for agent",
+            parameters={"agent_name": self.name},
+        )
 
-    async def _get_service_async(self, service_key: Any, required: bool = False) -> Any:
-        """Resolve a service; return ``None`` when optional services are missing."""
+    async def _get_service_async(self, service_key: Any) -> Any:
+        """Resolve a required service by key."""
         if not self.service_container or not hasattr(self.service_container, "get_service"):
-            return None
+            raise RuntimeError("Service container is unavailable")
         try:
             getter = self.service_container.get_service
             if asyncio.iscoroutinefunction(getter):
-                return await getter(service_key)
-            return getter(service_key)
+                service = await getter(service_key)
+            else:
+                service = getter(service_key)
+            if service is None:
+                raise RuntimeError(f"Required service unavailable: {service_key}")
+            return service
         except Exception as e:
-            if required:
-                raise
-            integration_logger.info(
-                "Optional service unavailable",
-                parameters={"agent_name": self.name, "service_name": str(service_key)},
-                exception=e,
-            )
-            return None
+            raise RuntimeError(f"Failed to resolve required service {service_key}: {e}") from e
 
     async def _process_task(self, task_data: Any, metadata: Dict[str, Any]) -> Any:
         """
@@ -370,53 +323,44 @@ class EnhancedCoreAgent(CoreBaseAgent):
     ) -> List[Dict[str, Any]]:
         """Get relevant context from vector store."""
         if not self.vector_store:
-            return []
+            raise RuntimeError("Vector store is required but not initialized")
 
-        try:
-            # Convert task data to search query
-            query = self._extract_search_query(task_data)
-            if not query:
-                return []
+        # Convert task data to search query
+        query = self._extract_search_query(task_data)
+        if not query:
+            raise ValueError("Could not extract search query from task data")
 
-            # Perform vector similarity search
-            search_results = await self.vector_store.search_similar(
-                query=query, k=5, search_type="document", min_similarity=0.7
+        # Perform vector similarity search
+        search_results = await self.vector_store.search_similar(
+            query=query, k=5, search_type="document", min_similarity=0.7
+        )
+
+        # Convert search results to context format
+        context = []
+        for result in search_results:
+            context.append(
+                {
+                    "content": result.content_preview,
+                    "similarity_score": result.similarity_score,
+                    "document_id": result.document_id,
+                    "metadata": (
+                        result.metadata.__dict__
+                        if hasattr(result.metadata, "__dict__")
+                        else {}
+                    ),
+                }
             )
 
-            # Convert search results to context format
-            context = []
-            for result in search_results:
-                context.append(
-                    {
-                        "content": result.content_preview,
-                        "similarity_score": result.similarity_score,
-                        "document_id": result.document_id,
-                        "metadata": (
-                            result.metadata.__dict__
-                            if hasattr(result.metadata, "__dict__")
-                            else {}
-                        ),
-                    }
-                )
+        integration_logger.info(
+            "Retrieved relevant context from vector store",
+            parameters={
+                "agent_name": self.name,
+                "context_items": len(context),
+                "query": query[:100],
+            },
+        )
 
-            integration_logger.info(
-                "Retrieved relevant context from vector store",
-                parameters={
-                    "agent_name": self.name,
-                    "context_items": len(context),
-                    "query": query[:100],
-                },
-            )
-
-            return context
-
-        except Exception as e:
-            integration_logger.error(
-                "Failed to get relevant context",
-                parameters={"agent_name": self.name},
-                exception=e,
-            )
-            return []
+        return context
 
     def _extract_search_query(self, task_data: Any) -> Optional[str]:
         """Extract search query from task data."""
@@ -427,7 +371,7 @@ class EnhancedCoreAgent(CoreBaseAgent):
             for field in ["query", "question", "text", "content", "input"]:
                 if field in task_data:
                     return str(task_data[field])
-            # Fallback to string representation
+            # Convert task data to a string representation
             return str(task_data)
         else:
             return str(task_data)
@@ -447,8 +391,7 @@ class EnhancedCoreAgent(CoreBaseAgent):
                 task_data, context, metadata
             )
         else:
-            # Default reasoning approach
-            return await self._apply_default_reasoning(task_data, context, metadata)
+            raise ValueError(f"Unsupported reasoning framework: {self.reasoning_framework}")
 
     async def _apply_irac_framework(
         self, task_data: Any, context: List[Dict[str, Any]], metadata: Dict[str, Any]
@@ -542,65 +485,44 @@ class EnhancedCoreAgent(CoreBaseAgent):
             ),
         }
 
-    async def _apply_default_reasoning(
-        self, task_data: Any, context: List[Dict[str, Any]], metadata: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Apply default reasoning approach."""
-
-        return {
-            "framework": "Default",
-            "analysis": f"Processed task of type {type(task_data).__name__}",
-            "context_summary": f"Used {len(context)} context items",
-            "result": "Task processed with default reasoning",
-            "confidence": 0.7,
-        }
-
     @detailed_log_function(LogCategory.AGENT)
     async def _store_processing_results(
         self, result: Dict[str, Any], metadata: Dict[str, Any]
     ):
         """Store processing results in unified memory manager."""
         if not self.memory_manager:
-            return
+            raise RuntimeError("Memory manager is required but not initialized")
 
-        try:
-            session_id = metadata.get("session_id", "default_session")
+        session_id = metadata.get("session_id", "default_session")
 
-            # Store agent decision
-            await cast(Any, self.memory_manager).log_agent_decision(
-                agent_name=self.name,
-                session_id=session_id,
-                input_summary=f"Processed task with {result.get('framework', 'unknown')} framework",
-                decision_details=result,
-                context_used=result.get("context_used"),
-                confidence=result.get("confidence", 0.5),
-                tags=[self.behavior_profile, result.get("framework", "unknown")],
-            )
+        # Store agent decision
+        await cast(Any, self.memory_manager).log_agent_decision(
+            agent_name=self.name,
+            session_id=session_id,
+            input_summary=f"Processed task with {result.get('framework', 'unknown')} framework",
+            decision_details=result,
+            context_used=result.get("context_used"),
+            confidence=result.get("confidence", 0.5),
+            tags=[self.behavior_profile, result.get("framework", "unknown")],
+        )
 
-            # Add to context window for future reference
-            await cast(Any, self.memory_manager).add_context_window_entry(
-                session_id=session_id,
-                entry_type="agent_result",
-                content=result,
-                importance=result.get("confidence", 0.5),
-                metadata={
-                    "agent_name": self.name,
-                    "behavior_profile": self.behavior_profile,
-                    "reasoning_framework": self.reasoning_framework,
-                },
-            )
+        # Add to context window for future reference
+        await cast(Any, self.memory_manager).add_context_window_entry(
+            session_id=session_id,
+            entry_type="agent_result",
+            content=result,
+            importance=result.get("confidence", 0.5),
+            metadata={
+                "agent_name": self.name,
+                "behavior_profile": self.behavior_profile,
+                "reasoning_framework": self.reasoning_framework,
+            },
+        )
 
-            integration_logger.info(
-                "Processing results stored in memory",
-                parameters={"agent_name": self.name, "session_id": session_id},
-            )
-
-        except Exception as e:
-            integration_logger.error(
-                "Failed to store processing results",
-                parameters={"agent_name": self.name},
-                exception=e,
-            )
+        integration_logger.info(
+            "Processing results stored in memory",
+            parameters={"agent_name": self.name, "session_id": session_id},
+        )
 
     # Placeholder methods for reasoning framework implementations
     # These would be implemented with actual legal reasoning logic
@@ -941,9 +863,9 @@ class CoreIntegrationManager:
             )
 
         except ImportError as e:
-            integration_logger.warning(
-                "Some production agents not available for registration", exception=e
-            )
+            raise RuntimeError(
+                "Required production agents are not available for registration"
+            ) from e
 
     async def create_enhanced_agent(
         self,

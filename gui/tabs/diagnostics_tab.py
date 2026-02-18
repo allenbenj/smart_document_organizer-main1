@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSplitter,
@@ -45,7 +46,7 @@ class LogViewerPanel(QWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.logs_dir = Path("logs")
+        self.logs_dir = Path(__file__).resolve().parents[2] / "logs"
         self.init_ui()
         self.refresh_log_list()
         
@@ -94,11 +95,14 @@ class LogViewerPanel(QWidget):
             self.log_content.setPlainText("No logs directory found.")
             return
             
-        # Get all log files, sorted by modification time (newest first)
+        # Include nested startup traces and structured diagnostics artifacts.
+        candidates = []
+        for pattern in ("*.log", "*.json", "*.txt"):
+            candidates.extend(self.logs_dir.rglob(pattern))
         log_files = sorted(
-            self.logs_dir.glob("*.log"),
+            [p for p in candidates if p.is_file()],
             key=lambda p: p.stat().st_mtime,
-            reverse=True
+            reverse=True,
         )
         
         for log_file in log_files:
@@ -110,9 +114,11 @@ class LogViewerPanel(QWidget):
             mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
             time_str = mtime.strftime("%Y-%m-%d %H:%M:%S")
             
-            # Add to list
-            display_name = f"{log_file.name} ({size_str}) - {time_str}"
-            self.log_list.addItem(display_name)
+            rel_path = log_file.relative_to(self.logs_dir).as_posix()
+            display_name = f"{rel_path} ({size_str}) - {time_str}"
+            item = QListWidgetItem(display_name)
+            item.setData(Qt.UserRole, str(log_file))
+            self.log_list.addItem(item)
             
         if log_files:
             self.log_list.setCurrentRow(0)
@@ -123,11 +129,11 @@ class LogViewerPanel(QWidget):
         """Load and display selected log file."""
         if not current:
             return
-            
-        # Extract filename from display name
-        display_text = current.text()
-        filename = display_text.split(" (")[0]
-        log_file = self.logs_dir / filename
+        raw_path = current.data(Qt.UserRole)
+        if not raw_path:
+            self.log_content.setPlainText("Could not resolve selected log file path.")
+            return
+        log_file = Path(str(raw_path))
         
         if not log_file.exists():
             self.log_content.setPlainText(f"Log file not found: {log_file}")
@@ -165,13 +171,14 @@ class LogViewerPanel(QWidget):
         cutoff = datetime.now().timestamp() - (7 * 24 * 60 * 60)
         deleted = 0
         
-        for log_file in self.logs_dir.glob("*.log"):
-            if log_file.stat().st_mtime < cutoff:
-                try:
-                    log_file.unlink()
-                    deleted += 1
-                except Exception as e:
-                    print(f"Error deleting {log_file}: {e}")
+        for pattern in ("*.log", "*.json", "*.txt"):
+            for log_file in self.logs_dir.rglob(pattern):
+                if log_file.stat().st_mtime < cutoff:
+                    try:
+                        log_file.unlink()
+                        deleted += 1
+                    except Exception as e:
+                        print(f"Error deleting {log_file}: {e}")
                     
         self.refresh_log_list()
         QMessageBox.information(self, "Complete", f"Deleted {deleted} old log files.")

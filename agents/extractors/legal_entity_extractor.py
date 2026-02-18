@@ -644,7 +644,11 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                 # Map GLiNER results to our format
                 entity_type = ent["label"].replace(" ", "")  # Remove spaces
                 if entity_type not in self.legal_entity_types:
-                    entity_type = "LegalConcept"  # Default fallback
+                    logger.debug(
+                        "Skipping GLiNER entity with unsupported type: %s",
+                        ent["label"],
+                    )
+                    continue
 
                 entity = ExtractedEntity(
                     entity_id=str(uuid.uuid4()),
@@ -806,9 +810,16 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
             try:
                 llm_result = json.loads(response)
                 for entity_data in llm_result.get("entities", []):
+                    entity_type = entity_data.get("type")
+                    if entity_type not in self.legal_entity_types:
+                        logger.debug(
+                            "Skipping LLM entity with unsupported type: %s",
+                            entity_type,
+                        )
+                        continue
                     entity = ExtractedEntity(
                         entity_id=str(uuid.uuid4()),
-                        entity_type=entity_data.get("type", "LegalConcept"),
+                        entity_type=entity_type,
                         text=entity_data.get("text", "").strip(),
                         start_pos=entity_data.get("start", 0),
                         end_pos=entity_data.get("end", 0),
@@ -820,10 +831,6 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                             > 0,
                         },
                     )
-
-                    # Validate entity type
-                    if entity.entity_type not in self.legal_entity_types:
-                        entity.entity_type = "LegalConcept"
 
                     entities.append(entity)
 

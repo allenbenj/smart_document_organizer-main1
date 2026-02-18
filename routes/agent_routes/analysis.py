@@ -180,7 +180,15 @@ async def submit_feedback(
                 "suggested_corrections": payload.suggested_corrections or {},
             },
         )
-        return {"success": True, "stored": stored}
+        return _v(
+            "feedback",
+            {
+                "success": True,
+                "data": {"stored": stored},
+                "error": None,
+                "metadata": {},
+            },
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -412,7 +420,15 @@ async def contradictions(
                 detail={"error": result.error or "unavailable", "degradation": deg},
             )
 
-        return {"success": True, "data": result.data, "error": None}
+        return _v(
+            "contradictions",
+            {
+                "success": True,
+                "data": result.data,
+                "error": None,
+                "metadata": getattr(result, "metadata", {}),
+            },
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -443,7 +459,15 @@ async def violations(
                 detail={"error": result.error or "unavailable", "degradation": deg},
             )
 
-        return {"success": True, "data": result.data, "error": None}
+        return _v(
+            "violations",
+            {
+                "success": True,
+                "data": result.data,
+                "error": None,
+                "metadata": getattr(result, "metadata", {}),
+            },
+        )
     except HTTPException:
         raise
     except Exception as e:

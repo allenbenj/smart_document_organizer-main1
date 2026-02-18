@@ -28,24 +28,13 @@ class SearchPayload(BaseModel):
 async def vector_status(store=Depends(get_vector_store_dep)) -> Dict[str, Any]:
     try:
         if store is None:
-            return {
-                "available": False,
-                "initialized": False,
-                "reason": "dependencies_missing",
-                "degradation": {
-                    "component": "vector_store",
-                    "lost_features": [
-                        "semantic vector search",
-                        "fast similarity retrieval",
-                        "vector-backed memory queries",
-                    ],
-                    "fits_workflow": False,
-                    "suggested_actions": [
-                        "Install FAISS and numpy",
-                        "Ensure optional deps for UnifiedVectorStore",
-                    ],
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "error": "vector_store_unavailable",
+                    "required_dependencies": ["faiss", "numpy"],
                 },
-            }
+            )
         health = await store.health_check()
         stats = await store.get_statistics()
         return {
@@ -67,12 +56,7 @@ async def vector_init(store=Depends(get_vector_store_strict_dep)) -> Dict[str, A
                 status_code=501,
                 detail={
                     "error": "vector_store_unavailable",
-                    "degradation": {
-                        "component": "vector_store",
-                        "lost_features": ["semantic vector indexing"],
-                        "fits_workflow": False,
-                        "suggested_actions": ["Install FAISS and numpy"],
-                    },
+                    "required_dependencies": ["faiss", "numpy"],
                 },
             )
         ok = await store.initialize()
@@ -96,12 +80,7 @@ async def vector_index(
                 status_code=501,
                 detail={
                     "error": "vector_store_unavailable",
-                    "degradation": {
-                        "component": "vector_store",
-                        "lost_features": ["semantic vector search", "fast similarity"],
-                        "fits_workflow": False,
-                        "suggested_actions": ["Install FAISS and numpy"],
-                    },
+                    "required_dependencies": ["faiss", "numpy"],
                 },
             )
         if not await store.initialize():
@@ -129,7 +108,11 @@ async def vector_search(
 
         if store is None:
             raise HTTPException(
-                status_code=501, detail="Vector store dependencies not available"
+                status_code=501,
+                detail={
+                    "error": "vector_store_unavailable",
+                    "required_dependencies": ["faiss", "numpy"],
+                },
             )
         if not await store.initialize():
             raise HTTPException(status_code=500, detail="Vector store not initialized")
@@ -151,7 +134,7 @@ async def vector_search(
         raise
     except ImportError:
         raise HTTPException(
-            status_code=501, detail="NumPy required for search fallback"
+            status_code=501, detail="NumPy is required for vector search"
         )
     except Exception as e:
         logger.error(f"Vector search error: {e}")

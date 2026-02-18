@@ -651,8 +651,9 @@ class EnhancedAgentFactory:
         elif blueprint.template == AgentTemplate.LEGAL_ANALYZER:
             methods["execute"] = self._create_legal_analyzer_execute()
         else:
-            # Fallback for templates without specialized execute generators.
-            methods["execute"] = self._create_generic_execute()
+            raise ValueError(
+                f"No execute generator implemented for template {blueprint.template.value}"
+            )
 
         # Add helper methods
         methods["_setup_shared_memory"] = self._create_setup_shared_memory()
@@ -686,9 +687,9 @@ class EnhancedAgentFactory:
                                 result, "Document processed via orchestrator"
                             )
 
-                    # Fallback to basic processing
-                    result = await self._process_document_basic(document_path)
-                    return self._create_success_result(result, "Document processed")
+                    raise RuntimeError(
+                        "ultimate_workflow_orchestrator is required but unavailable"
+                    )
                 else:
                     return self._create_error_result(
                         "Invalid task data for document processing"
@@ -733,12 +734,8 @@ class EnhancedAgentFactory:
                                 result, "Legal analysis completed via coordinator"
                             )
 
-                    # Fallback to basic analysis
-                    result = await self._analyze_legal_text_basic(
-                        legal_text, analysis_type  # noqa: F821
-                    )
-                    return self._create_success_result(
-                        result, "Legal analysis completed"
+                    raise RuntimeError(
+                        "knowledge_systems_coordinator is required but unavailable"
                     )
                 else:
                     return self._create_error_result(
@@ -785,35 +782,19 @@ class EnhancedAgentFactory:
 
         def _setup_shared_memory(self):
             try:
-                if hasattr(self.service_container, "get_service") and not inspect.iscoroutinefunction(
+                if not hasattr(self.service_container, "get_service") or inspect.iscoroutinefunction(
                     self.service_container.get_service
                 ):
-                    self.shared_memory = self.service_container.get_service(
-                        "chroma_memory_manager"
-                    )
-                    if self.shared_memory:
-                        self.logger.info("Connected to shared chroma memory")
-                        return
-
-                # Try direct import as fallback
-                try:
-                    module = __import__(
-                        "mem_db.memory.chroma_memory.chroma_db",
-                        fromlist=["ChromaMemoryManager"],
-                    )
-                    chroma_cls = getattr(module, "ChromaMemoryManager")
-
-                    self.shared_memory = chroma_cls(
-                        collection_name=f"agent_{self.blueprint.name.lower().replace(' ', '_')}"
-                    )
-                    self.logger.info("Initialized direct chroma memory connection")
-                except Exception:
-                    self.shared_memory = None
-                    self.logger.warning("Could not connect to shared memory")
-
+                    raise RuntimeError("Service container get_service sync accessor is required")
+                self.shared_memory = self.service_container.get_service(
+                    "chroma_memory_manager"
+                )
+                if not self.shared_memory:
+                    raise RuntimeError("Shared chroma memory service is required but unavailable")
+                self.logger.info("Connected to shared chroma memory")
             except Exception as e:
                 self.logger.error("Failed to setup shared memory", exception=e)
-                self.shared_memory = None
+                raise
 
         return _setup_shared_memory
 
@@ -822,22 +803,17 @@ class EnhancedAgentFactory:
 
         def _setup_vector_store(self):
             try:
-                if hasattr(self.service_container, "get_service") and not inspect.iscoroutinefunction(
+                if not hasattr(self.service_container, "get_service") or inspect.iscoroutinefunction(
                     self.service_container.get_service
                 ):
-                    self.vector_store = self.service_container.get_service(
-                        "vector_store"
-                    )
-                    if self.vector_store:
-                        self.logger.info("Connected to vector store")
-                        return
-
-                self.vector_store = None
-                self.logger.warning("Vector store not available")
-
+                    raise RuntimeError("Service container get_service sync accessor is required")
+                self.vector_store = self.service_container.get_service("vector_store")
+                if not self.vector_store:
+                    raise RuntimeError("Vector store service is required but unavailable")
+                self.logger.info("Connected to vector store")
             except Exception as e:
                 self.logger.error("Failed to setup vector store", exception=e)
-                self.vector_store = None
+                raise
 
         return _setup_vector_store
 
@@ -846,22 +822,21 @@ class EnhancedAgentFactory:
 
         def _setup_knowledge_graph(self):
             try:
-                if hasattr(self.service_container, "get_service") and not inspect.iscoroutinefunction(
+                if not hasattr(self.service_container, "get_service") or inspect.iscoroutinefunction(
                     self.service_container.get_service
                 ):
-                    self.knowledge_graph = self.service_container.get_service(
-                        "knowledge_graph"
+                    raise RuntimeError("Service container get_service sync accessor is required")
+                self.knowledge_graph = self.service_container.get_service(
+                    "knowledge_graph"
+                )
+                if not self.knowledge_graph:
+                    raise RuntimeError(
+                        "Knowledge graph service is required but unavailable"
                     )
-                    if self.knowledge_graph:
-                        self.logger.info("Connected to knowledge graph")
-                        return
-
-                self.knowledge_graph = None
-                self.logger.warning("Knowledge graph not available")
-
+                self.logger.info("Connected to knowledge graph")
             except Exception as e:
                 self.logger.error("Failed to setup knowledge graph", exception=e)
-                self.knowledge_graph = None
+                raise
 
         return _setup_knowledge_graph
 

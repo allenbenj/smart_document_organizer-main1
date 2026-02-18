@@ -115,57 +115,11 @@ class AgentService:
                         f"file_path not found: {file_path} -> {normalized_path}"
                     )
 
-                # Direct document processing without agent dependency
-
-                import time
-
-                start_time = time.time()
-                logger.info(
-                    "Starting direct document processing for %s", normalized_path
-                )
-                try:
-                    path = Path(normalized_path)
-                    if path.suffix.lower() == ".txt":
-                        logger.info("Processing .txt file")
-                        with open(normalized_path, "r", encoding="utf-8") as f:
-                            content = f.read()
-                        processing_time = time.time() - start_time
-                        logger.info(
-                            "Successfully processed .txt file in %.2f seconds",
-                            processing_time,
-                        )
-                        result = {
-                            "success": True,
-                            "data": {
-                                "content": content,
-                                "metadata": {"file_type": "txt"},
-                            },
-                            "error": None,
-                            "agent_type": "document_processor",
-                            "processing_time": processing_time,
-                            "metadata": {},
-                        }
-                    else:
-                        logger.warning("Unsupported file type: %s", path.suffix)
-                        result = {
-                            "success": False,
-                            "data": {},
-                            "error": "Unsupported file type",
-                            "agent_type": "document_processor",
-                            "processing_time": time.time() - start_time,
-                            "metadata": {},
-                        }
-                except Exception as e:
-                    logger.error("Error during direct processing: %s", e)
-                    result = {
-                        "success": False,
-                        "data": {},
-                        "error": str(e),
-                        "agent_type": "document_processor",
-                        "processing_time": time.time() - start_time,
-                        "metadata": {},
-                    }
-                return result
+                if not hasattr(self.agent_manager, "process_document"):
+                    raise ValueError(
+                        "Document processing not supported by this agent manager"
+                    )
+                return await self.agent_manager.process_document(normalized_path)
 
             elif task_type == "extract_entities":
                 text = payload.get("text")

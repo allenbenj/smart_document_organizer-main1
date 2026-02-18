@@ -174,96 +174,18 @@ class HybridLegalExtractor(BaseAgent):
             raise AgentError(f"Hybrid extraction failed: {str(e)}")
 
     async def _extract_with_ner(self, text: str) -> List[ExtractedEntity]:
-        """Extract entities using Named Entity Recognition.
-
-        .. deprecated::
-            NOT IMPLEMENTED - This is a placeholder/mock implementation.
-
-            TODO: Integrate with actual NER library (spaCy, transformers, etc.)
-
-            Current behavior: Simple keyword matching for 'contract' and 'agreement'.
-            This does NOT perform actual named entity recognition.
-
-            Required for production:
-            - Install spaCy or transformers library
-            - Load legal NER model
-            - Implement proper entity span detection
-            - Add confidence calibration based on model outputs
-        """
-        import warnings  # noqa: E402
-
-        warnings.warn(
-            "_extract_with_ner is a mock implementation. "
-            "Returns hardcoded keyword matches instead of actual NER.",
-            UserWarning,
-            stacklevel=2,
+        """Extract entities using Named Entity Recognition."""
+        raise AgentError(
+            "HybridLegalExtractor NER backend is not implemented. "
+            "Mock extraction has been removed by policy."
         )
-
-        entities = []
-
-        # MOCK: Simple keyword matching - NOT actual NER
-        if "contract" in text.lower():
-            entities.append(
-                ExtractedEntity(
-                    text="contract",
-                    entity_type=EntityType.CONTRACT,
-                    confidence=0.85,
-                    source="ner_mock",
-                )
-            )
-
-        if "agreement" in text.lower():
-            entities.append(
-                ExtractedEntity(
-                    text="agreement",
-                    entity_type=EntityType.CONTRACT,
-                    confidence=0.80,
-                    source="ner_mock",
-                )
-            )
-
-        return entities
 
     async def _extract_with_llm(self, text: str) -> List[ExtractedEntity]:
-        """Extract entities using LLM-based extraction.
-
-        .. deprecated::
-            NOT IMPLEMENTED - This is a placeholder/mock implementation.
-
-            TODO: Integrate with actual LLM provider (OpenAI, Anthropic, local models)
-
-            Current behavior: Simple keyword matching for 'shall' and 'must'.
-            This does NOT perform actual LLM-based extraction.
-
-            Required for production:
-            - Configure LLM provider in service container
-            - Implement prompt engineering for legal entity extraction
-            - Add response parsing and validation
-            - Implement retry logic and error handling
-        """
-        import warnings  # noqa: E402
-
-        warnings.warn(
-            "_extract_with_llm is a mock implementation. "
-            "Returns hardcoded keyword matches instead of actual LLM extraction.",
-            UserWarning,
-            stacklevel=2,
+        """Extract entities using LLM-based extraction."""
+        raise AgentError(
+            "HybridLegalExtractor LLM backend is not implemented. "
+            "Mock extraction has been removed by policy."
         )
-
-        entities = []
-
-        # MOCK: Simple keyword matching - NOT actual LLM extraction
-        if "shall" in text.lower() or "must" in text.lower():
-            entities.append(
-                ExtractedEntity(
-                    text="obligation",
-                    entity_type=EntityType.OBLIGATION,
-                    confidence=0.75,
-                    source="llm_mock",
-                )
-            )
-
-        return entities
 
     async def _validate_entities(
         self, entities: List[ExtractedEntity]

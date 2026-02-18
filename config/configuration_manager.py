@@ -53,6 +53,8 @@ class ConfigurationManager:
                 key, val = line.split("=", 1)
                 key = key.strip()
                 val = val.strip().strip('"').strip("'")
+                # Make .env values available to components that read os.getenv directly.
+                os.environ.setdefault(key, val)
                 self._ingest_env_var(key, val)
         except Exception:
             # Non-fatal: ignore malformed .env

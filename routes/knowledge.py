@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from mem_db.knowledge import get_knowledge_manager
 from services.dependencies import get_database_manager_strict_dep, resolve_typed_service
 from services.knowledge_service import KnowledgeService
 
@@ -110,18 +109,16 @@ class OntologyLinkPayload(BaseModel):
 
 async def get_knowledge_service(request: Request) -> KnowledgeService:
     """Dependency to get KnowledgeService."""
-    try:
-        from mem_db.knowledge.unified_knowledge_graph_manager import (  # noqa: E402
-            UnifiedKnowledgeGraphManager,
-        )
+    from mem_db.knowledge.unified_knowledge_graph_manager import (  # noqa: E402
+        UnifiedKnowledgeGraphManager,
+    )
 
-        manager = await resolve_typed_service(
-            request,
-            UnifiedKnowledgeGraphManager,
-            fallback_factory=get_knowledge_manager,
-        )
-    except Exception:
-        manager = get_knowledge_manager()
+    manager = await resolve_typed_service(
+        request,
+        UnifiedKnowledgeGraphManager,
+    )
+    if manager is None:
+        raise HTTPException(status_code=500, detail="knowledge_manager_unavailable")
     return KnowledgeService(knowledge_manager=manager)
 
 

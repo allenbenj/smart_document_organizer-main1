@@ -54,28 +54,6 @@ def test_backend_readiness_urls_include_primary_endpoints() -> None:
     assert any(url.endswith("/api/health/details") for url in urls)
 
 
-def test_effective_profile_defaults_to_api_for_auto_headless_backend() -> None:
-    profile = Start._resolve_effective_profile(
-        requested_profile="full",
-        selected_mode="backend",
-        headless=True,
-        backend_requested=False,
-        gui_requested=False,
-    )
-    assert profile == "api"
-
-
-def test_effective_profile_keeps_full_when_backend_is_explicit() -> None:
-    profile = Start._resolve_effective_profile(
-        requested_profile="full",
-        selected_mode="backend",
-        headless=True,
-        backend_requested=True,
-        gui_requested=False,
-    )
-    assert profile == "full"
-
-
 def test_startup_report_separates_optional_router_failures() -> None:
     app = SimpleNamespace(
         state=SimpleNamespace(

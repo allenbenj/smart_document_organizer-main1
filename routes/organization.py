@@ -30,6 +30,7 @@ class EditPayload(BaseModel):
 class ApplyPayload(BaseModel):
     limit: int = 200
     dry_run: bool = True
+    root_prefix: Optional[str] = None
 
 
 class LLMSwitchPayload(BaseModel):
@@ -72,9 +73,20 @@ async def generate_proposals(payload: GeneratePayload, db=Depends(get_database_m
 
 
 @router.get("/organization/proposals")
-async def list_proposals(status: Optional[str] = None, limit: int = 200, offset: int = 0, db=Depends(get_database_manager_strict_dep)) -> Dict[str, Any]:
+async def list_proposals(
+    status: Optional[str] = None,
+    limit: int = 200,
+    offset: int = 0,
+    root_prefix: Optional[str] = None,
+    db=Depends(get_database_manager_strict_dep),
+) -> Dict[str, Any]:
     svc = OrganizationService(db)
-    return svc.list_proposals(status=status, limit=limit, offset=offset)
+    return svc.list_proposals(
+        status=status,
+        limit=limit,
+        offset=offset,
+        root_prefix=root_prefix,
+    )
 
 
 @router.get("/organization/feedback")
@@ -130,7 +142,7 @@ async def edit_proposal(proposal_id: int, payload: EditPayload, db=Depends(get_d
 @router.post("/organization/apply")
 async def apply_approved(payload: ApplyPayload, db=Depends(get_database_manager_strict_dep)) -> Dict[str, Any]:
     svc = OrganizationService(db)
-    return svc.apply_approved(limit=payload.limit, dry_run=payload.dry_run)
+    return svc.apply_approved(limit=payload.limit, dry_run=payload.dry_run, root_prefix=payload.root_prefix)
 
 
 @router.post("/organization/proposals/clear")

@@ -272,20 +272,20 @@ class UnifiedEmbeddingAgent(BaseAgent):
                 self._vector_store = self.services.get_service("chroma_memory")
             elif self.config.vector_store == VectorStoreType.FAISS:
                 self._vector_store = self.services.get_service("faiss_vector_store")
-
-            if not self._vector_store:
-                self.logger.warning(
-                    f"Vector store {self.config.vector_store.value} not available"
-                )
-
         except Exception as e:
-            self.logger.warning(f"Failed to initialize vector store: {e}")
+            raise RuntimeError(f"Failed to initialize vector store: {e}") from e
+
+        if not self._vector_store:
+            raise RuntimeError(
+                f"Vector store {self.config.vector_store.value} is required but unavailable"
+            )
 
     async def _init_memgraph_connection(self):
         """Initialize Memgraph database connection."""
         if not MEMGRAPH_AVAILABLE:
-            self.logger.warning("Memgraph not available - graph integration disabled")
-            return
+            raise RuntimeError(
+                "Memgraph dependency is required for graph integration but unavailable."
+            )
 
         try:
             self._memgraph_connection = Memgraph(
@@ -303,8 +303,8 @@ class UnifiedEmbeddingAgent(BaseAgent):
                 self.logger.info("Connected to Memgraph successfully")
 
         except Exception as e:
-            self.logger.warning(f"Failed to connect to Memgraph: {e}")
             self._memgraph_connection = None
+            raise RuntimeError(f"Failed to connect to Memgraph: {e}") from e
 
     async def _load_cache(self):
         """Load embedding cache from disk."""
@@ -508,8 +508,9 @@ class UnifiedEmbeddingAgent(BaseAgent):
     ) -> List[str]:
         """Embed entities and store them in the knowledge graph."""
         if not self._memgraph_connection:
-            self.logger.warning("Memgraph not available - skipping graph storage")
-            return []
+            raise RuntimeError(
+                "Memgraph connection is required for embed_entities_to_graph."
+            )
 
         graph_node_ids = []
 
@@ -547,7 +548,7 @@ class UnifiedEmbeddingAgent(BaseAgent):
 
         except Exception as e:
             self.logger.error(f"Failed to embed entities to graph: {e}")
-            return []
+            raise
 
     async def _store_entity_in_graph(self, entity: GraphEntity) -> Optional[str]:
         """Store entity in Memgraph database."""
@@ -627,16 +628,18 @@ class UnifiedEmbeddingAgent(BaseAgent):
 
                 return similar_entities
 
-            # Fallback to graph database similarity search
+            # Search graph database if vector store search endpoint is unavailable
             elif self._memgraph_connection:
                 return await self._graph_similarity_search(
                     query_embedding, top_k, threshold
                 )
+            raise RuntimeError(
+                "No similarity search backend available (vector store or Memgraph)."
+            )
 
         except Exception as e:
             self.logger.error(f"Failed to find similar entities: {e}")
-
-        return []
+            raise
 
     async def _graph_similarity_search(
         self, query_embedding: np.ndarray, top_k: int, threshold: float
@@ -665,14 +668,14 @@ class UnifiedEmbeddingAgent(BaseAgent):
                     stored_embedding = np.array(json.loads(result["embedding"]))
 
                     # Calculate similarity
-                    if NUMPY_AVAILABLE:
-                        similarity = np.dot(query_embedding, stored_embedding) / (
-                            np.linalg.norm(query_embedding)
-                            * np.linalg.norm(stored_embedding)
+                    if not NUMPY_AVAILABLE or np is None:
+                        raise RuntimeError(
+                            "NumPy is required for graph similarity calculations."
                         )
-                    else:
-                        # Fallback similarity calculation
-                        similarity = 0.5  # Placeholder
+                    similarity = np.dot(query_embedding, stored_embedding) / (
+                        np.linalg.norm(query_embedding)
+                        * np.linalg.norm(stored_embedding)
+                    )
 
                     if similarity >= threshold:
                         similar_entities.append(
@@ -697,7 +700,7 @@ class UnifiedEmbeddingAgent(BaseAgent):
 
         except Exception as e:
             self.logger.error(f"Graph similarity search failed: {e}")
-            return []
+            raise
 
     def _generate_cache_key(self, text: str, model: str) -> str:
         """Generate cache key for text and model."""

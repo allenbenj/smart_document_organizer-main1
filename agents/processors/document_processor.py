@@ -29,7 +29,6 @@ import hashlib
 import logging  # noqa: E402
 import mimetypes  # noqa: E402
 import os  # noqa: E402
-import re  # noqa: E402
 import tempfile  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 from datetime import datetime  # noqa: E402
@@ -54,13 +53,14 @@ else:
             DOCUMENT = "document"
 
 
-# Optional dependencies with graceful degradation
-# NOTE: PyMuPDF (fitz) is intentionally NOT imported at module import time.
-# On some Linux/WSL environments, importing fitz can trigger a native SIGBUS
-# and kill the interpreter before Python can handle the error. We load it lazily
-# inside PDF processing paths so the app can still start when PDF support is unavailable.
-fitz = None
-PYMUPDF_AVAILABLE = None
+# Optional dependencies
+try:
+    import pypdf  # noqa: E402
+
+    PYPDF_AVAILABLE = True
+except ImportError:
+    pypdf = None
+    PYPDF_AVAILABLE = False
 
 try:
     from docx import Document as DocxDocument  # noqa: E402
@@ -393,32 +393,10 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
         logger.info(f"DocumentProcessor initialized with config: {self.config}")
         self._log_available_dependencies()
 
-    def _ensure_pymupdf(self) -> bool:
-        """Lazily import PyMuPDF to avoid startup crashes in fragile environments."""
-        global fitz, PYMUPDF_AVAILABLE
-
-        if PYMUPDF_AVAILABLE is True and fitz is not None:
-            return True
-        if PYMUPDF_AVAILABLE is False:
-            return False
-
-        try:
-            import fitz as _fitz  # type: ignore
-
-            fitz = _fitz
-            PYMUPDF_AVAILABLE = True
-            return True
-        except Exception as e:
-            # Broad exception by design: native module issues may raise non-ImportError
-            logger.warning(f"PyMuPDF unavailable in this environment: {e}")
-            fitz = None
-            PYMUPDF_AVAILABLE = False
-            return False
-
     def _log_available_dependencies(self):
         """Log available optional dependencies."""
         dependencies = {
-            "PyMuPDF (PDF)": PYMUPDF_AVAILABLE,
+            "pypdf (PDF)": PYPDF_AVAILABLE,
             "python-docx (DOCX)": DOCX_AVAILABLE,
             "BeautifulSoup (HTML)": BS4_AVAILABLE,
             "pytesseract (OCR)": OCR_AVAILABLE,
@@ -589,21 +567,12 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
             None,
             "unknown",
         )
-        try:
-            content, metadata, structured, transcription, processing_method = (
-                await handler(file_path)
-            )
-            confidence = self._calculate_processing_confidence(
-                processing_method, content, file_extension
-            )
-        except Exception as e:
-            logger.warning(
-                f"Handler for {file_extension} failed: {e}. Attempting fallback."
-            )
-            content, metadata, processing_method = await self._fallback_processing(
-                file_path
-            )
-            confidence = 0.3
+        content, metadata, structured, transcription, processing_method = await handler(
+            file_path
+        )
+        confidence = self._calculate_processing_confidence(
+            processing_method, content, file_extension
+        )
 
         processing_time = (datetime.now() - start_time).total_seconds()
 
@@ -665,79 +634,29 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
 
     # --- File Type Handlers ---
 
-    async def _process_pdf(self, file_path: Path) -> tuple:  # noqa: C901
-        """Process PDF using pypdf first; fallback to PyMuPDF only if enabled."""
-        # Safe default for WSL stability
-        allow_pymupdf = str(os.getenv("ALLOW_PYMUPDF", "0")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
+    async def _process_pdf(self, file_path: Path) -> tuple:
+        """Process PDF using pypdf."""
+        if not PYPDF_AVAILABLE:
+            raise RuntimeError("pypdf is required for PDF processing.")
+        from pypdf import PdfReader  # type: ignore
+
+        reader = PdfReader(str(file_path))
+        metadata = {
+            "title": getattr(reader.metadata, "title", None) if reader.metadata else None,
+            "author": getattr(reader.metadata, "author", None) if reader.metadata else None,
+            "producer": getattr(reader.metadata, "producer", None) if reader.metadata else None,
+            "creator": getattr(reader.metadata, "creator", None) if reader.metadata else None,
+            "subject": getattr(reader.metadata, "subject", None) if reader.metadata else None,
+            "page_count": len(reader.pages),
+            "encrypted": bool(getattr(reader, "is_encrypted", False)),
         }
-
-        # 1) Preferred parser: pypdf (pure Python)
-        try:
-            from pypdf import PdfReader  # type: ignore
-
-            reader = PdfReader(str(file_path))
-            metadata = {
-                "title": getattr(reader.metadata, "title", None) if reader.metadata else None,
-                "author": getattr(reader.metadata, "author", None) if reader.metadata else None,
-                "producer": getattr(reader.metadata, "producer", None) if reader.metadata else None,
-                "creator": getattr(reader.metadata, "creator", None) if reader.metadata else None,
-                "subject": getattr(reader.metadata, "subject", None) if reader.metadata else None,
-                "page_count": len(reader.pages),
-                "encrypted": bool(getattr(reader, "is_encrypted", False)),
-            }
-            parts = []
-            for i, page in enumerate(reader.pages):
-                txt = (page.extract_text() or "").strip()
-                if txt:
-                    parts.append(f"\n--- Page {i + 1} ---\n{txt}")
-            content = "\n".join(parts).strip()
-            return content, metadata, None, None, "pypdf"
-        except Exception as e:
-            logger.warning(f"pypdf extraction failed for {file_path.name}: {e}")
-
-        # 2) Optional fallback: PyMuPDF (can crash on some systems)
-        if not allow_pymupdf or not self._ensure_pymupdf():
-            raise RuntimeError(
-                "PDF processing unavailable: pypdf failed and PyMuPDF fallback disabled"
-            )
-
-        content, metadata, processing_method = "", {}, "pymupdf"
-        if fitz is None:
-            raise RuntimeError("PyMuPDF is unavailable")
-        doc = fitz.open(str(file_path))
-        metadata = dict(getattr(doc, "metadata", {}) or {})
-        metadata["page_count"] = int(getattr(doc, "page_count", 0))
-        metadata["encrypted"] = bool(getattr(doc, "is_encrypted", False))
-
-        page_count = int(getattr(doc, "page_count", 0))
-        for page_num in range(page_count):
-            page = cast(Any, doc).load_page(page_num)
-            page_text = page.get_text()
-            if page_text.strip():
-                content += f"\n--- Page {page_num + 1} ---\n{page_text}"
-            elif self.config.enable_ocr and OCR_AVAILABLE:
-                try:
-                    pix = page.get_pixmap()
-                    if Image is None or pytesseract is None:
-                        continue
-                    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                    ocr_text = pytesseract.image_to_string(
-                        img, lang=self.config.ocr_language
-                    )
-                    if ocr_text.strip():
-                        content += f"\n--- Page {page_num + 1} (OCR) ---\n{ocr_text}"
-                        processing_method = "pymupdf_with_ocr"
-                        self.stats["ocr_used_count"] += 1
-                except Exception as e:
-                    logger.warning(
-                        f"OCR failed for page {page_num + 1} in {file_path.name}: {e}"
-                    )
-        doc.close()
-        return content.strip(), metadata, None, None, processing_method
+        parts = []
+        for i, page in enumerate(reader.pages):
+            txt = (page.extract_text() or "").strip()
+            if txt:
+                parts.append(f"\n--- Page {i + 1} ---\n{txt}")
+        content = "\n".join(parts).strip()
+        return content, metadata, None, None, "pypdf"
 
     async def _process_docx(self, file_path: Path) -> tuple:
         if file_path.suffix.lower() == ".doc":
@@ -784,45 +703,39 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
     async def _process_html(self, file_path: Path) -> tuple:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             html_content = f.read()
-        if BS4_AVAILABLE and BeautifulSoup is not None:
-            soup = BeautifulSoup(html_content, "html.parser")
-            for script in soup(["script", "style"]):
-                script.extract()
-            content = soup.get_text(separator="\n", strip=True)
-            title = soup.title.string if soup.title else ""
-            return content, {"title": title}, None, None, "beautifulsoup"
-        else:
-            content = re.sub(r"<[^>]+>", "", html_content)
-            return content, {}, None, None, "regex_html_strip"
+        if not BS4_AVAILABLE or BeautifulSoup is None:
+            raise RuntimeError("BeautifulSoup4 is required for HTML processing.")
+        soup = BeautifulSoup(html_content, "html.parser")
+        for script in soup(["script", "style"]):
+            script.extract()
+        content = soup.get_text(separator="\n", strip=True)
+        title = soup.title.string if soup.title else ""
+        return content, {"title": title}, None, None, "beautifulsoup"
 
     async def _process_rtf(self, file_path: Path) -> tuple:
         with open(file_path, "r", errors="ignore") as f:
             rtf_content = f.read()
-        if RTF_AVAILABLE and rtf_to_text is not None:
-            content = rtf_to_text(rtf_content)
-            return content, {}, None, None, "striprtf"
-        else:
-            # Basic fallback if striprtf is not available
-            content = re.sub(r"{\\*\\.+?}|\\(.+?)\s|[{}]", "", rtf_content)
-            return content.strip(), {}, None, None, "regex_rtf_strip"
+        if not RTF_AVAILABLE or rtf_to_text is None:
+            raise RuntimeError("striprtf is required for RTF processing.")
+        content = rtf_to_text(rtf_content)
+        return content, {}, None, None, "striprtf"
 
     async def _process_markdown(self, file_path: Path) -> tuple:
         with open(file_path, "r", encoding="utf-8") as f:
             md_content = f.read()
         if (
-            MARKDOWN_AVAILABLE
-            and markdown is not None
-            and BS4_AVAILABLE
-            and BeautifulSoup is not None
+            not MARKDOWN_AVAILABLE
+            or markdown is None
+            or not BS4_AVAILABLE
+            or BeautifulSoup is None
         ):
-            html = markdown.markdown(md_content)
-            soup = BeautifulSoup(html, "html.parser")
-            content = soup.get_text()
-            return content, {}, None, None, "markdown_to_text"
-        else:
-            # Fallback for when markdown or bs4 is not available
-            content = re.sub(r"#+\s*|\*\*|\*|`|\[.+?\]\(.+?\)", "", md_content)
-            return content, {}, None, None, "regex_markdown_strip"
+            raise RuntimeError(
+                "markdown and BeautifulSoup4 are required for Markdown processing."
+            )
+        html = markdown.markdown(md_content)
+        soup = BeautifulSoup(html, "html.parser")
+        content = soup.get_text()
+        return content, {}, None, None, "markdown_to_text"
 
     async def _process_excel(self, file_path: Path) -> tuple:
         if file_path.suffix.lower() == ".xls":
@@ -912,26 +825,14 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             audio_path = Path(tmpdir) / f"{file_path.stem}.wav"
-            try:
-                if VideoFileClip is None:
-                    raise RuntimeError("moviepy is unavailable")
-                video = VideoFileClip(str(file_path))
-                if video.duration > self.config.max_audio_duration_minutes * 60:
-                    raise ValueError("Video duration exceeds maximum limit.")
-                video.audio.write_audiofile(str(audio_path), codec="pcm_s16le")
-                video.close()
-                return await self._process_audio(audio_path)
-            except Exception as e:
-                logger.error(
-                    f"Failed to extract audio from video {file_path.name}: {e}"
-                )
-                return (
-                    "",
-                    {"error": str(e)},
-                    None,
-                    None,
-                    "video_audio_extraction_failed",
-                )
+            if VideoFileClip is None:
+                raise RuntimeError("moviepy is unavailable")
+            video = VideoFileClip(str(file_path))
+            if video.duration > self.config.max_audio_duration_minutes * 60:
+                raise ValueError("Video duration exceeds maximum limit.")
+            video.audio.write_audiofile(str(audio_path), codec="pcm_s16le")
+            video.close()
+            return await self._process_audio(audio_path)
 
     async def _process_audio(self, file_path: Path) -> tuple:
         if not MULTIMODAL_AVAILABLE:
@@ -944,24 +845,6 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
         transcription = result["text"]
         metadata = {"language": result["language"], "model": self.config.whisper_model}
         return "", metadata, None, transcription, "whisper_transcription"
-
-    async def _fallback_processing(self, file_path: Path) -> tuple:
-        """Fallback processing for when specific handlers fail."""
-        try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-            metadata = {
-                "fallback_method": "text_read_ignore_errors",
-                "warning": "Processed with fallback method; content may be incomplete or garbled.",
-            }
-            return content, metadata, "fallback_text"
-        except Exception as e:
-            logger.error(f"Final fallback processing failed for {file_path}: {e}")
-            return (
-                "",
-                {"error": "Could not process file with any method"},
-                "fallback_failed",
-            )
 
     # --- Helper & Integration Methods ---
 
@@ -992,8 +875,6 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
             return 0.1
         if "failed" in method:
             return 0.0
-        if "fallback" in method:
-            return 0.3
         if "ocr" in method:
             return 0.75
         if "regex" in method:

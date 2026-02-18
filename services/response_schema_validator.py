@@ -70,16 +70,8 @@ def _normalize(agent_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 def enforce_agent_response(agent_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Validate/normalize API responses against v2 schema.
 
-    Strict mode (default): AGENT_SCHEMA_ENFORCE=1 returns structured failure when invalid.
-    Non-strict mode: attaches validation warning and returns normalized payload.
+    Schema validation is always enforced; invalid payloads return structured failure.
     """
-    strict = os.getenv("AGENT_SCHEMA_ENFORCE", "0").strip().lower() not in {
-        "0",
-        "false",
-        "no",
-        "off",
-    }
-
     normalized = _normalize(agent_type, payload)
     validator = _load_validator()
     if validator is None:
@@ -98,25 +90,18 @@ def enforce_agent_response(agent_type: str, payload: Dict[str, Any]) -> Dict[str
     err_msg = f"{first.message} @ {'/'.join(str(p) for p in first.path) or '<root>'}"
     logger.warning("Schema validation failed for %s: %s", agent_type, err_msg)
 
-    if strict:
-        return {
-            "schema_version": "v2",
-            "success": False,
-            "data": {},
-            "error": f"Schema validation failed: {err_msg}",
-            "processing_time": normalized.get("processing_time", 0.0),
-            "agent_type": agent_type,
-            "metadata": {
-                "recoverable": True,
-                "schema_validation": "failed",
-                "schema_error": err_msg,
-            },
-            "warnings": [{"type": "schema_validation", "message": err_msg}],
-            "fallback_used": True,
-        }
-
-    normalized.setdefault("metadata", {})["schema_validation"] = "failed"
-    normalized.setdefault("warnings", []).append(
-        {"type": "schema_validation", "message": err_msg}
-    )
-    return normalized
+    return {
+        "schema_version": "v2",
+        "success": False,
+        "data": {},
+        "error": f"Schema validation failed: {err_msg}",
+        "processing_time": normalized.get("processing_time", 0.0),
+        "agent_type": agent_type,
+        "metadata": {
+            "recoverable": False,
+            "schema_validation": "failed",
+            "schema_error": err_msg,
+        },
+        "warnings": [{"type": "schema_validation", "message": err_msg}],
+        "fallback_used": False,
+    }

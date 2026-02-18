@@ -24,10 +24,22 @@ class OperationsMixin:
 
             agent = self.agents.get(AgentType.DOCUMENT_PROCESSOR)
             if not agent:
+                try:
+                    from .runtime import create_document_processor  # noqa: E402
+
+                    if create_document_processor and getattr(self, "service_container", None):
+                        agent = await create_document_processor(self.service_container)
+                        if agent:
+                            self.agents[AgentType.DOCUMENT_PROCESSOR] = agent
+                except Exception as lazy_err:
+                    self.logger.warning(f"Lazy document processor init failed: {lazy_err}")
+
+            if not agent:
                 return AgentResult(
                     success=False,
                     data={},
                     error="Document processor not available",
+                    agent_type="document_processor",
                 )
             result = await agent._process_task(task_data=file_path, metadata=kwargs)
 
@@ -72,14 +84,10 @@ class OperationsMixin:
 
         try:
             if not self.is_initialized:
-                processing_time = (datetime.now() - start_time).total_seconds()
-                from config.extraction_patterns import extract_entities_from_text  # noqa: E402
-
-                entities = extract_entities_from_text(text)
                 return AgentResult(
-                    success=True,
-                    data={"entities": entities},
-                    processing_time=processing_time,
+                    success=False,
+                    data={},
+                    error="Production system not initialized",
                     agent_type="entity_extractor",
                 )
 
@@ -117,27 +125,21 @@ class OperationsMixin:
             processing_time = (datetime.now() - start_time).total_seconds()
 
             if not isinstance(result, dict):
-                result = {"success": False, "entities": []}
-
-            if not result.get("success", False):
-                # Resilient fallback so GUI still works when advanced NER models are missing
-                import re
-
-                ents = []
-                for m in re.finditer(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", text):
-                    ents.append(
-                        {"text": m.group(0), "label": "PROPER_NOUN", "confidence": 0.55}
-                    )
-                for m in re.finditer(r"\b\d{4}-\d{2}-\d{2}\b", text):
-                    ents.append(
-                        {"text": m.group(0), "label": "DATE", "confidence": 0.7}
-                    )
                 return AgentResult(
-                    success=True,
-                    data={"entities": ents, "fallback": True},
+                    success=False,
+                    data={},
+                    error="entity extractor returned invalid result",
                     processing_time=processing_time,
                     agent_type="entity_extractor",
-                    metadata={"mode": "fallback-regex"},
+                )
+
+            if not result.get("success", False):
+                return AgentResult(
+                    success=False,
+                    data=result,
+                    error=result.get("error") or "entity extraction failed",
+                    processing_time=processing_time,
+                    agent_type="entity_extractor",
                 )
 
             return AgentResult(
@@ -150,24 +152,16 @@ class OperationsMixin:
         except Exception as e:
             processing_time = (datetime.now() - start_time).total_seconds()
             self.logger.error(f"Entity extraction failed: {e}")
-            # Last-resort fallback to keep UI functional
-            import re
-
-            ents = []
-            for m in re.finditer(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", text):
-                ents.append(
-                    {"text": m.group(0), "label": "PROPER_NOUN", "confidence": 0.5}
-                )
             return AgentResult(
-                success=True,
-                data={"entities": ents, "fallback": True, "source_error": str(e)},
+                success=False,
+                data={},
+                error=str(e),
                 processing_time=processing_time,
                 agent_type="entity_extractor",
-                metadata={"mode": "fallback-regex"},
             )
 
     async def classify_text(self, text: str, **kwargs) -> AgentResult:  # noqa: C901
-        """Classify text using transformers zero-shot if available, with fallback keywords."""
+        """Classify text using transformers zero-shot."""
         start_time = datetime.now()
         try:
             labels = kwargs.get("labels") or [
@@ -223,26 +217,11 @@ class OperationsMixin:
                     processing_time=(datetime.now() - start_time).total_seconds(),
                     agent_type="classifier",
                 )
-            except Exception:
-                lower = text.lower()
-                labels_out = []
-                if any(k in lower for k in ["contract", "agreement", "terms"]):
-                    labels_out.append({"label": "contract", "confidence": 0.82})
-                if any(k in lower for k in ["motion", "order", "brie"]):
-                    labels_out.append({"label": "court_filing", "confidence": 0.76})
-                if any(k in lower for k in ["illegal", "violation", "breach"]):
-                    labels_out.append({"label": "compliance_risk", "confidence": 0.74})
-                if not labels_out:
-                    labels_out.append({"label": "general_document", "confidence": 0.6})
-                if quality_gate:
-                    labels_out = [
-                        l for l in labels_out if l.get("confidence", 0) >= 0.7
-                    ]
-                    if not labels_out:
-                        labels_out = [{"label": "low_confidence", "confidence": 0.5}]
+            except Exception as model_err:
                 return AgentResult(
-                    success=True,
-                    data={"labels": labels_out, "used_ml_model": False},
+                    success=False,
+                    data={},
+                    error=f"classification backend unavailable: {model_err}",
                     processing_time=(datetime.now() - start_time).total_seconds(),
                     agent_type="classifier",
                 )
@@ -256,7 +235,7 @@ class OperationsMixin:
             )
 
     async def embed_texts(self, texts: list[str], **kwargs) -> AgentResult:
-        """Compute embeddings using sentence-transformers if available."""
+        """Compute embeddings using sentence-transformers."""
         start_time = datetime.now()
         try:
             import os
@@ -283,24 +262,13 @@ class OperationsMixin:
                     agent_type="embedder",
                     metadata={"mode": "sentence-transformers", "model": model_name},
                 )
-            except Exception:
-                import hashlib
-                import math
-
-                out = []
-                for t in texts:
-                    h = hashlib.sha256(t.encode("utf-8")).digest()
-                    vec = [(h[i] / 255.0) for i in range(32)]
-                    vec += vec
-                    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-                    vec = [v / norm for v in vec]
-                    out.append(vec)
+            except Exception as model_err:
                 return AgentResult(
-                    success=True,
-                    data={"embeddings": out},
+                    success=False,
+                    data={},
+                    error=f"embedding backend unavailable: {model_err}",
                     processing_time=(datetime.now() - start_time).total_seconds(),
                     agent_type="embedder",
-                    metadata={"mode": "fallback", "dim": 64},
                 )
         except Exception as e:
             return AgentResult(
@@ -474,27 +442,12 @@ class OperationsMixin:
         except Exception as e:
             processing_time = (datetime.now() - start_time).total_seconds()
             self.logger.error(f"Legal reasoning analysis failed: {e}")
-            lower = (document_content or "").lower()
-            issues = []
-            if "breach" in lower:
-                issues.append({"issue": "possible breach", "confidence": 0.65})
-            if "illegal" in lower or "violation" in lower:
-                issues.append(
-                    {"issue": "possible compliance violation", "confidence": 0.65}
-                )
             return AgentResult(
-                success=True,
-                data={
-                    "analysis_type": kwargs.get("analysis_type", "comprehensive"),
-                    "legal_issues": issues,
-                    "reasoning_trace": [
-                        {"step": "fallback", "evidence": str(e), "score": 0.4}
-                    ],
-                    "metadata": {"mode": "fallback-heuristic", "source_error": str(e)},
-                },
+                success=False,
+                data={},
+                error=str(e),
                 processing_time=processing_time,
                 agent_type="legal_reasoning",
-                metadata={"mode": "fallback-heuristic"},
             )
 
     async def submit_feedback(
@@ -542,8 +495,9 @@ class OperationsMixin:
             if not self.is_initialized:
                 processing_time = (datetime.now() - start_time).total_seconds()
                 return AgentResult(
-                    success=True,
-                    data={"text": document_text, "irac_stub": True},
+                    success=False,
+                    data={},
+                    error="Production system not initialized",
                     processing_time=processing_time,
                     agent_type="irac_analyzer",
                 )
@@ -595,8 +549,9 @@ class OperationsMixin:
             if not self.is_initialized:
                 processing_time = (datetime.now() - start_time).total_seconds()
                 return AgentResult(
-                    success=True,
-                    data={"text": document_content, "toulmin_stub": True},
+                    success=False,
+                    data={},
+                    error="Production system not initialized",
                     processing_time=processing_time,
                     agent_type="toulmin_analyzer",
                 )
@@ -647,12 +602,9 @@ class OperationsMixin:
                 )
             if self._precedent_analyzer is None:
                 return AgentResult(
-                    success=True,
-                    data={
-                        "matches": [
-                            {"citation": c, "matched": False} for c in citations
-                        ]
-                    },
+                    success=False,
+                    data={},
+                    error="precedent analyzer not available",
                     processing_time=(datetime.now() - start_time).total_seconds(),
                     agent_type="precedent_analyzer",
                 )
@@ -680,19 +632,12 @@ class OperationsMixin:
                     agent_type="precedent_analyzer",
                 )
             except Exception as e:
-                # Graceful fallback: echo citations as unresolved matches so pipeline continues.
                 return AgentResult(
-                    success=True,
-                    data={
-                        "matches": [
-                            {"citation": c, "matched": False, "reason": str(e)}
-                            for c in citations
-                        ],
-                        "fallback": True,
-                    },
+                    success=False,
+                    data={},
+                    error=str(e),
                     processing_time=(datetime.now() - start_time).total_seconds(),
                     agent_type="precedent_analyzer",
-                    metadata={"mode": "fallback"},
                 )
         except Exception as e:
             return AgentResult(
@@ -783,26 +728,30 @@ class OperationsMixin:
             )
 
     async def analyze_contradictions(self, text: str, **kwargs) -> AgentResult:
-        """Heuristic contradiction detection."""
+        """Analyze contradictions using contradiction detector agent."""
         start_time = datetime.now()
         try:
-            lower = text.lower()
-            flags = []
-            keywords = [
-                ("not", "shall"),
-                ("prohibited", "allowed"),
-                ("must", "may not"),
-                ("forbidden", "permitted"),
-            ]
-            for a, b in keywords:
-                if a in lower and b in lower:
-                    flags.append({"pattern": f"{a} & {b}", "confidence": 0.6})
+            if not self.is_initialized:
+                return AgentResult(
+                    success=False,
+                    data={},
+                    error="Production system not initialized",
+                    agent_type="contradiction_detector",
+                )
+            agent = self.agents.get(AgentType.CONTRADICTION_DETECTOR)
+            if not agent:
+                return AgentResult(
+                    success=False,
+                    data={},
+                    error="contradiction detector not available",
+                    agent_type="contradiction_detector",
+                )
+            result = await agent._process_task(task_data=text, metadata=kwargs)
             return AgentResult(
-                success=True,
-                data={"contradictions": flags},
+                success=result.get("success", False),
+                data=result,
                 processing_time=(datetime.now() - start_time).total_seconds(),
                 agent_type="contradiction_detector",
-                metadata={"mode": "heuristic"},
             )
         except Exception as e:
             return AgentResult(
@@ -814,30 +763,30 @@ class OperationsMixin:
             )
 
     async def analyze_violations(self, text: str, **kwargs) -> AgentResult:
-        """Heuristic violation review with simple keyword signals."""
+        """Analyze violations using violation review agent."""
         start_time = datetime.now()
         try:
-            issues = []
-            for kw, rule in [
-                ("illegal", "legal_compliance"),
-                ("non-payment", "payment_terms"),
-                ("breach", "contract_compliance"),
-            ]:
-                if kw in text.lower():
-                    issues.append(
-                        {
-                            "issue": kw,
-                            "rule": rule,
-                            "severity": "medium",
-                            "confidence": 0.7,
-                        }
-                    )
+            if not self.is_initialized:
+                return AgentResult(
+                    success=False,
+                    data={},
+                    error="Production system not initialized",
+                    agent_type="violation_review",
+                )
+            agent = self.agents.get(AgentType.VIOLATION_REVIEW)
+            if not agent:
+                return AgentResult(
+                    success=False,
+                    data={},
+                    error="violation reviewer not available",
+                    agent_type="violation_review",
+                )
+            result = await agent._process_task(task_data=text, metadata=kwargs)
             return AgentResult(
-                success=True,
-                data={"violations": issues},
+                success=result.get("success", False),
+                data=result,
                 processing_time=(datetime.now() - start_time).total_seconds(),
                 agent_type="violation_review",
-                metadata={"mode": "heuristic"},
             )
         except Exception as e:
             return AgentResult(

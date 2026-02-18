@@ -6,7 +6,7 @@ from typing import Any, List, Optional
 from fastapi import HTTPException, Request
 
 from services.agent_service import AgentService
-from services.dependencies import get_memory_service_dep
+from services.dependencies import get_agent_manager_strict_dep, get_memory_service_dep
 
 DEFAULT_REQUIRED_PRODUCTION_AGENTS = [
     "document_processor",
@@ -32,20 +32,6 @@ def required_production_agents() -> List[str]:
 
 
 async def get_strict_production_manager(request: Request):
-    startup = getattr(request.app.state, "agent_startup", None) or {}
-    if startup.get("strict", True) and startup.get("missing"):
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "production_startup_guard_failed",
-                "missing": startup.get("missing", []),
-                "required": startup.get("required", []),
-                "available": startup.get("available", []),
-            },
-        )
-
-    from services.dependencies import get_agent_manager_strict_dep  # noqa: E402
-
     manager = await get_agent_manager_strict_dep(request)
     if hasattr(manager, "initialize"):
         ok = await manager.initialize()
@@ -63,21 +49,10 @@ async def get_strict_production_manager(request: Request):
     missing = [a for a in required if a not in available]
 
     request.app.state.agent_startup = {
-        "strict": True,
         "required": required,
         "available": sorted(available),
         "missing": missing,
     }
-    if missing:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "required_production_agents_missing",
-                "missing": missing,
-                "required": required,
-                "available": sorted(available),
-            },
-        )
 
     return manager
 

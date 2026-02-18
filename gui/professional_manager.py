@@ -40,10 +40,14 @@ try:
     from gui.tabs.expert_prompts_tab import ExpertPromptsTab
     from gui.tabs.embedding_operations_tab import EmbeddingOperationsTab
     from gui.tabs.classification_tab import ClassificationTab
-    from gui.tabs.diagnostics_tab import DiagnosticsTab
+    from gui.memory_review_tab import MemoryReviewTab
+    from gui.contradictions_tab import ContradictionsTab
+    from gui.violations_tab import ViolationsTab
 except ImportError as e:
     print(f"Error importing tabs: {e}")
     # We will handle missing tabs in the class
+
+from gui.core import AsyncioThread
 
 # Professional Dark Theme (Consistent with DB Monitor)
 DARK_STYLESHEET = """
@@ -153,6 +157,11 @@ class ProfessionalManager(QMainWindow):
         super().__init__()
         self.setWindowTitle("Smart Document Organizer - Professional Manager")
         self.resize(1400, 900)
+        self.asyncio_thread = AsyncioThread(self)
+        self.asyncio_thread.start()
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self._stop_asyncio_thread)
         
         self.api_url = "http://localhost:8000"
         self.setup_ui()
@@ -219,8 +228,7 @@ class ProfessionalManager(QMainWindow):
 
         # 3. Semantic Analysis
         try:
-            # Pass None for asyncio_thread as it's optional/unused in current implementation
-            self.semantic_tab = SemanticAnalysisTab(asyncio_thread=None)
+            self.semantic_tab = SemanticAnalysisTab(asyncio_thread=self.asyncio_thread)
             self.tabs.addTab(self.semantic_tab, "🧠 Semantic Analysis")
         except NameError:
             self.tabs.addTab(QLabel("Semantic Analysis Tab not available"), "🧠 Semantic Analysis")
@@ -241,7 +249,7 @@ class ProfessionalManager(QMainWindow):
 
         # 6. Knowledge Graph
         try:
-            self.kg_tab = KnowledgeGraphTab(asyncio_thread=None)
+            self.kg_tab = KnowledgeGraphTab(asyncio_thread=self.asyncio_thread)
             self.tabs.addTab(self.kg_tab, "🕸️ Knowledge Graph")
         except NameError:
             self.tabs.addTab(QLabel("KG Tab not available"), "🕸️ Knowledge Graph")
@@ -260,40 +268,54 @@ class ProfessionalManager(QMainWindow):
         except NameError:
             pass
 
-        # 9. Diagnostics
-        try:
-            self.diag_tab = DiagnosticsTab()
-            self.tabs.addTab(self.diag_tab, "🩺 Diagnostics")
-        except NameError:
-            self.tabs.addTab(QLabel("Diagnostics Tab not available"), "🩺 Diagnostics")
-
-        # 10. Expert Prompts
+        # 9. Expert Prompts
         try:
             self.expert_prompts_tab = ExpertPromptsTab()
             self.tabs.addTab(self.expert_prompts_tab, "🧑‍🏫 Expert Prompts")
         except NameError:
             self.tabs.addTab(QLabel("Expert Prompts Tab not available"), "🧑‍🏫 Expert Prompts")
 
-        # 11. Embedding Operations
+        # 10. Embedding Operations
         try:
-            self.embedding_ops_tab = EmbeddingOperationsTab()
+            self.embedding_ops_tab = EmbeddingOperationsTab(self.asyncio_thread)
             self.tabs.addTab(self.embedding_ops_tab, "🔩 Embeddings")
         except NameError:
             self.tabs.addTab(QLabel("Embedding Tab not available"), "🔩 Embeddings")
 
-        # 12. Classification
+        # 11. Classification
         try:
             self.classification_tab = ClassificationTab()
             self.tabs.addTab(self.classification_tab, "🏷️ Classification")
         except NameError:
             self.tabs.addTab(QLabel("Classification Tab not available"), "🏷️ Classification")
 
+        # 12. Contradictions
+        try:
+            self.contradictions_tab = ContradictionsTab()
+            self.tabs.addTab(self.contradictions_tab, "⚔️ Contradictions")
+        except NameError:
+            self.tabs.addTab(QLabel("Contradictions Tab not available"), "⚔️ Contradictions")
+
+        # 13. Violations
+        try:
+            self.violations_tab = ViolationsTab()
+            self.tabs.addTab(self.violations_tab, "🚨 Violations")
+        except NameError:
+            self.tabs.addTab(QLabel("Violations Tab not available"), "🚨 Violations")
+
+        # 14. Memory Review
+        try:
+            self.memory_review_tab = MemoryReviewTab()
+            self.tabs.addTab(self.memory_review_tab, "🧠 Memory Review")
+        except NameError:
+            self.tabs.addTab(QLabel("Memory Review Tab not available"), "🧠 Memory Review")
+
     def check_backend_status(self):
         self.status_indicator.setText("Checking...")
         self.status_indicator.setStyleSheet("color: orange;")
         try:
             # Use the health endpoint which is standard
-            response = requests.get(f"{self.api_url}/health", timeout=3)
+            response = requests.get(f"{self.api_url}/api/health", timeout=3)
             if response.status_code == 200:
                 self.status_indicator.setText("Backend Connected")
                 self.status_indicator.setStyleSheet("color: #00ff00;") # green
@@ -317,6 +339,23 @@ class ProfessionalManager(QMainWindow):
         msg_box.setStandardButtons(QMessageBox.Ok)
         msg_box.setStyleSheet("") # Use default style for dialog
         msg_box.exec()
+
+    def closeEvent(self, event):
+        self._stop_asyncio_thread()
+        super().closeEvent(event)
+
+    def _stop_asyncio_thread(self):
+        try:
+            if getattr(self, "asyncio_thread", None):
+                self.asyncio_thread.stop()
+                if not self.asyncio_thread.wait(2000):
+                    self.asyncio_thread.terminate()
+                    self.asyncio_thread.wait(1000)
+        except Exception:
+            pass
+
+    def __del__(self):
+        self._stop_asyncio_thread()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

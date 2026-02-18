@@ -33,10 +33,10 @@ class ApiClient:
             # Configure retry strategy for transient failures
             retry_strategy = Retry(
                 total=max_retries,
-                status_forcelist=[429, 500, 502, 503, 504],  # Retry on these status codes
-                allowed_methods=["HEAD", "GET", "OPTIONS", "POST"],  # urllib3 v2+
-                backoff_factor=1,  # Exponential backoff: 1, 2, 4 seconds
-                raise_on_status=False  # Don't raise immediately on bad status
+                status_forcelist=[429, 500, 502, 503, 504],  # Retry on transient statuses
+                allowed_methods=["HEAD", "GET", "OPTIONS"],  # avoid retrying mutating requests
+                backoff_factor=0.5,
+                raise_on_status=False,
             )
             adapter = HTTPAdapter(max_retries=retry_strategy)
             self.session.mount("http://", adapter)

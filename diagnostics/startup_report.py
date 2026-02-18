@@ -142,7 +142,7 @@ def migration_snapshot() -> dict:
 def build_startup_report(
     *,
     app: Any,
-    strict_startup: bool,
+    startup_enforced: bool,
     required_production_agents: List[str],
     api_key_enabled: bool,
     rate_limit_requests_per_minute: int,
@@ -157,7 +157,7 @@ def build_startup_report(
         startup_steps.append(clean)
 
     return {
-        "strict_startup": strict_startup,
+        "startup_enforced": startup_enforced,
         "required_production_agents": required_production_agents,
         "agents": agent_state,
         "routers": {

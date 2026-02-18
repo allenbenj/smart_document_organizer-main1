@@ -53,10 +53,7 @@ async def register_memory_services(
         memory_service = container._instances.get(MemoryService)
         if memory_service:
             return memory_service.get_memory_manager()
-        else:
-            # This should not happen in production, but provides fallback
-            logger.warning("MemoryService not found when creating memory manager")
-            return None
+        raise RuntimeError("MemoryService not found when creating memory manager")
 
     # Register MemoryService as singleton with no dependencies
     await container.register_service(
@@ -153,7 +150,7 @@ async def register_wrapped_memory_services(
         wrapper_instance = container._instances.get(MemoryServiceWrapper)
         if wrapper_instance:
             return wrapper_instance.get_memory_manager()
-        return None
+        raise RuntimeError("MemoryServiceWrapper not found in container instances")
 
     # Register memory manager with dependency on wrapper
     await container.register_service(
@@ -294,11 +291,6 @@ async def ensure_memory_services(
     if has_wrapper and has_manager:
         return True
 
-    try:
-        # Register services with provided configuration
-        await register_wrapped_memory_services(container, **memory_config)
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to ensure memory services: {e}")
-        return False
+    # Register services with provided configuration
+    await register_wrapped_memory_services(container, **memory_config)
+    return True

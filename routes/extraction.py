@@ -1,59 +1,61 @@
-from fastapi import APIRouter, HTTPException, Path
+from typing import Any, Dict
+
+from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel
-from typing import List, Dict, Any
+
+from services.agent_service import AgentService
+from services.dependencies import get_agent_manager_strict_dep
+from services.response_schema_validator import enforce_agent_response
 
 router = APIRouter()
 
+
 class ExtractionRequest(BaseModel):
     text: str
-    extraction_type: str
+    extraction_type: str = "ner"
     options: Dict[str, Any] = {}
 
-class Entity(BaseModel):
-    text: str
-    type: str
-    start_char: int
-    end_char: int
-    score: float = 1.0
 
 @router.post("/run")
-async def run_entity_extraction(request: ExtractionRequest):
-    """
-    Placeholder for running entity extraction.
-    In a real implementation, this would trigger an entity extraction process.
-    """
-    print(f"Received entity extraction request for text: '{request.text[:50]}...'")
-    # Simulate extraction
-    extracted_entities: List[Entity] = []
-    
-    if "example" in request.text.lower():
-        extracted_entities.append(Entity(text="example", type="KEYWORD", start_char=request.text.lower().find("example"), end_char=request.text.lower().find("example") + len("example")))
-    
-    return {
-        "message": "Entity extraction job started successfully.",
-        "details": {
-            "text_length": len(request.text),
-            "extraction_type": request.extraction_type,
-            "options": request.options,
-            "status": "pending"
-        },
-        "entities": extracted_entities
+async def run_entity_extraction(
+    request: ExtractionRequest,
+    manager=Depends(get_agent_manager_strict_dep),
+):
+    service = AgentService(manager)
+    payload = {
+        "text": request.text,
+        "options": {**(request.options or {}), "extraction_type": request.extraction_type},
     }
+    result = await service.dispatch_task("extract_entities", payload)
+
+    if isinstance(result, dict):
+        out = {
+            "success": bool(result.get("success", False)),
+            "data": result.get("data", {}),
+            "error": result.get("error"),
+            "processing_time": result.get("processing_time", 0.0),
+            "agent_type": result.get("agent_type", "entity_extractor"),
+            "metadata": result.get("metadata", {}),
+        }
+    else:
+        out = {
+            "success": result.success,
+            "data": result.data,
+            "error": result.error,
+            "processing_time": result.processing_time,
+            "agent_type": result.agent_type,
+            "metadata": result.metadata,
+        }
+
+    return enforce_agent_response("entity_extractor", out)
+
 
 @router.get("/{doc_id}/entities")
 async def get_document_entities(doc_id: str = Path(..., title="The ID of the document")):
-    """
-    Placeholder for retrieving entities for a specific document.
-    """
-    print(f"Received request for entities for document ID: {doc_id}")
-    # Simulate retrieving entities
-    if doc_id == "doc123":
-        return {
-            "document_id": doc_id,
-            "entities": [
-                {"text": "Apple Inc.", "type": "ORGANIZATION", "start_char": 0, "end_char": 10},
-                {"text": "Tim Cook", "type": "PERSON", "start_char": 12, "end_char": 20},
-            ]
-        }
-    else:
-        raise HTTPException(status_code=404, detail="Document not found or no entities available.")
+    raise HTTPException(
+        status_code=501,
+        detail=(
+            "Entity retrieval by document id is not implemented in production routes. "
+            "Use POST /api/extraction/run with document text."
+        ),
+    )

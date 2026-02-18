@@ -1,42 +1,70 @@
-from fastapi import APIRouter, HTTPException
+from typing import Any, Dict, List
+
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from typing import List, Dict, Any
+
+from services.agent_service import AgentService
+from services.dependencies import get_agent_manager_strict_dep
+from services.response_schema_validator import enforce_agent_response
 
 router = APIRouter()
 
+
 class EmbeddingRequest(BaseModel):
     text: str
-    model_name: str
-    operation: str
+    model_name: str = ""
+    operation: str = "embed"
     options: Dict[str, Any] = {}
 
-@router.post("/run_operation")
-async def run_embedding_operation(request: EmbeddingRequest):
-    """
-    Placeholder for running embedding operations (e.g., generating, comparing, transforming embeddings).
-    """
-    print(f"Received embedding operation request for text: '{request.text[:50]}...' with model '{request.model_name}' and operation '{request.operation}'")
-    # Simulate embedding operation
-    return {
-        "message": "Embedding operation job started successfully.",
-        "details": {
-            "text_length": len(request.text),
-            "model_name": request.model_name,
-            "operation": request.operation,
-            "options": request.options,
-            "status": "pending",
-            "simulated_embedding": [0.1, 0.2, 0.3, 0.4, 0.5] # Example embedding
+
+def _to_response(result: Any) -> Dict[str, Any]:
+    if isinstance(result, dict):
+        return {
+            "success": bool(result.get("success", False)),
+            "data": result.get("data", {}),
+            "error": result.get("error"),
+            "processing_time": result.get("processing_time", 0.0),
+            "agent_type": result.get("agent_type", "embed"),
+            "metadata": result.get("metadata", {}),
         }
+    return {
+        "success": result.success,
+        "data": result.data,
+        "error": result.error,
+        "processing_time": result.processing_time,
+        "agent_type": result.agent_type,
+        "metadata": result.metadata,
     }
 
-@router.post("/")
-async def get_embeddings(request: EmbeddingRequest):
-    """
-    Placeholder for generating embeddings for text.
-    """
-    print(f"Received get embeddings request for text: '{request.text[:50]}...' with model '{request.model_name}'")
-    return {
-        "message": "Embeddings generated successfully.",
-        "embedding": [0.1, 0.2, 0.3, 0.4, 0.5], # Example embedding
-        "model": request.model_name
+
+async def _dispatch_embed(
+    request: EmbeddingRequest,
+    manager: Any,
+) -> Dict[str, Any]:
+    service = AgentService(manager)
+    payload = {
+        "texts": [request.text],
+        "options": {
+            **(request.options or {}),
+            "model_name": request.model_name,
+            "operation": request.operation,
+        },
     }
+    result = await service.dispatch_task("embed_texts", payload)
+    return enforce_agent_response("embed", _to_response(result))
+
+
+@router.post("/run_operation")
+async def run_embedding_operation(
+    request: EmbeddingRequest,
+    manager=Depends(get_agent_manager_strict_dep),
+) -> Dict[str, Any]:
+    return await _dispatch_embed(request, manager)
+
+
+@router.post("/")
+async def get_embeddings(
+    request: EmbeddingRequest,
+    manager=Depends(get_agent_manager_strict_dep),
+) -> Dict[str, Any]:
+    return await _dispatch_embed(request, manager)

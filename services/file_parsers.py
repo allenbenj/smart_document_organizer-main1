@@ -319,7 +319,7 @@ class MediaTagsParser(BaseFileParser):
         return out
 
 class FileParserRegistry:
-    """Simple ordered parser registry with safe fallback semantics."""
+    """Simple ordered parser registry."""
 
     def __init__(self, parsers: Optional[Iterable[FileParser]] = None):
         self._parsers: list[FileParser] = list(parsers or [])
@@ -329,23 +329,20 @@ class FileParserRegistry:
 
     def resolve(self, *, ext: str, mime_type: Optional[str] = None) -> Optional[FileParser]:
         for parser in self._parsers:
-            try:
-                if parser.supports(ext=ext, mime_type=mime_type):
-                    return parser
-            except Exception:
-                continue
+            if parser.supports(ext=ext, mime_type=mime_type):
+                return parser
         return None
 
     def quick_validate(self, path: Path, *, ext: str, mime_type: Optional[str] = None) -> tuple[str, Optional[str]]:
         parser = self.resolve(ext=ext, mime_type=mime_type)
         if parser is None:
-            return "ready", None
+            return "unsupported", "no_parser_registered"
         return parser.quick_validate(path, ext=ext, mime_type=mime_type)
 
     def extract_index_metadata(self, path: Path, *, ext: str, mime_type: Optional[str] = None) -> Dict[str, Any]:
         parser = self.resolve(ext=ext, mime_type=mime_type)
         if parser is None:
-            return {}
+            raise ValueError(f"No parser registered for extension '{ext}'")
         return parser.extract_index_metadata(path, ext=ext, mime_type=mime_type)
 
 

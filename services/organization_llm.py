@@ -13,7 +13,22 @@ class OrganizationLLMConfig:
 
 class OrganizationPromptAdapter:
     @staticmethod
-    def build_proposal_prompt(*, file_name: str, current_path: str, preview: str) -> str:
+    def build_proposal_prompt(
+        *,
+        file_name: str,
+        current_path: str,
+        preview: str,
+        known_folders: Optional[list[str]] = None,
+    ) -> str:
+        folder_hint = ""
+        folders = [str(x).strip() for x in (known_folders or []) if str(x).strip()]
+        if folders:
+            sample = folders[:120]
+            folder_hint = (
+                "Known existing folders (prefer these; only create a new folder when necessary):\n"
+                + "\n".join(f"- {f}" for f in sample)
+                + "\n"
+            )
         return (
             "You are a file organization assistant. Return ONLY valid JSON with keys: "
             "proposed_folder, proposed_filename, confidence, rationale, alternatives. "
@@ -21,6 +36,7 @@ class OrganizationPromptAdapter:
             f"file_name: {file_name}\n"
             f"current_path: {current_path}\n"
             f"preview: {preview[:1200]}\n"
+            f"{folder_hint}"
         )
 
 
@@ -41,19 +57,18 @@ class OrganizationLLMPolicy:
             or "xai"
         ).strip().lower()
 
-        if provider_name not in {"xai", "deepseek", "local"}:
-            # Default to local if no API keys are present, otherwise xai
-            if not os.getenv("XAI_API_KEY") and not os.getenv("DEEPSEEK_API_KEY"):
-                provider_name = "local"
-            else:
-                provider_name = "xai"
+        if provider_name not in {"xai", "deepseek"}:
+            provider_name = "xai"
 
         resolved_model = (
             model
             or runtime_model
             or os.getenv("ORGANIZER_LLM_MODEL")
-            or (os.getenv("DEEPSEEK_MODEL", "deepseek-chat") if provider_name == "deepseek" else 
-                ("heuristic" if provider_name == "local" else os.getenv("LLM_MODEL", "grok-4-fast-reasoning")))
+            or (
+                os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+                if provider_name == "deepseek"
+                else os.getenv("LLM_MODEL", "grok-4-fast-reasoning")
+            )
         )
 
         return OrganizationLLMConfig(provider=provider_name, model=str(resolved_model).strip())
@@ -63,5 +78,4 @@ class OrganizationLLMPolicy:
         return {
             "xai": bool(os.getenv("XAI_API_KEY", "").strip()),
             "deepseek": bool(os.getenv("DEEPSEEK_API_KEY", "").strip()),
-            "local": True,
         }

@@ -843,97 +843,43 @@ class LegalPrecedentAnalyzer(BaseAgent, LegalMemoryMixin):
         self, citation: ExtractedCitation, context: str
     ) -> float:
         """Calculate factual similarity between citation and context"""
-
-        # Placeholder for semantic similarity calculation
-        # Would use sentence transformers or other embedding models
-        if "sentence_transformer" in self.models and SKLEARN_AVAILABLE and cosine_similarity is not None:
-            try:
-                model = self.models["sentence_transformer"]
-                embeddings = model.encode([citation.text, context])
-                similarity = cast(Any, cosine_similarity)(
-                    [embeddings[0]], [embeddings[1]]
-                )[0][0]
-                return float(similarity)
-            except Exception as e:
-                logger.warning(f"Failed to calculate semantic similarity: {e}")
-
-        # Simple fallback based on text overlap
-        citation_words = set(citation.text.lower().split())
-        context_words = set(context.lower().split())
-
-        if not citation_words or not context_words:
-            return 0.0
-
-        overlap = len(citation_words.intersection(context_words))
-        return overlap / len(citation_words.union(context_words))
+        return await self._calculate_embedding_similarity(citation.text, context)
 
     async def _calculate_legal_similarity(
         self, citation: ExtractedCitation, context: str
     ) -> float:
         """Calculate legal concept similarity"""
-
-        # Extract legal concepts and compare
-        legal_concepts = self._extract_legal_concepts(context)
-        citation_concepts = self._extract_legal_concepts(citation.text)
-
-        if not legal_concepts or not citation_concepts:
-            return 0.0
-
-        overlap = len(set(legal_concepts).intersection(set(citation_concepts)))
-        return overlap / len(set(legal_concepts).union(set(citation_concepts)))
+        citation_query = f"Legal concepts and holdings: {citation.text}"
+        context_query = f"Legal concepts and holdings: {context}"
+        return await self._calculate_embedding_similarity(citation_query, context_query)
 
     async def _calculate_procedural_similarity(
         self, citation: ExtractedCitation, context: str
     ) -> float:
         """Calculate procedural similarity"""
+        citation_query = f"Procedural posture and litigation phase: {citation.text}"
+        context_query = f"Procedural posture and litigation phase: {context}"
+        return await self._calculate_embedding_similarity(citation_query, context_query)
 
-        # Simple heuristic based on procedural keywords
-        procedural_keywords = [
-            "motion",
-            "dismiss",
-            "summary judgment",
-            "discovery",
-            "trial",
-            "appeal",
-            "remand",
-            "affirm",
-            "reverse",
-            "preliminary injunction",
-        ]
-
-        context_lower = context.lower()
-        citation_lower = citation.text.lower()
-
-        context_procedures = [kw for kw in procedural_keywords if kw in context_lower]
-        citation_procedures = [kw for kw in procedural_keywords if kw in citation_lower]
-
-        if not context_procedures and not citation_procedures:
-            return 0.5  # Neutral if no procedural content
-
-        if not context_procedures or not citation_procedures:
-            return 0.0
-
-        overlap = len(set(context_procedures).intersection(set(citation_procedures)))
-        return overlap / len(set(context_procedures).union(set(citation_procedures)))
-
-    def _extract_legal_concepts(self, text: str) -> List[str]:
-        """Extract legal concepts from text"""
-
-        legal_concept_patterns = [
-            r"\\b(jurisdiction|venue|standing|ripeness|mootness)\\b",
-            r"\\b(negligence|breach|contract|tort|liability)\\b",
-            r"\\b(constitutional|statutory|regulatory|common law)\\b",
-            r"\\b(due process|equal protection|first amendment|fourth amendment)\\b",
-            r"\\b(summary judgment|preliminary injunction|class action)\\b",
-        ]
-
-        concepts = []
-        for pattern in legal_concept_patterns:
-            matches = re.finditer(pattern, text, re.IGNORECASE)
-            for match in matches:
-                concepts.append(match.group(1).lower())
-
-        return list(set(concepts))  # Remove duplicates
+    async def _calculate_embedding_similarity(self, text_a: str, text_b: str) -> float:
+        """Calculate semantic similarity via sentence-transformer embeddings."""
+        if "sentence_transformer" not in self.models:
+            raise RuntimeError(
+                "Precedent similarity requires sentence_transformer model."
+            )
+        if not SKLEARN_AVAILABLE or cosine_similarity is None:
+            raise RuntimeError(
+                "Precedent similarity requires scikit-learn cosine_similarity."
+            )
+        model = self.models["sentence_transformer"]
+        try:
+            embeddings = model.encode([text_a, text_b])
+            similarity = cast(Any, cosine_similarity)([embeddings[0]], [embeddings[1]])[
+                0
+            ][0]
+            return float(similarity)
+        except Exception as e:
+            raise RuntimeError(f"Semantic similarity calculation failed: {e}") from e
 
     def _calculate_authority_weight(self, citation: ExtractedCitation) -> float:
         """Calculate authority weight for citation"""
