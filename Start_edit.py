@@ -1,6 +1,6 @@
 """
 Smart Document Organizer - FastAPI Application Entry Point
-=========================================================
+========================================================
 
 A Legal AI platform for intelligent document analysis, entity extraction,
 legal reasoning, and document organization.
@@ -14,6 +14,7 @@ import hashlib
 import logging
 import os  # noqa: E402
 import sqlite3
+import socket
 import subprocess
 import sys  # noqa: E402
 import time
@@ -37,36 +38,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 API_KEY_ENV = os.getenv("API_KEY", "")
-STARTUP_ENFORCED = True
-STARTUP_PROFILE = os.getenv("STARTUP_PROFILE", "full").strip().lower()
-if STARTUP_PROFILE not in {"api", "minimal", "full", "gui"}:
-    STARTUP_PROFILE = "full"
-
-_agents_lazy_env = os.getenv("AGENTS_LAZY_INIT")
-if _agents_lazy_env is None:
-    AGENTS_LAZY_INIT = False
-else:
-    AGENTS_LAZY_INIT = _agents_lazy_env.strip().lower() in {"1", "true", "yes", "on"}
-
-_offline_safe_env = os.getenv("STARTUP_OFFLINE_SAFE")
-if _offline_safe_env is None:
-    STARTUP_OFFLINE_SAFE = False
-else:
-    STARTUP_OFFLINE_SAFE = _offline_safe_env.strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-STARTUP_PHASE_BUDGET_MS = {
-    "config_load": 500,
-    "dependency_injection": 1500,
-    "module_initialization": 8000,
-    "plugin_loading": 500,
-    "schema_validation": 1000,
-    "migration_checks": 1200,
-}
+STRICT_PRODUCTION_STARTUP = os.getenv(
+    "STRICT_PRODUCTION_STARTUP", "0"
+).strip().lower() not in {"0", "false", "no", "off"}
 DEFAULT_REQUIRED_PRODUCTION_AGENTS = [
     "document_processor",
     "entity_extractor",
@@ -142,9 +116,6 @@ app.state.boot_time = time.time()
 app.state.awareness_events = []
 app.state.rate_limit_state = {}
 app.state.rate_limit_lock = asyncio.Lock()
-app.state.startup_profile = STARTUP_PROFILE
-app.state.agents_lazy_init = AGENTS_LAZY_INIT
-app.state.startup_offline_safe = STARTUP_OFFLINE_SAFE
 
 
 def _iso_now() -> str:
@@ -210,18 +181,14 @@ def _start_step(name: str) -> dict:
     return step
 
 
-def _finish_step(step: dict, status: str = "Complete", error: Optional[str] = None) -> None:
+def _finish_step(
+    step: dict, status: str = "Complete", error: Optional[str] = None
+) -> None:
     step["status"] = status
     step["ended_at"] = _iso_now()
-    step["elapsed_ms"] = round((time.perf_counter() - step.get("_t0", time.perf_counter())) * 1000, 2)
-    budget_ms = STARTUP_PHASE_BUDGET_MS.get(str(step.get("name", "")))
-    step["budget_ms"] = budget_ms
-    if budget_ms is None:
-        step["budget_status"] = "NotApplicable"
-    elif float(step["elapsed_ms"]) <= float(budget_ms):
-        step["budget_status"] = "WithinBudget"
-    else:
-        step["budget_status"] = "OverBudget"
+    step["elapsed_ms"] = round(
+        (time.perf_counter() - step.get("_t0", time.perf_counter())) * 1000, 2
+    )
     if error:
         step["error"] = error
     step.pop("_t0", None)
@@ -233,11 +200,7 @@ def _fail_step(step: dict, exc: Exception) -> None:
 
 
 def _record_router(
-    name: str,
-    prefix: str,
-    ok: bool,
-    error: Optional[str] = None,
-    optional: bool = False,
+    name: str, prefix: str, ok: bool, error: Optional[str] = None
 ) -> None:
     app.state.router_load_report.append(
         {
@@ -245,16 +208,9 @@ def _record_router(
             "prefix": prefix,
             "ok": ok,
             "error": error,
-            "optional": optional,
         }
     )
 
-
-def _split_router_failures() -> tuple[list[dict], list[dict]]:
-    failed = [r for r in app.state.router_load_report if not r.get("ok")]
-    critical = [r for r in failed if not r.get("optional")]
-    optional = [r for r in failed if r.get("optional")]
-    return critical, optional
 
 # Include routers from routes/ directory
 from app.bootstrap.routers import include_default_routers  # noqa: E402
@@ -265,28 +221,6 @@ include_default_routers(
     logger=logger,
     record_router=_record_router,
 )
-
-# Web GUI migration Phase 1: Serve React frontend at /web (SPA mode)
-try:
-    import os
-    from fastapi.staticfiles import StaticFiles
-
-    dist_path = "frontend/dist"
-    assets_path = os.path.join(dist_path, "assets")
-    if os.path.exists(dist_path):
-        # SPA entrypoint
-        app.mount("/web", StaticFiles(directory=dist_path, html=True), name="web_gui")
-        # Vite build currently emits absolute /assets/* paths; serve them explicitly.
-        if os.path.exists(assets_path):
-            app.mount("/assets", StaticFiles(directory=assets_path), name="web_gui_assets")
-        logger.info("Web GUI mounted at /web (with /assets)")
-        _record_router("web_gui", "/web", True)
-    else:
-        logger.warning(f"Web GUI dist not found: {dist_path}")
-        _record_router("web_gui", "/web", False, "dist missing", optional=True)
-except Exception as e:
-    logger.warning(f"Failed to mount web GUI: {e}")
-    _record_router("web_gui", "/web", False, str(e), optional=True)
 
 
 async def _taskmaster_scheduler_loop() -> None:
@@ -336,7 +270,7 @@ def _build_startup_report() -> dict:
 
     report = build_startup_report(
         app=app,
-        startup_enforced=True,
+        strict_startup=STRICT_PRODUCTION_STARTUP,
         required_production_agents=_required_production_agents(),
         api_key_enabled=bool(API_KEY_ENV),
         rate_limit_requests_per_minute=RATE_LIMIT_REQUESTS_PER_MINUTE,
@@ -346,13 +280,18 @@ def _build_startup_report() -> dict:
     if "routers" in report and "items" not in report["routers"]:
         report["routers"]["items"] = getattr(app.state, "router_load_report", []) or []
     if "security" in report:
-        report["security"].setdefault("rate_limit_per_minute", RATE_LIMIT_REQUESTS_PER_MINUTE)
-        report["security"].setdefault("rate_limit_enabled", RATE_LIMIT_REQUESTS_PER_MINUTE > 0)
+        report["security"].setdefault(
+            "rate_limit_per_minute", RATE_LIMIT_REQUESTS_PER_MINUTE
+        )
+        report["security"].setdefault(
+            "rate_limit_enabled", RATE_LIMIT_REQUESTS_PER_MINUTE > 0
+        )
     return report
 
 
 def _config_digest() -> str:
     keys = [
+        "STRICT_PRODUCTION_STARTUP",
         "RATE_LIMIT_REQUESTS_PER_MINUTE",
         "TASKMASTER_SCHEDULER_INTERVAL_SECONDS",
         "TASKMASTER_SCHEDULER_MAX_DUE_PER_TICK",
@@ -367,7 +306,9 @@ def _config_digest() -> str:
 
 
 def _tail_logs(lines: int = 200) -> dict:
-    candidate = os.getenv("APP_LOG_FILE") or str(Path(__file__).resolve().parent / "logs" / "app.log")
+    candidate = os.getenv("APP_LOG_FILE") or str(
+        Path(__file__).resolve().parent / "logs" / "app.log"
+    )
     p = Path(candidate)
     if not p.exists() or not p.is_file():
         return {"available": False, "path": str(p), "lines": []}
@@ -381,14 +322,6 @@ async def _startup_services():
     app.state.startup_steps = []
     step_config = _start_step("config_load")
     try:
-
-        if STARTUP_OFFLINE_SAFE:
-            os.environ.setdefault("HF_HUB_OFFLINE", "1")
-            os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-            os.environ.setdefault("HF_DATASETS_OFFLINE", "1")
-            os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-            os.environ.setdefault("JOBLIB_MULTIPROCESSING", "0")
-
         from agents import get_agent_manager  # noqa: E402
         from core.container.service_container_impl import ProductionServiceContainer  # noqa: E402
 
@@ -397,6 +330,7 @@ async def _startup_services():
         # Initialize tracing (non-fatal). Best-effort bootstrap using OpenTelemetry.
         try:
             from core.tracing import init_tracing  # noqa: E402
+
             init_tracing(app=app, service_name="smart_document_organizer")
             logger.info("Tracing initialized")
         except Exception as _tr_err:
@@ -405,7 +339,9 @@ async def _startup_services():
         _fail_step(step_config, e)
         logger.error(f"Startup self-check failed: {e}")
         _record_awareness("error", "startup_failed_config_load", {"error": str(e)})
-        raise
+        if STRICT_PRODUCTION_STARTUP:
+            raise
+        return
 
     try:
         step_di = _start_step("dependency_injection")
@@ -425,15 +361,12 @@ async def _startup_services():
 
         step_agents = _start_step("module_initialization")
         manager = get_agent_manager()
-        if AGENTS_LAZY_INIT:
-            initialized = False
-            logger.info("Agent manager initialization deferred (AGENTS_LAZY_INIT=true)")
-        else:
-            if not hasattr(manager, "initialize"):
-                raise RuntimeError("Production agent manager has no initialize() method")
-            initialized = await manager.initialize()
-            if not initialized:
-                raise RuntimeError("Production agent manager failed to initialize")
+        if not hasattr(manager, "initialize"):
+            raise RuntimeError("Production agent manager has no initialize() method")
+
+        initialized = await manager.initialize()
+        if not initialized:
+            raise RuntimeError("Production agent manager failed to initialize")
         app.state.agent_manager = manager
 
         try:
@@ -448,10 +381,7 @@ async def _startup_services():
             available.add(getattr(key, "value", str(key)).strip().lower())
 
         required = _required_production_agents()
-        if initialized:
-            missing = [agent for agent in required if agent not in available]
-        else:
-            missing = []
+        missing = [agent for agent in required if agent not in available]
 
         memory_ready = False
         try:
@@ -463,13 +393,12 @@ async def _startup_services():
             memory_ready = False
 
         app.state.agent_startup = {
+            "strict": STRICT_PRODUCTION_STARTUP,
             "required": required,
             "available": sorted(available),
             "missing": missing,
-            "deferred_required": required if not initialized else [],
             "memory_required": True,
             "memory_ready": memory_ready,
-            "lazy_init": AGENTS_LAZY_INIT,
         }
 
         if not memory_ready:
@@ -482,24 +411,28 @@ async def _startup_services():
                 + ", ".join(missing)
                 + f" (available: {sorted(available)})"
             )
-            raise RuntimeError(msg)
+            if STRICT_PRODUCTION_STARTUP:
+                raise RuntimeError(msg)
+            logger.warning(msg)
         else:
             logger.info("Production agent startup check passed")
         _finish_step(step_agents)
 
         step_plugins = _start_step("plugin_loading")
-        failed_critical, failed_optional = _split_router_failures()
-        if failed_critical or failed_optional:
-            raise RuntimeError(
-                f"Router/plugin load failures: critical={failed_critical} optional={failed_optional}"
-            )
-        plugin_status = "Complete"
-        plugin_error = None
-        _finish_step(step_plugins, status=plugin_status, error=plugin_error)
+        failed_routers = [r for r in app.state.router_load_report if not r.get("ok")]
+        if failed_routers and STRICT_PRODUCTION_STARTUP:
+            raise RuntimeError(f"Router/plugin load failures: {failed_routers}")
+        _finish_step(
+            step_plugins,
+            status="Complete" if not failed_routers else "Failed",
+            error=str(failed_routers) if failed_routers else None,
+        )
 
         step_schema = _start_step("schema_validation")
         try:
-            db_path = Path(__file__).resolve().parent / "mem_db" / "data" / "documents.db"
+            db_path = (
+                Path(__file__).resolve().parent / "mem_db" / "data" / "documents.db"
+            )
             con = sqlite3.connect(str(db_path))
             cur = con.cursor()
             cur.execute("PRAGMA quick_check;")
@@ -510,14 +443,19 @@ async def _startup_services():
             _finish_step(step_schema)
         except Exception as e:
             _fail_step(step_schema, e)
-            raise
+            if STRICT_PRODUCTION_STARTUP:
+                raise
 
         step_migrations = _start_step("migration_checks")
         try:
-            db_path = Path(__file__).resolve().parent / "mem_db" / "data" / "documents.db"
+            db_path = (
+                Path(__file__).resolve().parent / "mem_db" / "data" / "documents.db"
+            )
             con = sqlite3.connect(str(db_path))
             cur = con.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='organization_proposals'")
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='organization_proposals'"
+            )
             proposal_table = cur.fetchone()
             con.close()
             if not proposal_table:
@@ -525,20 +463,29 @@ async def _startup_services():
             _finish_step(step_migrations)
         except Exception as e:
             _fail_step(step_migrations, e)
-            raise
+            if STRICT_PRODUCTION_STARTUP:
+                raise
 
         # Start internal TaskMaster scheduler loop
-        app.state.taskmaster_scheduler_task = asyncio.create_task(_taskmaster_scheduler_loop())
+        app.state.taskmaster_scheduler_task = asyncio.create_task(
+            _taskmaster_scheduler_loop()
+        )
         logger.info("TaskMaster scheduler loop started")
 
         app.state.startup_report = _build_startup_report()
-        logger.info("Startup compliance report: %s", json.dumps(app.state.startup_report))
+        logger.info(
+            "Startup compliance report: %s", json.dumps(app.state.startup_report)
+        )
         _record_awareness(
             "info",
             "startup_completed",
             {
-                "routers_loaded": app.state.startup_report.get("routers", {}).get("loaded"),
-                "routers_total": app.state.startup_report.get("routers", {}).get("total"),
+                "routers_loaded": app.state.startup_report.get("routers", {}).get(
+                    "loaded"
+                ),
+                "routers_total": app.state.startup_report.get("routers", {}).get(
+                    "total"
+                ),
             },
         )
 
@@ -549,7 +496,9 @@ async def _startup_services():
                 break
         logger.error(f"Startup self-check failed: {e}")
         _record_awareness("error", "startup_failed", {"error": str(e)})
-        raise
+        if STRICT_PRODUCTION_STARTUP:
+            raise
+
 
 async def _shutdown_services():
     """Cleanup services on shutdown."""
@@ -573,81 +522,16 @@ async def _shutdown_services():
     app.state.agent_manager = None
 
 
-def _is_wsl_runtime() -> bool:
-    if os.getenv("WSL_DISTRO_NAME"):
-        return True
-    try:
-        text = Path("/proc/version").read_text(encoding="utf-8", errors="replace").lower()
-        return "microsoft" in text or "wsl" in text
-    except Exception:
-        return False
-
-
-def _is_headless_runtime() -> bool:
-    if str(os.getenv("CI", "")).strip().lower() in {"1", "true", "yes", "on"}:
-        return True
-    has_display = bool(os.getenv("DISPLAY")) or bool(os.getenv("WAYLAND_DISPLAY"))
-    if not has_display:
-        return True
-    return _is_wsl_runtime()
-
-
-def _resolve_launch_mode(
-    *,
-    backend_requested: bool,
-    gui_requested: bool,
-    startup_profile: str,
-    headless: bool,
-) -> str:
-    if backend_requested:
-        return "backend"
-    if gui_requested:
-        return "gui"
-    profile = startup_profile.strip().lower()
-    if profile in {"api", "minimal"}:
-        return "backend"
-    if profile == "gui":
-        return "gui"
-    if headless:
-        return "backend"
-    return "gui"
-
-
-def _backend_readiness_urls(port: int = 8000) -> list[str]:
-    base = f"http://127.0.0.1:{port}"
-    return [
-        f"{base}/api/health",
-        f"{base}/api/startup/report",
-        f"{base}/api/health/details",
-    ]
-
-
-def _wait_for_backend(
-    urls: list[str],
-    timeout_s: int = 60,
-    initial_interval_s: float = 0.25,
-    max_interval_s: float = 2.0,
-) -> bool:
-    deadline = time.monotonic() + max(1, int(timeout_s))
-    interval = max(0.1, float(initial_interval_s))
-    max_interval = max(interval, float(max_interval_s))
-    while time.monotonic() < deadline:
-        for url in urls:
-            try:
-                with urllib.request.urlopen(url, timeout=2) as response:
-                    if 200 <= int(response.status) < 300:
-                        return True
-            except Exception:
-                continue
-        time.sleep(interval)
-        interval = min(max_interval, interval * 1.5)
-    return False
-
 @app.middleware("http")
 async def _rate_limit_middleware(request: Request, call_next):
-    if RATE_LIMIT_REQUESTS_PER_MINUTE > 0 and request.url.path not in {"/", "/api/health"}:
+    if RATE_LIMIT_REQUESTS_PER_MINUTE > 0 and request.url.path not in {
+        "/",
+        "/api/health",
+    }:
         forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-        client_host = forwarded or (request.client.host if request.client else "unknown")
+        client_host = forwarded or (
+            request.client.host if request.client else "unknown"
+        )
         allowed, retry_after = await _rate_limit_check(client_host)
         if not allowed:
             return JSONResponse(
@@ -732,7 +616,12 @@ async def startup_logs_tail(lines: int = 200):
 async def startup_awareness(limit: int = 50):
     services = _service_checks().get("items", [])
     failed = [s for s in services if s.get("status") == "Failed"]
-    slow = [s for s in services if isinstance(s.get("latency_ms"), (int, float)) and s.get("latency_ms", 0) > 1000]
+    slow = [
+        s
+        for s in services
+        if isinstance(s.get("latency_ms"), (int, float))
+        and s.get("latency_ms", 0) > 1000
+    ]
     level = "OK"
     if failed:
         level = "FAIL"
@@ -741,16 +630,23 @@ async def startup_awareness(limit: int = 50):
     return {
         "success": True,
         "level": level,
-        "uptime_seconds": round(max(0.0, time.time() - float(getattr(app.state, "boot_time", time.time()))), 2),
+        "uptime_seconds": round(
+            max(0.0, time.time() - float(getattr(app.state, "boot_time", time.time()))),
+            2,
+        ),
         "failed_services": failed,
         "slow_services": slow,
-        "events": (getattr(app.state, "awareness_events", []) or [])[-max(1, min(limit, 500)):],
+        "events": (getattr(app.state, "awareness_events", []) or [])[
+            -max(1, min(limit, 500)) :
+        ],
     }
 
 
 @app.get("/api/startup/control")
 async def startup_control_state():
-    restart_supported = str(os.getenv("ALLOW_STARTUP_RESTART_HOOK", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    restart_supported = str(
+        os.getenv("ALLOW_STARTUP_RESTART_HOOK", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     log_meta = _tail_logs(lines=1)
     return {
         "success": True,
@@ -779,83 +675,95 @@ async def startup_control_retry_check(payload: dict):
     elif check == "migrations":
         out = _migration_snapshot()
     else:
-        raise HTTPException(status_code=400, detail="check must be one of: services, environment, migrations")
+        raise HTTPException(
+            status_code=400,
+            detail="check must be one of: services, environment, migrations",
+        )
     _record_awareness("info", "retry_check_executed", {"check": check})
     return {"success": True, "check": check, "result": out}
 
 
 @app.post("/api/startup/control/restart")
 async def startup_control_restart(payload: dict):
-    allow = str(os.getenv("ALLOW_STARTUP_RESTART_HOOK", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    allow = str(os.getenv("ALLOW_STARTUP_RESTART_HOOK", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if not allow:
         raise HTTPException(status_code=403, detail="restart hook disabled by policy")
     delay = max(0, min(int(payload.get("delay_seconds", 1)), 30))
     _record_awareness("warning", "restart_requested", {"delay_seconds": delay})
-    raise HTTPException(status_code=501, detail="restart hook allowed but not wired in this runtime")
+    raise HTTPException(
+        status_code=501, detail="restart hook allowed but not wired in this runtime"
+    )
 
 
 if __name__ == "__main__":
+    logger.info("Smart Document Organizer launcher started")
     parser = argparse.ArgumentParser(description="Smart Document Organizer launcher")
     parser.add_argument(
         "--backend",
         action="store_true",
         help="Start backend API instead of GUI dashboard",
     )
-    parser.add_argument(
-        "--gui",
-        action="store_true",
-        help="Start GUI dashboard mode explicitly",
-    )
-    parser.add_argument(
-        "--profile",
-        default=os.getenv("STARTUP_PROFILE", STARTUP_PROFILE),
-        choices=["api", "minimal", "full", "gui"],
-        help="Startup profile (api|minimal|full|gui)",
-    )
     args = parser.parse_args()
-    selected_mode = _resolve_launch_mode(
-        backend_requested=bool(args.backend),
-        gui_requested=bool(args.gui),
-        startup_profile=str(args.profile),
-        headless=_is_headless_runtime(),
-    )
-    STARTUP_PROFILE = str(args.profile).strip().lower()
-    if STARTUP_PROFILE not in {"api", "minimal", "full", "gui"}:
-        STARTUP_PROFILE = "full"
-    if _agents_lazy_env is None:
-        AGENTS_LAZY_INIT = False
-    if _offline_safe_env is None:
-        STARTUP_OFFLINE_SAFE = False
-    app.state.startup_profile = STARTUP_PROFILE
-    app.state.agents_lazy_init = AGENTS_LAZY_INIT
-    app.state.startup_offline_safe = STARTUP_OFFLINE_SAFE
+    logger.info("Parsed arguments: backend=%s", args.backend)
 
-    if selected_mode == "backend":
+    def _is_backend_listening(host: str = "127.0.0.1", port: int = 8000) -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            return False
+
+    def _wait_for_backend(
+        url: str = "http://127.0.0.1:8000/api/health", timeout_s: int = 30
+    ) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(url, timeout=2) as response:
+                    if response.status == 200:
+                        return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        return False
+
+    if args.backend:
         import uvicorn  # noqa: E402
 
-        logger.info("Starting backend API on port 8000 (profile=%s)...", STARTUP_PROFILE)
+        logger.info("Starting backend API on port 8000...")
         uvicorn.run(app, host="0.0.0.0", port=8000)
     else:
         logger.info("Starting GUI dashboard...")
         backend_proc = None
-        backend_urls = _backend_readiness_urls(port=8000)
-        if not _wait_for_backend(backend_urls, timeout_s=2, initial_interval_s=0.25, max_interval_s=0.5):
+        if not _is_backend_listening():
             logger.info("Starting backend for GUI...")
             backend_proc = subprocess.Popen(
                 [sys.executable, __file__, "--backend"],
                 cwd=os.path.dirname(__file__) or None,
             )
-            if not _wait_for_backend(backend_urls, timeout_s=75, initial_interval_s=0.25, max_interval_s=2.0):
-                raise RuntimeError("Backend readiness check failed before GUI launch")
+            logger.info(
+                "Backend process started with PID: %s",
+                backend_proc.pid if backend_proc else None,
+            )
+            if not _wait_for_backend():
+                logger.warning("Backend did not become healthy before GUI launch")
 
             def _cleanup_backend() -> None:
                 if backend_proc is None:
                     return
                 try:
                     if backend_proc.poll() is None:
+                        logger.info(
+                            "Terminating backend process PID: %s", backend_proc.pid
+                        )
                         backend_proc.terminate()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Failed to terminate backend: %s", e)
 
             atexit.register(_cleanup_backend)
         else:
@@ -866,7 +774,8 @@ if __name__ == "__main__":
         try:
             from gui.gui_dashboard import main as gui_main  # noqa: E402
 
+            logger.info("Launching GUI main function")
             gui_main()
-        except Exception:
-            logger.exception("Failed to start GUI dashboard")
+        except Exception as e:
+            logger.exception("Failed to start GUI dashboard: %s", e)
             raise

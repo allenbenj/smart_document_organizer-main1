@@ -11,11 +11,24 @@ import platform
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
-                            QWidget, QLabel, QProgressBar, QTextEdit, QFrame,
-                            QPushButton, QGridLayout, QScrollArea, QComboBox, QGroupBox)
-from PyQt6.QtCore import QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QPalette, QColor
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QVBoxLayout,
+    QHBoxLayout,
+    QWidget,
+    QLabel,
+    QProgressBar,
+    QTextEdit,
+    QFrame,
+    QPushButton,
+    QGridLayout,
+    QScrollArea,
+    QComboBox,
+    QGroupBox,
+)
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QFont, QPalette, QColor
 
 class StatCard(QFrame):
     """Styled stat card widget"""

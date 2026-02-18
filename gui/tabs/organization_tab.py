@@ -14,11 +14,16 @@ Key Features:
 """
 
 import os
+import re
+import json
+from pathlib import Path
 from typing import Optional
+from urllib.parse import quote_plus
 
 
 
 from ..services import api_client
+from ..services.audit_store import OrganizationAuditStore
 
 try:
     from PySide6.QtWidgets import (
@@ -39,7 +44,7 @@ try:
         QMessageBox,
         QAbstractItemView,
     )
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QTimer
     from PySide6.QtGui import QFont
     PYSIDE6_AVAILABLE = True
 except ImportError:
@@ -65,13 +70,63 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.all_proposals_cache = []
         self.proposals_cache = []
+        self._folder_cache = {}
+        self.audit_store = OrganizationAuditStore()
         self.selected_proposal = None
         self.backend_ready = False
         self.setup_ui()
         self.connect_signals()
         # Defer backend calls until backend is ready
         # self.load_current_llm_provider() - moved to on_backend_ready()
+
+    def _audit(self, event_type: str, payload: dict) -> None:
+        safe_payload = payload if isinstance(payload, dict) else {"raw": str(payload)}
+        root = self._normalize_root_scope(self.org_root_input.text())
+        if root and not safe_payload.get("root"):
+            safe_payload["root"] = root
+        if isinstance(safe_payload.get("proposal"), dict):
+            snap = safe_payload.get("proposal") or {}
+        else:
+            snap = self._proposal_snapshot(self.selected_proposal)
+        if snap and "proposal" not in safe_payload:
+            safe_payload["proposal"] = snap
+        try:
+            self.audit_store.log_event(event_type, safe_payload)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _proposal_snapshot(proposal: Optional[dict]) -> dict:
+        if not isinstance(proposal, dict):
+            return {}
+        return {
+            "proposal_id": proposal.get("id"),
+            "file_id": proposal.get("file_id"),
+            "current_path": proposal.get("current_path"),
+            "recommended_folder": proposal.get("proposed_folder"),
+            "recommended_filename": proposal.get("proposed_filename"),
+            "confidence": proposal.get("confidence"),
+            "provider": proposal.get("provider"),
+            "model": proposal.get("model"),
+            "status": proposal.get("status"),
+        }
+
+    def _find_proposal_by_id(self, proposal_id: Optional[int]) -> Optional[dict]:
+        if proposal_id is None:
+            return None
+        try:
+            pid = int(proposal_id)
+        except Exception:
+            return None
+        for item in self.proposals_cache:
+            if int(item.get("id") or -1) == pid:
+                return item
+        for item in self.all_proposals_cache:
+            if int(item.get("id") or -1) == pid:
+                return item
+        return None
 
     def setup_ui(self):
         """Setup the user interface."""
@@ -97,8 +152,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
         llm_layout.addWidget(QLabel("Provider:"))
         self.llm_provider_combo = QComboBox()
-        self.llm_provider_combo.addItems(["xai", "deepseek", "local"])
-        self.llm_provider_combo.setToolTip("Switch between XAI, DeepSeek, or Local (Heuristic) for organization proposals")
+        self.llm_provider_combo.addItems(["xai", "deepseek"])
+        self.llm_provider_combo.setToolTip("Switch between XAI and DeepSeek for organization proposals")
         llm_layout.addWidget(self.llm_provider_combo)
 
         self.llm_switch_btn = QPushButton("Switch Provider")
@@ -185,10 +240,24 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 background-color: #616161;
             }
         """)
+        self.org_apply_button = QPushButton("🚚 Apply Approved")
+        self.org_apply_button.setStyleSheet("""
+            QPushButton {
+                background-color: #2E7D32;
+                color: white;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #1B5E20;
+            }
+        """)
         
         action_btn_row.addWidget(self.org_load_button)
         action_btn_row.addWidget(self.org_generate_button)
         action_btn_row.addWidget(self.org_clear_button)
+        action_btn_row.addWidget(self.org_apply_button)
         action_btn_row.addStretch()
         scope_layout.addLayout(action_btn_row)
         
@@ -225,6 +294,21 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
         proposals_layout.addLayout(table_toolbar)
 
+        # Search/filter toolbar
+        search_toolbar = QHBoxLayout()
+        search_toolbar.addWidget(QLabel("Search:"))
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Filter by path, folder, filename, rationale...")
+        search_toolbar.addWidget(self.search_input)
+        self.search_apply_btn = QPushButton("Filter")
+        search_toolbar.addWidget(self.search_apply_btn)
+        self.search_clear_btn = QPushButton("Clear")
+        search_toolbar.addWidget(self.search_clear_btn)
+        self.select_filtered_btn = QPushButton("Select Filtered")
+        self.select_filtered_btn.setMaximumWidth(140)
+        search_toolbar.addWidget(self.select_filtered_btn)
+        proposals_layout.addLayout(search_toolbar)
+
         self.org_table = QTableWidget(0, 6)
         self.org_table.setHorizontalHeaderLabels([
             "☑", "ID", "Confidence", "Current Path", "Proposed Folder", "Proposed Filename"
@@ -232,6 +316,9 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.org_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.org_table.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         self.org_table.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked | QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.org_table.setMinimumHeight(320)
+        self.org_table.setAlternatingRowColors(True)
+        self.org_table.setSortingEnabled(True)
         header = self.org_table.horizontalHeader()
         header.setStretchLastSection(True)
         
@@ -244,9 +331,21 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
         path_row = QHBoxLayout()
         path_row.addWidget(QLabel("Folder:"))
-        self.org_folder_input = QLineEdit()
-        self.org_folder_input.setPlaceholderText("Proposed folder path...")
+        self.org_folder_input = QComboBox()
+        self.org_folder_input.setEditable(True)
+        self.org_folder_input.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.org_folder_input.setMinimumWidth(260)
+        self.org_folder_input.setToolTip("Select a suggested folder or type a new one")
+        self.org_folder_input.lineEdit().setPlaceholderText("Proposed folder path...")
         path_row.addWidget(self.org_folder_input, 3)
+        self.folder_popup_btn = QPushButton("▼")
+        self.folder_popup_btn.setMaximumWidth(34)
+        self.folder_popup_btn.setToolTip("Show folder suggestions")
+        path_row.addWidget(self.folder_popup_btn)
+        self.folder_refresh_btn = QPushButton("↻")
+        self.folder_refresh_btn.setMaximumWidth(34)
+        self.folder_refresh_btn.setToolTip("Refresh folder suggestions")
+        path_row.addWidget(self.folder_refresh_btn)
         
         path_row.addWidget(QLabel("Filename:"))
         self.org_filename_input = QLineEdit()
@@ -343,6 +442,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.org_load_button.clicked.connect(self.org_load_proposals)
         self.org_generate_button.clicked.connect(self.org_generate_scoped)
         self.org_clear_button.clicked.connect(self.org_clear_scoped)
+        self.org_apply_button.clicked.connect(self.org_apply_approved_scoped)
         
         # Table controls
         self.select_all_btn.clicked.connect(self.select_all_proposals)
@@ -350,6 +450,10 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.bulk_approve_btn.clicked.connect(self.bulk_approve_proposals)
         self.bulk_reject_btn.clicked.connect(self.bulk_reject_proposals)
         self.export_proposals_btn.clicked.connect(self.export_proposals)
+        self.search_apply_btn.clicked.connect(self.apply_search_filter)
+        self.search_clear_btn.clicked.connect(self.clear_search_filter)
+        self.select_filtered_btn.clicked.connect(self.select_filtered_proposals)
+        self.search_input.returnPressed.connect(self.apply_search_filter)
         self.org_table.itemSelectionChanged.connect(self.org_on_selection_changed)
         self.org_table.itemChanged.connect(self.handle_table_cell_changed)
         
@@ -357,6 +461,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.org_approve_button.clicked.connect(self.org_approve_selected)
         self.org_reject_button.clicked.connect(self.org_reject_selected)
         self.org_edit_approve_button.clicked.connect(self.org_edit_approve_selected)
+        self.folder_popup_btn.clicked.connect(self.org_folder_input.showPopup)
+        self.folder_refresh_btn.clicked.connect(self.refresh_folder_suggestions)
 
     # -------------------------------------------------------------------------
     # Organization Workflow Methods
@@ -368,9 +474,50 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         p = path_str.strip()
         if not p:
             return ""
-        # Convert Windows paths to WSL format
         p = p.replace("\\", "/")
         return p
+
+    @staticmethod
+    def _scope_prefixes(path_str: str) -> list[str]:
+        """Build equivalent scope prefixes for Windows/WSL path variants."""
+        root = OrganizationTab._normalize_root_scope(path_str)
+        if not root:
+            return []
+        prefixes = [root]
+
+        # Windows drive path -> WSL equivalent (/mnt/<drive>/...)
+        m = re.match(r"^([A-Za-z]):/(.*)$", root)
+        if m:
+            drive = m.group(1).lower()
+            rest = m.group(2).lstrip("/")
+            prefixes.append(f"/mnt/{drive}/{rest}")
+
+        # WSL path -> Windows equivalent (<DRIVE>:/...)
+        m2 = re.match(r"^/mnt/([A-Za-z])/(.*)$", root)
+        if m2:
+            drive = m2.group(1).upper()
+            rest = m2.group(2).lstrip("/")
+            prefixes.append(f"{drive}:/{rest}")
+
+        seen = set()
+        unique = []
+        for p in prefixes:
+            if p not in seen:
+                seen.add(p)
+                unique.append(p)
+        return unique
+
+    def _existing_runtime_roots(self, root: str) -> list[str]:
+        """Return root path variants that exist in current runtime."""
+        existing: list[str] = []
+        for candidate in self._scope_prefixes(root):
+            try:
+                p = Path(candidate)
+                if p.exists() and p.is_dir():
+                    existing.append(candidate)
+            except Exception:
+                continue
+        return existing
 
 
 
@@ -388,63 +535,255 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
     def org_load_proposals(self):
         """Load organization proposals from API for the scoped folder."""
+        # #region agent log
+        try:
+            import json as _j, time
+            from pathlib import Path as _P
+            _log = _P(__file__).resolve().parent.parent.parent / "debug-4d484f.log"
+            _before = {"selected_proposal_id": self._selected_proposal_id(), "cache_len": len(self.proposals_cache), "all_cache_len": len(self.all_proposals_cache)}
+            _p = {"sessionId": "4d484f", "location": "organization_tab.py:org_load_proposals", "message": "load_proposals_start", "data": _before, "timestamp": int(time.time() * 1000), "hypothesisId": "A"}
+            with open(_log, "a", encoding="utf-8") as _f:
+                _f.write(_j.dumps(_p) + "\n")
+        except Exception:
+            pass
+        # #endregion
         try:
             self.status.info("Loading proposals...")
             root = self._normalize_root_scope(self.org_root_input.text())
-            
-            # Fetch proposals from API
-            data = api_client.get(
-                "/organization/proposals?status=proposed&limit=1000&offset=0", 
-                timeout=30.0
-            )
+
+            endpoint = "/organization/proposals?status=proposed&limit=1000&offset=0"
+            if root:
+                endpoint += f"&root_prefix={quote_plus(root)}"
+
+            # Fetch proposals from API (already root-scoped when root is set)
+            data = api_client.get(endpoint, timeout=30.0)
             
             items = data.get("items", []) if isinstance(data, dict) else []
-            
-            # Filter by root scope if specified
-            if root:
-                items = [
-                    x for x in items 
-                    if str(x.get("current_path") or "").replace("\\", "/").startswith(root)
-                ]
-            
-            self.proposals_cache = items
-            
-            # Populate table (6 columns: checkbox, ID, confidence, current path, folder, filename)
-            self.org_table.setRowCount(len(items))
-            for i, p in enumerate(items):
-                # Column 0: Checkbox for bulk selection
-                checkbox = QCheckBox()
-                checkbox.setStyleSheet("margin-left:50%; margin-right:50%;")
-                self.org_table.setCellWidget(i, 0, checkbox)
-                
-                # Column 1: ID
-                self.org_table.setItem(i, 1, QTableWidgetItem(str(p.get("id") or "")))
-                
-                # Column 2: Confidence
-                confidence = float(p.get('confidence') or 0.0)
-                conf_item = QTableWidgetItem(f"{confidence:.2f}")
-                self.org_table.setItem(i, 2, conf_item)
-                
-                # Column 3: Current Path
-                self.org_table.setItem(i, 3, QTableWidgetItem(str(p.get("current_path") or "")))
-                
-                # Column 4: Proposed Folder (editable)
-                folder_item = QTableWidgetItem(str(p.get("proposed_folder") or ""))
-                self.org_table.setItem(i, 4, folder_item)
-                
-                # Column 5: Proposed Filename (editable)
-                filename_item = QTableWidgetItem(str(p.get("proposed_filename") or ""))
-                self.org_table.setItem(i, 5, filename_item)
-            
-            # Auto-resize columns
-            self.org_table.resizeColumnsToContents()
-            
-            self.results_browser.setPlainText(f"✓ Loaded {len(items)} proposals")
-            self.status.success(f"Loaded {len(items)} proposals")
+
+            self.all_proposals_cache = list(items)
+            self.apply_search_filter(silent=True)
+            # #region agent log
+            try:
+                _after = {"selected_proposal_id": self._selected_proposal_id(), "cache_len": len(self.proposals_cache), "all_cache_len": len(self.all_proposals_cache), "selected_still_exists": any(p.get("id") == _before.get("selected_proposal_id") for p in self.proposals_cache)}
+                _p2 = {"sessionId": "4d484f", "location": "organization_tab.py:org_load_proposals", "message": "load_proposals_end", "data": _after, "timestamp": int(time.time() * 1000), "hypothesisId": "A"}
+                with open(_log, "a", encoding="utf-8") as _f:
+                    _f.write(_j.dumps(_p2) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            self._audit(
+                "load_proposals",
+                {
+                    "root": root,
+                    "loaded": len(self.all_proposals_cache),
+                    "shown": len(self.proposals_cache),
+                },
+            )
             
         except Exception as e:
+            # #region agent log
+            try:
+                _p3 = {"sessionId": "4d484f", "location": "organization_tab.py:org_load_proposals", "message": "load_proposals_error", "data": {"error": str(e)}, "timestamp": int(time.time() * 1000), "hypothesisId": "A"}
+                with open(_log, "a", encoding="utf-8") as _f:
+                    _f.write(_j.dumps(_p3) + "\n")
+            except Exception:
+                pass
+            # #endregion
             self.status.error(f"Failed to load proposals: {e}")
             self.results_browser.setPlainText(f"Error: {e}")
+
+    def _populate_proposals_table(self, items):
+        """Populate table from proposal list."""
+        # #region agent log
+        _before_id = None
+        try:
+            import json as _j, time
+            from pathlib import Path as _P
+            _log = _P(__file__).resolve().parent.parent.parent / "debug-4d484f.log"
+            _before_id = self._selected_proposal_id()
+            _before = {"selected_proposal_id": _before_id, "old_cache_len": len(self.proposals_cache), "new_items_len": len(items)}
+            _p = {"sessionId": "4d484f", "location": "organization_tab.py:_populate_proposals_table", "message": "populate_start", "data": _before, "timestamp": int(time.time() * 1000), "hypothesisId": "D"}
+            with open(_log, "a", encoding="utf-8") as _f:
+                _f.write(_j.dumps(_p) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        self.proposals_cache = list(items)
+
+        self.org_table.setSortingEnabled(False)
+        # Block signals during repopulation to avoid triggering selection change events
+        self.org_table.blockSignals(True)
+        self.org_table.setRowCount(len(items))
+        for i, p in enumerate(items):
+            checkbox = QCheckBox()
+            checkbox.setStyleSheet("margin-left:50%; margin-right:50%;")
+            self.org_table.setCellWidget(i, 0, checkbox)
+
+            self.org_table.setItem(i, 1, QTableWidgetItem(str(p.get("id") or "")))
+
+            confidence = float(p.get("confidence") or 0.0)
+            conf_item = QTableWidgetItem(f"{confidence:.2f}")
+            self.org_table.setItem(i, 2, conf_item)
+
+            self.org_table.setItem(i, 3, QTableWidgetItem(str(p.get("current_path") or "")))
+            self.org_table.setItem(i, 4, QTableWidgetItem(str(p.get("proposed_folder") or "")))
+            self.org_table.setItem(i, 5, QTableWidgetItem(str(p.get("proposed_filename") or "")))
+
+        self.org_table.resizeColumnsToContents()
+        self.org_table.setSortingEnabled(True)
+        # Clear selected_proposal when table is repopulated - it may no longer exist in cache
+        # Validate that selected_proposal still exists in the new cache, otherwise clear it
+        if self.selected_proposal is not None:
+            # Get ID directly from selected_proposal (don't call _selected_proposal_id() which might clear it)
+            try:
+                selected_id = int(self.selected_proposal.get("id"))
+                # Check if proposal still exists in new cache
+                if not any(p.get("id") == selected_id for p in self.proposals_cache):
+                    # Selected proposal no longer exists in cache (likely approved/rejected)
+                    self.selected_proposal = None
+                    self.org_folder_input.clear()
+                    self.org_filename_input.clear()
+            except Exception:
+                # Invalid selected_proposal - clear it
+                self.selected_proposal = None
+                self.org_folder_input.clear()
+                self.org_filename_input.clear()
+        # Re-enable signals and clear selection explicitly
+        self.org_table.blockSignals(False)
+        self.org_table.clearSelection()
+        # #region agent log
+        try:
+            _after = {"selected_proposal_id": self._selected_proposal_id(), "cache_len": len(self.proposals_cache), "table_rows": self.org_table.rowCount(), "selected_still_in_cache": any(p.get("id") == _before_id for p in self.proposals_cache) if _before_id is not None else False}
+            _p2 = {"sessionId": "4d484f", "location": "organization_tab.py:_populate_proposals_table", "message": "populate_end", "data": _after, "timestamp": int(time.time() * 1000), "hypothesisId": "D"}
+            with open(_log, "a", encoding="utf-8") as _f:
+                _f.write(_j.dumps(_p2) + "\n")
+        except Exception:
+            pass
+        # #endregion
+        self._refresh_folder_suggestions(items)
+
+    def _refresh_folder_suggestions(self, items):
+        """Refresh folder dropdown options from current proposal set."""
+        current = self._folder_value()
+        options = set()
+        for p in items:
+            folder = str(p.get("proposed_folder") or "").strip()
+            if folder:
+                options.add(folder)
+            for alt in p.get("alternatives") or []:
+                if isinstance(alt, str) and alt.strip():
+                    options.add(alt.strip())
+        for folder in self._folders_from_root():
+            options.add(folder)
+        ordered = sorted(options, key=lambda x: x.lower())
+        self.org_folder_input.blockSignals(True)
+        self.org_folder_input.clear()
+        if ordered:
+            self.org_folder_input.addItems(ordered)
+        if current:
+            self.org_folder_input.setEditText(current)
+        self.org_folder_input.blockSignals(False)
+
+    def refresh_folder_suggestions(self):
+        """Force refresh folder catalog from disk and update dropdown."""
+        root = (self.org_root_input.text() or "").strip().lower()
+        if root:
+            self._folder_cache.pop(root, None)
+        self._refresh_folder_suggestions(self.proposals_cache or self.all_proposals_cache)
+        self.status.info(f"Folder suggestions: {self.org_folder_input.count()} options")
+
+    @staticmethod
+    def _candidate_roots_for_folder_scan(root_txt: str) -> list[Path]:
+        """Include scoped root plus broader Organization_Folder root if nested."""
+        root = Path(root_txt)
+        roots = [root]
+        parts = list(root.parts)
+        lowered = [p.lower() for p in parts]
+        if "organization_folder" in lowered:
+            idx = lowered.index("organization_folder")
+            broad = Path(*parts[: idx + 1])
+            if broad not in roots:
+                roots.append(broad)
+        return roots
+
+    def _folders_from_root(self, max_items: int = 500) -> list[str]:
+        """Collect existing folders under selected root as suggestion options."""
+        root_txt = (self.org_root_input.text() or "").strip()
+        if not root_txt:
+            return []
+        key = root_txt.lower()
+        if key in self._folder_cache:
+            return list(self._folder_cache[key])[:max_items]
+
+        out: list[str] = []
+        seen = set()
+        roots = [r for r in self._candidate_roots_for_folder_scan(root_txt) if r.exists() and r.is_dir()]
+        try:
+            for base in roots:
+                for dirpath, dirnames, _ in os.walk(str(base)):
+                    rel = Path(dirpath).relative_to(base).as_posix()
+                    if rel and rel not in seen:
+                        seen.add(rel)
+                        out.append(rel)
+                        if len(out) >= max_items:
+                            self._folder_cache[key] = list(out)
+                            return out
+                    dirnames.sort()
+        except Exception:
+            pass
+        self._folder_cache[key] = list(out)
+        return out[:max_items]
+
+    def _folder_value(self) -> str:
+        return str(self.org_folder_input.currentText() or "").strip()
+
+    def apply_search_filter(self, silent: bool = False):
+        """Filter loaded proposals by search text."""
+        text = (self.search_input.text() or "").strip().lower()
+        items = list(self.all_proposals_cache)
+        if text:
+            filtered = []
+            for p in items:
+                blob = " ".join(
+                    [
+                        str(p.get("current_path") or ""),
+                        str(p.get("proposed_folder") or ""),
+                        str(p.get("proposed_filename") or ""),
+                        str(p.get("rationale") or ""),
+                        str(p.get("provider") or ""),
+                        str(p.get("model") or ""),
+                    ]
+                ).lower()
+                if text in blob:
+                    filtered.append(p)
+            items = filtered
+
+        self._populate_proposals_table(items)
+        self.results_browser.setPlainText(
+            f"✓ Loaded {len(self.all_proposals_cache)} proposals | Showing {len(items)}"
+        )
+        if not silent:
+            self.status.success(f"Showing {len(items)} of {len(self.all_proposals_cache)} proposals")
+
+    def clear_search_filter(self):
+        """Clear proposal search filter."""
+        self.search_input.clear()
+        self.apply_search_filter()
+
+    def select_filtered_proposals(self):
+        """Select all currently filtered/visible proposals."""
+        self.select_all_proposals()
+
+    def _checked_or_selected_rows(self) -> list[int]:
+        """Resolve bulk targets by checked boxes, fallback to selected rows."""
+        checked_rows = []
+        for row in range(self.org_table.rowCount()):
+            checkbox = self.org_table.cellWidget(row, 0)
+            if checkbox and isinstance(checkbox, QCheckBox) and checkbox.isChecked():
+                checked_rows.append(row)
+        if checked_rows:
+            return sorted(set(checked_rows))
+        return sorted({idx.row() for idx in self.org_table.selectionModel().selectedRows()})
 
     def org_load_proposals_silent(self):
         """Silently load proposals on startup without UI feedback (non-blocking)."""
@@ -466,14 +805,23 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 self.status.info("No pending proposals - use 'Generate Proposals' to create them")
                 
         except Exception as e:
-            # Silent failure - don't alert user on startup
             print(f"[OrganizationTab] Silent load failed: {e}")
+            self.status.info(f"Auto-load skipped: {e}")
 
     def org_generate_scoped(self):
         """Generate new organization proposals for the scoped folder."""
         try:
-            self.status.info("Generating proposals (this may take 1-2 minutes)...")
+            self.status.info("Indexing scoped files before generation...")
             root = self._normalize_root_scope(self.org_root_input.text())
+
+            if root:
+                index_summary = self._index_scope_until_stable(root)
+                self._audit("index_scope_until_stable", index_summary)
+                self.status.info(
+                    f"Indexed scope: {index_summary.get('indexed_total', 0)}/"
+                    f"{index_summary.get('target_files', 0)} files"
+                )
+            self.status.info("Generating proposals (this may take 1-2 minutes)...")
             
             payload = {
                 "limit": 500,
@@ -488,6 +836,15 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             
             self.results_browser.setPlainText(str(out))
             self.status.success("Generation complete")
+            self._audit(
+                "generate_scoped",
+                {
+                    "root": root,
+                    "created": int(out.get("created", 0)),
+                    "requested_provider": out.get("requested_provider"),
+                    "active_provider": out.get("active_provider"),
+                },
+            )
             
             # Automatically reload proposals
             self.org_load_proposals()
@@ -495,6 +852,141 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         except Exception as e:
             self.status.error(f"Failed to generate proposals: {e}")
             self.results_browser.setPlainText(f"Error: {e}")
+
+    def _scan_scope_files(self, root: str) -> dict:
+        """Scan local filesystem to estimate index target for scoped root."""
+        runtime_roots = self._existing_runtime_roots(root)
+        if not runtime_roots:
+            return {
+                "runtime_roots": [],
+                "total_files": 0,
+                "files_with_ext": 0,
+                "files_without_ext": 0,
+                "allowed_exts": [],
+                "reason": "no_runtime_root_found",
+            }
+
+        total_files = 0
+        files_with_ext = 0
+        ext_set: set[str] = set()
+        scanned_roots: list[str] = []
+        for scan_root in runtime_roots:
+            scan_path = Path(scan_root)
+            if not scan_path.exists() or not scan_path.is_dir():
+                continue
+            scanned_roots.append(scan_root)
+            for dirpath, _, filenames in os.walk(str(scan_path)):
+                for name in filenames:
+                    total_files += 1
+                    ext = Path(name).suffix.lower().strip()
+                    if ext:
+                        files_with_ext += 1
+                        ext_set.add(ext)
+
+        return {
+            "runtime_roots": scanned_roots,
+            "total_files": total_files,
+            "files_with_ext": files_with_ext,
+            "files_without_ext": max(0, total_files - files_with_ext),
+            "allowed_exts": sorted(ext_set),
+        }
+
+    def _count_indexed_for_scope(self, root: str) -> int:
+        """Get indexed file count for root (supports Windows/WSL path variants)."""
+        best_total = 0
+        for prefix in self._scope_prefixes(root):
+            encoded = quote_plus(prefix)
+            data = api_client.get(
+                f"/files?limit=1&offset=0&q={encoded}",
+                timeout=20.0,
+            )
+            best_total = max(best_total, int(data.get("total", 0)))
+        return best_total
+
+    def _index_scope_until_stable(self, root: str, max_cycles: int = 8) -> dict:
+        """Index scoped files repeatedly until indexed totals stabilize."""
+        scan = self._scan_scope_files(root)
+        runtime_roots = list(scan.get("runtime_roots") or [])
+        if not runtime_roots:
+            raise RuntimeError(
+                f"Selected root is not available in runtime path space: {root}. "
+                "Use a path that exists for the running backend (Windows or /mnt/...)."
+            )
+        target_files = int(scan.get("files_with_ext", 0))
+        allowed_exts = scan.get("allowed_exts") or None
+        max_files = max(int(scan.get("total_files", 0)) + 1000, 20000)
+
+        if int(scan.get("total_files", 0)) == 0:
+            return {
+                "root": root,
+                "cycles": 0,
+                "target_files": 0,
+                "indexed_total": 0,
+                "reason": "no_files_found",
+            }
+
+        prev_total = -1
+        indexed_total = 0
+        cycles_run = 0
+        last_index_result: dict = {}
+        stop_reason = "max_cycles_reached"
+
+        while cycles_run < max_cycles:
+            cycles_run += 1
+            self.status.info(f"Indexing scope pass {cycles_run}/{max_cycles}...")
+            payload = {
+                "roots": runtime_roots,
+                "recursive": True,
+                "allowed_exts": allowed_exts,
+                "max_files": max_files,
+            }
+            last_index_result = api_client.post(
+                "/files/index?use_taskmaster=false",
+                json=payload,
+                timeout=240.0,
+            )
+            indexed_total = self._count_indexed_for_scope(root)
+            pass_delta = int(last_index_result.get("indexed", 0))
+
+            self._audit(
+                "index_scope_pass",
+                {
+                    "root": root,
+                    "pass": cycles_run,
+                    "target_files": target_files,
+                    "indexed_total": indexed_total,
+                    "pass_indexed": pass_delta,
+                },
+            )
+
+            if target_files > 0 and indexed_total >= target_files:
+                stop_reason = "target_reached"
+                break
+            if indexed_total == prev_total:
+                stop_reason = "stable_no_change"
+                break
+            prev_total = indexed_total
+
+        refresh_result = {}
+        try:
+            refresh_result = api_client.post(
+                "/files/refresh?run_watches=false&stale_after_hours=1&use_taskmaster=false",
+                json={},
+                timeout=180.0,
+            )
+        except Exception as e:
+            refresh_result = {"success": False, "error": str(e)}
+
+        return {
+            "root": root,
+            "cycles": cycles_run,
+            "target_files": target_files,
+            "indexed_total": indexed_total,
+            "stop_reason": stop_reason,
+            "scan": scan,
+            "last_index_result": last_index_result,
+            "refresh_result": refresh_result,
+        }
 
     def org_clear_scoped(self):
         """Clear all proposals for the scoped folder."""
@@ -516,6 +1008,13 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             
             self.results_browser.setPlainText(str(out))
             self.status.success("Cleared scoped proposals")
+            self._audit(
+                "clear_scoped",
+                {
+                    "root": root,
+                    "cleared": int(out.get("cleared", 0)),
+                },
+            )
             
             # Reload to show updated state
             self.org_load_proposals()
@@ -524,9 +1023,98 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             self.status.error(f"Failed to clear proposals: {e}")
             self.results_browser.setPlainText(f"Error: {e}")
 
+    def org_apply_approved_scoped(self):
+        """Apply approved proposals (move files) for the current root scope."""
+        try:
+            root = self._normalize_root_scope(self.org_root_input.text())
+            reply = QMessageBox.question(
+                self,
+                "Apply Approved Proposals",
+                "This will MOVE approved files on disk for the current scope.\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+            self.status.info("Applying approved proposals (moving files)...")
+            payload = {"limit": 5000, "dry_run": False, "root_prefix": root or None}
+            out = api_client.post("/organization/apply", json=payload, timeout=180.0)
+            applied = int(out.get("applied", 0))
+            failed = int(out.get("failed", 0))
+
+            # Persist an apply audit artifact for easy recovery/debugging.
+            try:
+                logs_dir = Path("logs")
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                audit_path = logs_dir / "organization_apply_last.json"
+                audit_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+
+            # Best-effort index refresh so searches reflect moved files sooner.
+            try:
+                api_client.post(
+                    "/files/refresh?run_watches=false&stale_after_hours=1&use_taskmaster=false",
+                    json={},
+                    timeout=120.0,
+                )
+            except Exception:
+                pass
+
+            self.results_browser.setPlainText(str(out))
+            if failed == 0:
+                self.status.success(f"Applied {applied} moves")
+            else:
+                self.status.error(f"Applied {applied}, failed {failed}")
+            self._audit(
+                "apply_approved",
+                {
+                    "action": "apply_approved",
+                    "outcome": "success" if failed == 0 else "partial",
+                    "root": root,
+                    "applied": applied,
+                    "failed": failed,
+                    "results_count": len(out.get("results", []) or []),
+                },
+            )
+            for item in out.get("results", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                self._audit(
+                    "apply_result",
+                    {
+                        "action": "move",
+                        "proposal_id": item.get("proposal_id"),
+                        "old_path": item.get("from"),
+                        "new_path": item.get("to"),
+                        "ok": bool(item.get("ok")),
+                        "outcome": "success" if bool(item.get("ok")) else "failed",
+                        "error": item.get("error"),
+                        "proposal": self._proposal_snapshot(
+                            self._find_proposal_by_id(item.get("proposal_id"))
+                        ),
+                    },
+                )
+            self.org_load_proposals()
+        except Exception as e:
+            self.status.error(f"Apply failed: {e}")
+            self.results_browser.setPlainText(f"Error: {e}")
+
     def org_on_selection_changed(self):
         """Handle proposal selection in table - populate refinement inputs."""
         row = self.org_table.currentRow()
+        # #region agent log
+        try:
+            import json as _j, time
+            from pathlib import Path as _P
+            _log = _P(__file__).resolve().parent.parent.parent / "debug-4d484f.log"
+            _p = {"sessionId": "4d484f", "location": "organization_tab.py:org_on_selection_changed", "message": "selection_changed", "data": {"row": row, "cache_len": len(self.proposals_cache), "row_valid": 0 <= row < len(self.proposals_cache)}, "timestamp": int(time.time() * 1000), "hypothesisId": "C"}
+            with open(_log, "a", encoding="utf-8") as _f:
+                _f.write(_j.dumps(_p) + "\n")
+        except Exception:
+            pass
+        # #endregion
         if row < 0 or row >= len(self.proposals_cache):
             self.selected_proposal = None
             self.org_folder_input.clear()
@@ -535,8 +1123,20 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         
         p = self.proposals_cache[row]
         self.selected_proposal = p
+        # #region agent log
+        try:
+            _p2 = {"sessionId": "4d484f", "location": "organization_tab.py:org_on_selection_changed", "message": "selection_set", "data": {"proposal_id": p.get("id"), "row": row}, "timestamp": int(time.time() * 1000), "hypothesisId": "C"}
+            with open(_log, "a", encoding="utf-8") as _f:
+                _f.write(_j.dumps(_p2) + "\n")
+        except Exception:
+            pass
+        # #endregion
         
-        self.org_folder_input.setText(str(p.get("proposed_folder") or ""))
+        # Add selected proposal alternatives as quick-pick options.
+        for alt in p.get("alternatives") or []:
+            if isinstance(alt, str) and alt.strip() and self.org_folder_input.findText(alt.strip()) < 0:
+                self.org_folder_input.addItem(alt.strip())
+        self.org_folder_input.setEditText(str(p.get("proposed_folder") or ""))
         self.org_filename_input.setText(str(p.get("proposed_filename") or ""))
         
         # Update status with selection info
@@ -547,14 +1147,32 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         """Get the ID of the currently selected proposal."""
         if not self.selected_proposal:
             return None
+        # Validate that selected_proposal still exists in cache
         try:
-            return int(self.selected_proposal.get("id"))
+            pid = int(self.selected_proposal.get("id"))
+            # Check if proposal still exists in current cache
+            if not any(p.get("id") == pid for p in self.proposals_cache):
+                # Selected proposal no longer in cache - clear it
+                self.selected_proposal = None
+                return None
+            return pid
         except Exception:
             return None
 
     def org_approve_selected(self):
         """Approve the currently selected proposal."""
         pid = self._selected_proposal_id()
+        # #region agent log
+        try:
+            import json as _j, time
+            from pathlib import Path as _P
+            _log = _P(__file__).resolve().parent.parent.parent / "debug-4d484f.log"
+            _p = {"sessionId": "4d484f", "location": "organization_tab.py:org_approve_selected", "message": "approve_start", "data": {"proposal_id": pid, "selected_proposal_exists": self.selected_proposal is not None, "cache_len": len(self.proposals_cache)}, "timestamp": int(time.time() * 1000), "hypothesisId": "B"}
+            with open(_log, "a", encoding="utf-8") as _f:
+                _f.write(_j.dumps(_p) + "\n")
+        except Exception:
+            pass
+        # #endregion
         if pid is None:
             self.status.info("Please select a proposal first")
             return
@@ -569,11 +1187,37 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             
             self.results_browser.setPlainText(str(out))
             self.status.success(f"Proposal #{pid} approved")
+            # #region agent log
+            try:
+                _p2 = {"sessionId": "4d484f", "location": "organization_tab.py:org_approve_selected", "message": "approve_api_success", "data": {"proposal_id": pid, "api_response": str(out)[:200]}, "timestamp": int(time.time() * 1000), "hypothesisId": "B"}
+                with open(_log, "a", encoding="utf-8") as _f:
+                    _f.write(_j.dumps(_p2) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            self._audit(
+                "approve_proposal",
+                {
+                    "action": "approve",
+                    "proposal_id": pid,
+                    "ok": True,
+                    "outcome": "success",
+                    "proposal": self._proposal_snapshot(self.selected_proposal),
+                },
+            )
             
             # Reload proposals to show updated state
             self.org_load_proposals()
             
         except Exception as e:
+            # #region agent log
+            try:
+                _p3 = {"sessionId": "4d484f", "location": "organization_tab.py:org_approve_selected", "message": "approve_error", "data": {"proposal_id": pid, "error": str(e)}, "timestamp": int(time.time() * 1000), "hypothesisId": "B"}
+                with open(_log, "a", encoding="utf-8") as _f:
+                    _f.write(_j.dumps(_p3) + "\n")
+            except Exception:
+                pass
+            # #endregion
             self.status.error(f"Approve failed: {e}")
             self.results_browser.setPlainText(f"Error: {e}")
 
@@ -594,6 +1238,17 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             
             self.results_browser.setPlainText(str(out))
             self.status.success(f"Proposal #{pid} rejected")
+            self._audit(
+                "reject_proposal",
+                {
+                    "action": "reject",
+                    "proposal_id": pid,
+                    "ok": True,
+                    "outcome": "success",
+                    "note": self.org_note_input.toPlainText() or None,
+                    "proposal": self._proposal_snapshot(self.selected_proposal),
+                },
+            )
             
             # Clear note input
             self.org_note_input.clear()
@@ -616,7 +1271,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             self.status.info(f"Refining and approving proposal #{pid}...")
             
             payload = {
-                "proposed_folder": self.org_folder_input.text(),
+                "proposed_folder": self._folder_value(),
                 "proposed_filename": self.org_filename_input.text(),
                 "note": self.org_note_input.toPlainText() or None,
             }
@@ -629,6 +1284,24 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             
             self.results_browser.setPlainText(str(out))
             self.status.success(f"Proposal #{pid} refined and approved")
+            self._audit(
+                "edit_approve_proposal",
+                {
+                    "action": "edit_approve",
+                    "outcome": "success",
+                    "proposal_id": pid,
+                    "current_path": (self.selected_proposal or {}).get("current_path"),
+                    "recommended_folder": (self.selected_proposal or {}).get("proposed_folder"),
+                    "recommended_filename": (self.selected_proposal or {}).get("proposed_filename"),
+                    "final_folder": payload.get("proposed_folder"),
+                    "final_filename": payload.get("proposed_filename"),
+                    "note": payload.get("note"),
+                    "proposed_folder": payload.get("proposed_folder"),
+                    "proposed_filename": payload.get("proposed_filename"),
+                    "ok": True,
+                    "proposal": self._proposal_snapshot(self.selected_proposal),
+                },
+            )
             
             # Clear note input
             self.org_note_input.clear()
@@ -653,7 +1326,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         
         # Auto-load proposals if any exist (non-blocking)
         try:
-            self.org_load_proposals_silent()
+            QTimer.singleShot(150, self.org_load_proposals_silent)
         except Exception as e:
             print(f"[OrganizationTab] Auto-load proposals failed: {e}")
 
@@ -773,11 +1446,13 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
     def select_all_proposals(self):
         """Check all proposal checkboxes."""
         count = 0
+        self.org_table.clearSelection()
         for row in range(self.org_table.rowCount()):
             checkbox = self.org_table.cellWidget(row, 0)
             if checkbox and isinstance(checkbox, QCheckBox):
                 checkbox.setChecked(True)
                 count += 1
+            self.org_table.selectRow(row)
         
         self.status.info(f"Selected {count} proposals")
         
@@ -791,6 +1466,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             checkbox = self.org_table.cellWidget(row, 0)
             if checkbox and isinstance(checkbox, QCheckBox):
                 checkbox.setChecked(False)
+        self.org_table.clearSelection()
         
         self.status.info("Selection cleared")
         
@@ -800,12 +1476,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
     def bulk_approve_proposals(self):
         """Approve all selected proposals (via checkboxes)."""
-        # Find checked rows
-        checked_rows = []
-        for row in range(self.org_table.rowCount()):
-            checkbox = self.org_table.cellWidget(row, 0)
-            if checkbox and isinstance(checkbox, QCheckBox) and checkbox.isChecked():
-                checked_rows.append(row)
+        checked_rows = self._checked_or_selected_rows()
         
         if not checked_rows:
             self.status.info("No proposals selected (check boxes to select)")
@@ -879,12 +1550,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
     def bulk_reject_proposals(self):
         """Reject all selected proposals (via checkboxes)."""
-        # Find checked rows
-        checked_rows = []
-        for row in range(self.org_table.rowCount()):
-            checkbox = self.org_table.cellWidget(row, 0)
-            if checkbox and isinstance(checkbox, QCheckBox) and checkbox.isChecked():
-                checked_rows.append(row)
+        checked_rows = self._checked_or_selected_rows()
         
         if not checked_rows:
             self.status.info("No proposals selected (check boxes to select)")

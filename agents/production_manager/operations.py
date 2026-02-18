@@ -28,9 +28,7 @@ class OperationsMixin:
                     success=False,
                     data={},
                     error="Document processor not available",
-                    agent_type="document_processor",
                 )
-
             result = await agent._process_task(task_data=file_path, metadata=kwargs)
 
             processing_time = (datetime.now() - start_time).total_seconds()
@@ -127,9 +125,13 @@ class OperationsMixin:
 
                 ents = []
                 for m in re.finditer(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", text):
-                    ents.append({"text": m.group(0), "label": "PROPER_NOUN", "confidence": 0.55})
+                    ents.append(
+                        {"text": m.group(0), "label": "PROPER_NOUN", "confidence": 0.55}
+                    )
                 for m in re.finditer(r"\b\d{4}-\d{2}-\d{2}\b", text):
-                    ents.append({"text": m.group(0), "label": "DATE", "confidence": 0.7})
+                    ents.append(
+                        {"text": m.group(0), "label": "DATE", "confidence": 0.7}
+                    )
                 return AgentResult(
                     success=True,
                     data={"entities": ents, "fallback": True},
@@ -153,7 +155,9 @@ class OperationsMixin:
 
             ents = []
             for m in re.finditer(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", text):
-                ents.append({"text": m.group(0), "label": "PROPER_NOUN", "confidence": 0.5})
+                ents.append(
+                    {"text": m.group(0), "label": "PROPER_NOUN", "confidence": 0.5}
+                )
             return AgentResult(
                 success=True,
                 data={"entities": ents, "fallback": True, "source_error": str(e)},
@@ -307,7 +311,9 @@ class OperationsMixin:
                 agent_type="embedder",
             )
 
-    async def analyze_legal_reasoning(self, document_content: str, **kwargs) -> AgentResult:  # noqa: C901
+    async def analyze_legal_reasoning(
+        self, document_content: str, **kwargs
+    ) -> AgentResult:  # noqa: C901
         """Analyze legal reasoning using the Legal Reasoning Engine."""
         start_time = datetime.now()
 
@@ -363,7 +369,9 @@ class OperationsMixin:
                 try:
                     import hashlib as _h
 
-                    from agents.utils.prompt_engineering import build_legal_reasoning_prompt
+                    from agents.utils.prompt_engineering import (
+                        build_legal_reasoning_prompt,
+                    )
 
                     _th = _h.sha1(document_content.encode("utf-8")).hexdigest()
                     prompt_meta = build_legal_reasoning_prompt(
@@ -471,13 +479,17 @@ class OperationsMixin:
             if "breach" in lower:
                 issues.append({"issue": "possible breach", "confidence": 0.65})
             if "illegal" in lower or "violation" in lower:
-                issues.append({"issue": "possible compliance violation", "confidence": 0.65})
+                issues.append(
+                    {"issue": "possible compliance violation", "confidence": 0.65}
+                )
             return AgentResult(
                 success=True,
                 data={
                     "analysis_type": kwargs.get("analysis_type", "comprehensive"),
                     "legal_issues": issues,
-                    "reasoning_trace": [{"step": "fallback", "evidence": str(e), "score": 0.4}],
+                    "reasoning_trace": [
+                        {"step": "fallback", "evidence": str(e), "score": 0.4}
+                    ],
                     "metadata": {"mode": "fallback-heuristic", "source_error": str(e)},
                 },
                 processing_time=processing_time,
@@ -841,12 +853,19 @@ class OperationsMixin:
         start_time = datetime.now()
         try:
             if not self.is_initialized:
-                return AgentResult(success=False, data={}, error="Production system not initialized", agent_type="contract_analyzer")
+                return AgentResult(
+                    success=False,
+                    data={},
+                    error="Production system not initialized",
+                    agent_type="contract_analyzer",
+                )
 
             if self._contract_analyzer is None:
                 from agents.legal.contract_analyzer import create_contract_analyzer
 
-                self._contract_analyzer = await create_contract_analyzer(self.service_container)
+                self._contract_analyzer = await create_contract_analyzer(
+                    self.service_container
+                )
 
             result = await self._contract_analyzer._process_task(text, kwargs or {})
             if not isinstance(result, dict):
@@ -872,16 +891,28 @@ class OperationsMixin:
         start_time = datetime.now()
         try:
             if not self.is_initialized:
-                return AgentResult(success=False, data={}, error="Production system not initialized", agent_type="compliance_checker")
+                return AgentResult(
+                    success=False,
+                    data={},
+                    error="Production system not initialized",
+                    agent_type="compliance_checker",
+                )
 
             if self._compliance_checker is None:
                 from agents.legal.compliance_checker import create_compliance_checker
 
-                self._compliance_checker = await create_compliance_checker(self.service_container)
+                self._compliance_checker = await create_compliance_checker(
+                    self.service_container
+                )
 
             result = await self._compliance_checker._process_task(text, kwargs or {})
             if not isinstance(result, dict):
-                result = {"status": "UNCLEAR", "violations": [], "recommendations": [], "confidence": 0.0}
+                result = {
+                    "status": "UNCLEAR",
+                    "violations": [],
+                    "recommendations": [],
+                    "confidence": 0.0,
+                }
 
             return AgentResult(
                 success=True,

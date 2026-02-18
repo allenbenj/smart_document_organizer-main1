@@ -77,6 +77,23 @@ else:
 
 logger = logging.getLogger(__name__)
 
+PLATFORM_TAB_LABELS = {
+    "Organization",
+    "Document Processing",
+    "Semantic Analysis",
+    "Entity Extraction",
+    "Legal Reasoning",
+    "Classification",
+    "Embedding Operations",
+    "Knowledge Graph",
+    "Vector Search",
+    "Pipelines",
+    "Expert Prompts",
+    "Contradictions",
+    "Violations",
+    "Memory Review",
+}
+
 # ---------------------------------------------------------------------------
 # WSL Backend Configuration
 # ---------------------------------------------------------------------------
@@ -397,14 +414,18 @@ class LegalAIDashboard(QMainWindow):
         btn_monitor.clicked.connect(self.launch_db_monitor)
         tools_layout.addWidget(btn_monitor)
         
-        btn_prof = QPushButton("Professional Manager")
+        btn_prof = QPushButton("Open Legal AI Platform")
         btn_prof.clicked.connect(self.launch_professional_manager)
         tools_layout.addWidget(btn_prof)
         
         tools_layout.addStretch()
         main_layout.addLayout(tools_layout)
 
-        workflow_label = QLabel("Suggested Workflow:\n1. Ingest documents in 'Document Organization' tab.\n2. Analyze in 'Semantic Analysis', 'Entity Extraction', 'Legal Reasoning' tabs.\n3. Organize/Apply in 'Classification', 'Pipelines' tabs.")
+        workflow_label = QLabel(
+            "Suggested Workflow:\n"
+            "1. Use 'Open Legal AI Platform' for core platform tabs.\n"
+            "2. Use this Modular System for additional modules not in Platform."
+        )
         workflow_label.setWordWrap(True)
         main_layout.addWidget(workflow_label)
 
@@ -436,7 +457,7 @@ class LegalAIDashboard(QMainWindow):
         splitter.setStretchFactor(2, 0)
         splitter.setSizes([100, 560, 180])
 
-        tabs = [
+        all_tabs = [
             ("Organization", lambda: OrganizationTab()),
             ("Document Processing", lambda: DocumentProcessingTab()),
             (
@@ -458,6 +479,7 @@ class LegalAIDashboard(QMainWindow):
             ("Memory Analytics", lambda: MemoryAnalyticsTab()),
         ]
 
+        tabs = [(label, factory) for label, factory in all_tabs if label not in PLATFORM_TAB_LABELS]
         for label, factory in tabs:
             self.tab_widget.addTab(self._safe_tab(label, factory), label)
 

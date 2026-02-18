@@ -149,6 +149,8 @@ def build_startup_report(
 ) -> dict:
     agent_state = getattr(app.state, "agent_startup", {}) or {}
     routers = getattr(app.state, "router_load_report", []) or []
+    failed_critical = [r for r in routers if not r.get("ok") and not r.get("optional")]
+    failed_optional = [r for r in routers if not r.get("ok") and r.get("optional")]
     startup_steps = []
     for step in (getattr(app.state, "startup_steps", []) or []):
         clean = {k: v for k, v in dict(step).items() if k != "_t0"}
@@ -160,7 +162,8 @@ def build_startup_report(
         "agents": agent_state,
         "routers": {
             "loaded": sum(1 for r in routers if r.get("ok")),
-            "failed": [r for r in routers if not r.get("ok")],
+            "failed": failed_critical,
+            "failed_optional": failed_optional,
             "total": len(routers),
         },
         "startup_steps": startup_steps,
@@ -174,5 +177,10 @@ def build_startup_report(
                 "enabled": rate_limit_requests_per_minute > 0,
                 "requests_per_minute": rate_limit_requests_per_minute,
             },
+        },
+        "runtime": {
+            "startup_profile": getattr(app.state, "startup_profile", os.getenv("STARTUP_PROFILE", "full")),
+            "agents_lazy_init": bool(getattr(app.state, "agents_lazy_init", False)),
+            "startup_offline_safe": bool(getattr(app.state, "startup_offline_safe", False)),
         },
     }
