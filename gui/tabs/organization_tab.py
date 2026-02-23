@@ -54,6 +54,9 @@ from .status_presenter import TabStatusPresenter
 from .default_paths import get_default_dialog_dir
 if PYSIDE6_AVAILABLE:
     from ..ui import JobStatusWidget
+from ..services.organization_service import organization_service, OrgJobType, OrgJobStatus
+from .org_workers import LoadProposalsWorker, GenerateProposalsWorker, BulkActionWorker, ApplyProposalsWorker, ClearProposalsWorker
+from .org_utils import normalize_root_scope, get_scope_prefixes, get_existing_runtime_roots
 
 
 class OrganizationTab(QWidget):  # type: ignore[misc]
@@ -76,26 +79,27 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.audit_store = OrganizationAuditStore()
         self.selected_proposal = None
         self.backend_ready = False
+        self._last_generate_summary = None
+        self.worker = None
         self.setup_ui()
         self.connect_signals()
-        # Defer backend calls until backend is ready
-        # self.load_current_llm_provider() - moved to on_backend_ready()
+        
+        # Subscribe to organization service updates
+        organization_service.subscribe(self._on_job_update)
 
-    def _audit(self, event_type: str, payload: dict) -> None:
-        safe_payload = payload if isinstance(payload, dict) else {"raw": str(payload)}
-        root = self._normalize_root_scope(self.org_root_input.text())
-        if root and not safe_payload.get("root"):
-            safe_payload["root"] = root
-        if isinstance(safe_payload.get("proposal"), dict):
-            snap = safe_payload.get("proposal") or {}
-        else:
-            snap = self._proposal_snapshot(self.selected_proposal)
-        if snap and "proposal" not in safe_payload:
-            safe_payload["proposal"] = snap
-        try:
-            self.audit_store.log_event(event_type, safe_payload)
-        except Exception:
-            pass
+    def _on_job_update(self, job):
+        """Handle updates from the organization service."""
+        # Only handle if it's the current active job for this tab instance
+        if self.worker and hasattr(self.worker, 'job_id') and self.worker.job_id == job.id:
+            if job.status == OrgJobStatus.RUNNING:
+                self.status.info(job.message or "Running...")
+            elif job.status == OrgJobStatus.FAILED:
+                self.status.error(f"Job failed: {job.error}")
+                self.worker = None
+            elif job.status == OrgJobStatus.SUCCESS:
+                # results handling is usually in worker signals, 
+                # but we can also use service state here
+                pass
 
     @staticmethod
     def _proposal_snapshot(proposal: Optional[dict]) -> dict:
@@ -111,7 +115,48 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             "provider": proposal.get("provider"),
             "model": proposal.get("model"),
             "status": proposal.get("status"),
+            "rationale": proposal.get("rationale"),
+            "metadata": proposal.get("metadata", {}),
         }
+
+    def _audit(self, event_type: str, payload: dict) -> None:
+        """Capture action with human-in-the-loop delta tracking."""
+        safe_payload = payload if isinstance(payload, dict) else {"raw": str(payload)}
+        root = normalize_root_scope(self.org_root_input.text())
+        
+        if root and not safe_payload.get("root"):
+            safe_payload["root"] = root
+            
+        # Capture AI suggestion baseline
+        proposal = self.selected_proposal
+        if isinstance(safe_payload.get("proposal"), dict):
+            proposal = safe_payload.get("proposal")
+            
+        if proposal:
+            snap = self._proposal_snapshot(proposal)
+            safe_payload["proposal"] = snap
+            
+            # Detect human overrides (Human-in-the-loop delta)
+            overrides = {}
+            if event_type in ["edit_approve_proposal", "refine_approve"]:
+                final_folder = safe_payload.get("final_folder")
+                final_filename = safe_payload.get("final_filename")
+                
+                if final_folder and final_folder != snap.get("recommended_folder"):
+                    overrides["folder"] = {"from": snap.get("recommended_folder"), "to": final_folder}
+                if final_filename and final_filename != snap.get("recommended_filename"):
+                    overrides["filename"] = {"from": snap.get("recommended_filename"), "to": final_filename}
+            
+            if overrides:
+                safe_payload["user_overrides"] = overrides
+                safe_payload["is_human_corrected"] = True
+            else:
+                safe_payload["is_human_corrected"] = False
+
+        try:
+            self.audit_store.log_event(event_type, safe_payload)
+        except Exception:
+            pass
 
     def _find_proposal_by_id(self, proposal_id: Optional[int]) -> Optional[dict]:
         if proposal_id is None:
@@ -127,6 +172,19 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             if int(item.get("id") or -1) == pid:
                 return item
         return None
+
+    def _proposal_for_table_row(self, row: int) -> Optional[dict]:
+        """Resolve the proposal backing a table row (safe with table sorting)."""
+        if row < 0:
+            return None
+        id_item = self.org_table.item(row, 1)
+        if not id_item:
+            return None
+        try:
+            pid = int(id_item.text())
+        except Exception:
+            return None
+        return self._find_proposal_by_id(pid)
 
     def setup_ui(self):
         """Setup the user interface."""
@@ -296,6 +354,15 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
         # Search/filter toolbar
         search_toolbar = QHBoxLayout()
+        search_toolbar.addWidget(QLabel("Status:"))
+        self.proposal_status_filter = QComboBox()
+        self.proposal_status_filter.addItem("All", userData=None)
+        self.proposal_status_filter.addItem("Proposed", userData="proposed")
+        self.proposal_status_filter.addItem("Approved", userData="approved")
+        self.proposal_status_filter.addItem("Rejected", userData="rejected")
+        self.proposal_status_filter.addItem("Applied", userData="applied")
+        self.proposal_status_filter.setCurrentIndex(0)
+        search_toolbar.addWidget(self.proposal_status_filter)
         search_toolbar.addWidget(QLabel("Search:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Filter by path, folder, filename, rationale...")
@@ -454,6 +521,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.search_clear_btn.clicked.connect(self.clear_search_filter)
         self.select_filtered_btn.clicked.connect(self.select_filtered_proposals)
         self.search_input.returnPressed.connect(self.apply_search_filter)
+        self.proposal_status_filter.currentIndexChanged.connect(self.org_load_proposals)
         self.org_table.itemSelectionChanged.connect(self.org_on_selection_changed)
         self.org_table.itemChanged.connect(self.handle_table_cell_changed)
         
@@ -468,59 +536,6 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
     # Organization Workflow Methods
     # -------------------------------------------------------------------------
 
-    @staticmethod
-    def _normalize_root_scope(path_str: str) -> str:
-        """Normalize folder path for consistent API usage."""
-        p = path_str.strip()
-        if not p:
-            return ""
-        p = p.replace("\\", "/")
-        return p
-
-    @staticmethod
-    def _scope_prefixes(path_str: str) -> list[str]:
-        """Build equivalent scope prefixes for Windows/WSL path variants."""
-        root = OrganizationTab._normalize_root_scope(path_str)
-        if not root:
-            return []
-        prefixes = [root]
-
-        # Windows drive path -> WSL equivalent (/mnt/<drive>/...)
-        m = re.match(r"^([A-Za-z]):/(.*)$", root)
-        if m:
-            drive = m.group(1).lower()
-            rest = m.group(2).lstrip("/")
-            prefixes.append(f"/mnt/{drive}/{rest}")
-
-        # WSL path -> Windows equivalent (<DRIVE>:/...)
-        m2 = re.match(r"^/mnt/([A-Za-z])/(.*)$", root)
-        if m2:
-            drive = m2.group(1).upper()
-            rest = m2.group(2).lstrip("/")
-            prefixes.append(f"{drive}:/{rest}")
-
-        seen = set()
-        unique = []
-        for p in prefixes:
-            if p not in seen:
-                seen.add(p)
-                unique.append(p)
-        return unique
-
-    def _existing_runtime_roots(self, root: str) -> list[str]:
-        """Return root path variants that exist in current runtime."""
-        existing: list[str] = []
-        for candidate in self._scope_prefixes(root):
-            try:
-                p = Path(candidate)
-                if p.exists() and p.is_dir():
-                    existing.append(candidate)
-            except Exception:
-                continue
-        return existing
-
-
-
     def org_pick_folder(self):
         """Open folder browser dialog."""
         default_path = get_default_dialog_dir(self.org_root_input.text())
@@ -533,64 +548,46 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             self.org_root_input.setText(folder)
             self.status.info(f"Scope set to: {folder}")
 
+    def _selected_status(self) -> Optional[str]:
+        """Current API status filter; None means all statuses."""
+        idx = self.proposal_status_filter.currentIndex()
+        value = self.proposal_status_filter.itemData(idx)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value.strip().lower()
+
     def org_load_proposals(self):
-        """Load organization proposals from API for the scoped folder."""
-        # #region agent log
-        try:
-            import json as _j, time
-            from pathlib import Path as _P
-            _log = _P(__file__).resolve().parent.parent.parent / "debug-4d484f.log"
-            _before = {"selected_proposal_id": self._selected_proposal_id(), "cache_len": len(self.proposals_cache), "all_cache_len": len(self.all_proposals_cache)}
-            _p = {"sessionId": "4d484f", "location": "organization_tab.py:org_load_proposals", "message": "load_proposals_start", "data": _before, "timestamp": int(time.time() * 1000), "hypothesisId": "A"}
-            with open(_log, "a", encoding="utf-8") as _f:
-                _f.write(_j.dumps(_p) + "\n")
-        except Exception:
-            pass
-        # #endregion
-        try:
-            self.status.info("Loading proposals...")
-            root = self._normalize_root_scope(self.org_root_input.text())
+        """Load organization proposals from API for the scoped folder (non-blocking)."""
+        if self.worker and self.worker.isRunning():
+            self.status.info("Another task is in progress")
+            return
 
-            endpoint = "/organization/proposals?status=proposed&limit=1000&offset=0"
-            if root:
-                endpoint += f"&root_prefix={quote_plus(root)}"
+        try:
+            self.status.info("Requesting proposals...")
+            root = normalize_root_scope(self.org_root_input.text())
+            status_filter = self._selected_status()
 
-            # Fetch proposals from API (already root-scoped when root is set)
-            data = api_client.get(endpoint, timeout=30.0)
+            job_id = organization_service.create_job(OrgJobType.LOAD, {"root": root, "status": status_filter})
+            self.worker = LoadProposalsWorker(job_id, root_prefix=root, status=status_filter)
+            organization_service.register_worker(job_id, self.worker)
             
-            items = data.get("items", []) if isinstance(data, dict) else []
+            def _on_finished(items):
+                self.all_proposals_cache = list(items)
+                self.apply_search_filter(silent=True)
+                self.status.success(f"Loaded {len(items)} proposals")
+                self.worker = None
 
-            self.all_proposals_cache = list(items)
-            self.apply_search_filter(silent=True)
-            # #region agent log
-            try:
-                _after = {"selected_proposal_id": self._selected_proposal_id(), "cache_len": len(self.proposals_cache), "all_cache_len": len(self.all_proposals_cache), "selected_still_exists": any(p.get("id") == _before.get("selected_proposal_id") for p in self.proposals_cache)}
-                _p2 = {"sessionId": "4d484f", "location": "organization_tab.py:org_load_proposals", "message": "load_proposals_end", "data": _after, "timestamp": int(time.time() * 1000), "hypothesisId": "A"}
-                with open(_log, "a", encoding="utf-8") as _f:
-                    _f.write(_j.dumps(_p2) + "\n")
-            except Exception:
-                pass
-            # #endregion
-            self._audit(
-                "load_proposals",
-                {
-                    "root": root,
-                    "loaded": len(self.all_proposals_cache),
-                    "shown": len(self.proposals_cache),
-                },
-            )
+            def _on_error(err):
+                self.status.error(f"Failed to load proposals: {err}")
+                self.results_browser.setPlainText(f"Error: {err}")
+                self.worker = None
+
+            self.worker.finished_ok.connect(_on_finished)
+            self.worker.finished_err.connect(_on_error)
+            self.worker.start()
             
         except Exception as e:
-            # #region agent log
-            try:
-                _p3 = {"sessionId": "4d484f", "location": "organization_tab.py:org_load_proposals", "message": "load_proposals_error", "data": {"error": str(e)}, "timestamp": int(time.time() * 1000), "hypothesisId": "A"}
-                with open(_log, "a", encoding="utf-8") as _f:
-                    _f.write(_j.dumps(_p3) + "\n")
-            except Exception:
-                pass
-            # #endregion
-            self.status.error(f"Failed to load proposals: {e}")
-            self.results_browser.setPlainText(f"Error: {e}")
+            self.status.error(f"Failed to initiate load: {e}")
 
     def _populate_proposals_table(self, items):
         """Populate table from proposal list."""
@@ -631,26 +628,21 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
         self.org_table.resizeColumnsToContents()
         self.org_table.setSortingEnabled(True)
-        # Clear selected_proposal when table is repopulated - it may no longer exist in cache
-        # Validate that selected_proposal still exists in the new cache, otherwise clear it
-        if self.selected_proposal is not None:
-            # Get ID directly from selected_proposal (don't call _selected_proposal_id() which might clear it)
-            try:
-                selected_id = int(self.selected_proposal.get("id"))
-                # Check if proposal still exists in new cache
-                if not any(p.get("id") == selected_id for p in self.proposals_cache):
-                    # Selected proposal no longer exists in cache (likely approved/rejected)
-                    self.selected_proposal = None
-                    self.org_folder_input.clear()
-                    self.org_filename_input.clear()
-            except Exception:
-                # Invalid selected_proposal - clear it
-                self.selected_proposal = None
-                self.org_folder_input.clear()
-                self.org_filename_input.clear()
-        # Re-enable signals and clear selection explicitly
-        self.org_table.blockSignals(False)
-        self.org_table.clearSelection()
+        
+        # Restore selection by ID if possible
+        if _before_id is not None:
+            self.org_table.blockSignals(True)
+            for row in range(self.org_table.rowCount()):
+                id_item = self.org_table.item(row, 1)
+                if id_item and id_item.text() == str(_before_id):
+                    self.org_table.selectRow(row)
+                    self.org_table.setCurrentCell(row, 1)
+                    break
+            self.org_table.blockSignals(False)
+        else:
+            self.org_table.clearSelection()
+            self.org_table.blockSignals(False)
+
         # #region agent log
         try:
             _after = {"selected_proposal_id": self._selected_proposal_id(), "cache_len": len(self.proposals_cache), "table_rows": self.org_table.rowCount(), "selected_still_in_cache": any(p.get("id") == _before_id for p in self.proposals_cache) if _before_id is not None else False}
@@ -759,8 +751,21 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             items = filtered
 
         self._populate_proposals_table(items)
+        details = ""
+        if len(self.all_proposals_cache) == 0 and isinstance(self._last_generate_summary, dict):
+            g = self._last_generate_summary
+            details = (
+                " | last_generate: "
+                f"created={int(g.get('created', 0))}, "
+                f"scoped_indexed={int(g.get('scoped_indexed_count', 0))}, "
+                f"scoped_candidates={int(g.get('scoped_candidate_count', 0))}, "
+                f"scoped_ready={int(g.get('scoped_ready_count', 0))}, "
+                f"seeded={int(g.get('seeded_indexed_count', 0))}, "
+                f"fallback={bool(g.get('fallback_mode'))}"
+            )
         self.results_browser.setPlainText(
-            f"✓ Loaded {len(self.all_proposals_cache)} proposals | Showing {len(items)}"
+            f"✓ Loaded {len(self.all_proposals_cache)} proposals | Showing {len(items)} "
+            f"(status={self._selected_status() or 'all'}){details}"
         )
         if not silent:
             self.status.success(f"Showing {len(items)} of {len(self.all_proposals_cache)} proposals")
@@ -774,259 +779,150 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         """Select all currently filtered/visible proposals."""
         self.select_all_proposals()
 
-    def _checked_or_selected_rows(self) -> list[int]:
-        """Resolve bulk targets by checked boxes, fallback to selected rows."""
-        checked_rows = []
+    def _checked_or_selected_proposal_ids(self) -> list[int]:
+        """Resolve bulk targets by checked boxes, fallback to selected rows. Returns IDs."""
+        ids = []
         for row in range(self.org_table.rowCount()):
             checkbox = self.org_table.cellWidget(row, 0)
-            if checkbox and isinstance(checkbox, QCheckBox) and checkbox.isChecked():
-                checked_rows.append(row)
-        if checked_rows:
-            return sorted(set(checked_rows))
-        return sorted({idx.row() for idx in self.org_table.selectionModel().selectedRows()})
+            id_item = self.org_table.item(row, 1)
+            
+            is_checked = checkbox and isinstance(checkbox, QCheckBox) and checkbox.isChecked()
+            is_selected = self.org_table.item(row, 0).isSelected() if self.org_table.item(row, 0) else False
+            
+            if (is_checked or is_selected) and id_item:
+                try:
+                    ids.append(int(id_item.text()))
+                except ValueError:
+                    continue
+        
+        return sorted(list(set(ids)))
+
+    def _selected_proposal_edits(self) -> dict[int, dict]:
+        """Capture current table folder/filename values for selected rows by proposal ID."""
+        edits: dict[int, dict] = {}
+        for row in range(self.org_table.rowCount()):
+            checkbox = self.org_table.cellWidget(row, 0)
+            id_item = self.org_table.item(row, 1)
+            folder_item = self.org_table.item(row, 4)
+            filename_item = self.org_table.item(row, 5)
+
+            is_checked = checkbox and isinstance(checkbox, QCheckBox) and checkbox.isChecked()
+            is_selected = self.org_table.item(row, 0).isSelected() if self.org_table.item(row, 0) else False
+            if not (is_checked or is_selected) or not id_item:
+                continue
+
+            try:
+                pid = int(id_item.text())
+            except ValueError:
+                continue
+
+            edits[pid] = {
+                "proposed_folder": str(folder_item.text() if folder_item else ""),
+                "proposed_filename": str(filename_item.text() if filename_item else ""),
+            }
+        return edits
 
     def org_load_proposals_silent(self):
         """Silently load proposals on startup without UI feedback (non-blocking)."""
+        if self.worker and self.worker.isRunning():
+            return
+
         try:
-            # Check if any proposals exist
-            data = api_client.get(
-                "/organization/proposals?status=proposed&limit=10&offset=0", 
-                timeout=5.0
-            )
+            root = normalize_root_scope(self.org_root_input.text())
+            job_id = organization_service.create_job(OrgJobType.LOAD, {"root": root, "silent": True})
+            self.worker = LoadProposalsWorker(job_id, root_prefix=root)
+            organization_service.register_worker(job_id, self.worker)
             
-            items = data.get("items", []) if isinstance(data, dict) else []
-            
-            if len(items) > 0:
-                # If proposals exist, load them normally
-                self.org_load_proposals()
-                print(f"[OrganizationTab] Auto-loaded {len(items)} proposals on startup")
-            else:
-                # No proposals to show
-                self.status.info("No pending proposals - use 'Generate Proposals' to create them")
-                
+            def _on_finished(items):
+                if items:
+                    self.all_proposals_cache = list(items)
+                    self.apply_search_filter(silent=True)
+                    print(f"[OrganizationTab] Auto-loaded {len(items)} proposals")
+                self.worker = None
+
+            self.worker.finished_ok.connect(_on_finished)
+            self.worker.start()
         except Exception as e:
             print(f"[OrganizationTab] Silent load failed: {e}")
-            self.status.info(f"Auto-load skipped: {e}")
 
     def org_generate_scoped(self):
-        """Generate new organization proposals for the scoped folder."""
-        try:
-            self.status.info("Indexing scoped files before generation...")
-            root = self._normalize_root_scope(self.org_root_input.text())
+        """Generate new organization proposals for the scoped folder (non-blocking)."""
+        if self.worker and self.worker.isRunning():
+            self.status.info("Another task is in progress")
+            return
 
-            if root:
-                index_summary = self._index_scope_until_stable(root)
-                self._audit("index_scope_until_stable", index_summary)
-                self.status.info(
-                    f"Indexed scope: {index_summary.get('indexed_total', 0)}/"
-                    f"{index_summary.get('target_files', 0)} files"
-                )
-            self.status.info("Generating proposals (this may take 1-2 minutes)...")
+        try:
+            root = normalize_root_scope(self.org_root_input.text())
+            self.status.info("Initializing generation job...")
             
-            payload = {
-                "limit": 500,
-                "root_prefix": root or None
-            }
+            job_id = organization_service.create_job(OrgJobType.GENERATE, {"root": root})
+            self.worker = GenerateProposalsWorker(job_id, root)
+            organization_service.register_worker(job_id, self.worker)
             
-            out = api_client.post(
-                "/organization/proposals/generate", 
-                json=payload, 
-                timeout=180.0
-            )
-            
-            self.results_browser.setPlainText(str(out))
-            self.status.success("Generation complete")
-            self._audit(
-                "generate_scoped",
-                {
-                    "root": root,
-                    "created": int(out.get("created", 0)),
-                    "requested_provider": out.get("requested_provider"),
-                    "active_provider": out.get("active_provider"),
-                },
-            )
-            
-            # Automatically reload proposals
-            self.org_load_proposals()
+            def _on_finished(out):
+                self._last_generate_summary = out if isinstance(out, dict) else None
+                self.results_browser.setPlainText(json.dumps(out, indent=2, ensure_ascii=False))
+                created = int(out.get("created", 0)) if isinstance(out, dict) else 0
+                if created > 0:
+                    self.status.success(f"Generation complete: created {created} proposals")
+                else:
+                    self.status.warning("Generation complete: no new proposals created")
+                self.worker = None
+                self.org_load_proposals() # Reload to show new items
+
+            def _on_error(err):
+                self.status.error(f"Generation failed: {err}")
+                self.results_browser.setPlainText(f"Error: {err}")
+                self.worker = None
+
+            self.worker.finished_ok.connect(_on_finished)
+            self.worker.finished_err.connect(_on_error)
+            self.worker.progress_update.connect(lambda msg: self.status.info(msg))
+            self.worker.start()
             
         except Exception as e:
-            self.status.error(f"Failed to generate proposals: {e}")
-            self.results_browser.setPlainText(f"Error: {e}")
-
-    def _scan_scope_files(self, root: str) -> dict:
-        """Scan local filesystem to estimate index target for scoped root."""
-        runtime_roots = self._existing_runtime_roots(root)
-        if not runtime_roots:
-            return {
-                "runtime_roots": [],
-                "total_files": 0,
-                "files_with_ext": 0,
-                "files_without_ext": 0,
-                "allowed_exts": [],
-                "reason": "no_runtime_root_found",
-            }
-
-        total_files = 0
-        files_with_ext = 0
-        ext_set: set[str] = set()
-        scanned_roots: list[str] = []
-        for scan_root in runtime_roots:
-            scan_path = Path(scan_root)
-            if not scan_path.exists() or not scan_path.is_dir():
-                continue
-            scanned_roots.append(scan_root)
-            for dirpath, _, filenames in os.walk(str(scan_path)):
-                for name in filenames:
-                    total_files += 1
-                    ext = Path(name).suffix.lower().strip()
-                    if ext:
-                        files_with_ext += 1
-                        ext_set.add(ext)
-
-        return {
-            "runtime_roots": scanned_roots,
-            "total_files": total_files,
-            "files_with_ext": files_with_ext,
-            "files_without_ext": max(0, total_files - files_with_ext),
-            "allowed_exts": sorted(ext_set),
-        }
-
-    def _count_indexed_for_scope(self, root: str) -> int:
-        """Get indexed file count for root (supports Windows/WSL path variants)."""
-        best_total = 0
-        for prefix in self._scope_prefixes(root):
-            encoded = quote_plus(prefix)
-            data = api_client.get(
-                f"/files?limit=1&offset=0&q={encoded}",
-                timeout=20.0,
-            )
-            best_total = max(best_total, int(data.get("total", 0)))
-        return best_total
-
-    def _index_scope_until_stable(self, root: str, max_cycles: int = 8) -> dict:
-        """Index scoped files repeatedly until indexed totals stabilize."""
-        scan = self._scan_scope_files(root)
-        runtime_roots = list(scan.get("runtime_roots") or [])
-        if not runtime_roots:
-            raise RuntimeError(
-                f"Selected root is not available in runtime path space: {root}. "
-                "Use a path that exists for the running backend (Windows or /mnt/...)."
-            )
-        target_files = int(scan.get("files_with_ext", 0))
-        allowed_exts = scan.get("allowed_exts") or None
-        max_files = max(int(scan.get("total_files", 0)) + 1000, 20000)
-
-        if int(scan.get("total_files", 0)) == 0:
-            return {
-                "root": root,
-                "cycles": 0,
-                "target_files": 0,
-                "indexed_total": 0,
-                "reason": "no_files_found",
-            }
-
-        prev_total = -1
-        indexed_total = 0
-        cycles_run = 0
-        last_index_result: dict = {}
-        stop_reason = "max_cycles_reached"
-
-        while cycles_run < max_cycles:
-            cycles_run += 1
-            self.status.info(f"Indexing scope pass {cycles_run}/{max_cycles}...")
-            payload = {
-                "roots": runtime_roots,
-                "recursive": True,
-                "allowed_exts": allowed_exts,
-                "max_files": max_files,
-            }
-            last_index_result = api_client.post(
-                "/files/index?use_taskmaster=false",
-                json=payload,
-                timeout=240.0,
-            )
-            indexed_total = self._count_indexed_for_scope(root)
-            pass_delta = int(last_index_result.get("indexed", 0))
-
-            self._audit(
-                "index_scope_pass",
-                {
-                    "root": root,
-                    "pass": cycles_run,
-                    "target_files": target_files,
-                    "indexed_total": indexed_total,
-                    "pass_indexed": pass_delta,
-                },
-            )
-
-            if target_files > 0 and indexed_total >= target_files:
-                stop_reason = "target_reached"
-                break
-            if indexed_total == prev_total:
-                stop_reason = "stable_no_change"
-                break
-            prev_total = indexed_total
-
-        refresh_result = {}
-        try:
-            refresh_result = api_client.post(
-                "/files/refresh?run_watches=false&stale_after_hours=1&use_taskmaster=false",
-                json={},
-                timeout=180.0,
-            )
-        except Exception as e:
-            refresh_result = {"success": False, "error": str(e)}
-
-        return {
-            "root": root,
-            "cycles": cycles_run,
-            "target_files": target_files,
-            "indexed_total": indexed_total,
-            "stop_reason": stop_reason,
-            "scan": scan,
-            "last_index_result": last_index_result,
-            "refresh_result": refresh_result,
-        }
+            self.status.error(f"Failed to initiate generation: {e}")
 
     def org_clear_scoped(self):
-        """Clear all proposals for the scoped folder."""
+        """Clear all proposals for the scoped folder (non-blocking)."""
+        if self.worker and self.worker.isRunning():
+            self.status.info("Another task is in progress")
+            return
+
         try:
             self.status.info("Clearing scoped proposals...")
-            root = self._normalize_root_scope(self.org_root_input.text())
+            root = normalize_root_scope(self.org_root_input.text())
             
-            payload = {
-                "status": "proposed",
-                "root_prefix": root or None,
-                "note": "gui_clear"
-            }
+            job_id = organization_service.create_job(OrgJobType.CLEAR, {"root": root})
+            self.worker = ClearProposalsWorker(job_id, root)
+            organization_service.register_worker(job_id, self.worker)
             
-            out = api_client.post(
-                "/organization/proposals/clear", 
-                json=payload, 
-                timeout=120.0
-            )
-            
-            self.results_browser.setPlainText(str(out))
-            self.status.success("Cleared scoped proposals")
-            self._audit(
-                "clear_scoped",
-                {
-                    "root": root,
-                    "cleared": int(out.get("cleared", 0)),
-                },
-            )
-            
-            # Reload to show updated state
-            self.org_load_proposals()
+            def _on_finished(out):
+                self.results_browser.setPlainText(str(out))
+                self.status.success("Cleared scoped proposals")
+                self._audit("clear_scoped", {"root": root, "cleared": int(out.get("cleared", 0))})
+                self.worker = None
+                self.org_load_proposals()
+
+            def _on_error(err):
+                self.status.error(f"Failed to clear: {err}")
+                self.worker = None
+
+            self.worker.finished_ok.connect(_on_finished)
+            self.worker.finished_err.connect(_on_error)
+            self.worker.start()
             
         except Exception as e:
-            self.status.error(f"Failed to clear proposals: {e}")
-            self.results_browser.setPlainText(f"Error: {e}")
+            self.status.error(f"Failed to initiate clear: {e}")
 
     def org_apply_approved_scoped(self):
-        """Apply approved proposals (move files) for the current root scope."""
+        """Apply approved proposals via worker (non-blocking)."""
+        if self.worker and self.worker.isRunning():
+            self.status.info("Another task is in progress")
+            return
+
         try:
-            root = self._normalize_root_scope(self.org_root_input.text())
+            root = normalize_root_scope(self.org_root_input.text())
             reply = QMessageBox.question(
                 self,
                 "Apply Approved Proposals",
@@ -1038,52 +934,42 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 return
 
             self.status.info("Applying approved proposals (moving files)...")
-            payload = {"limit": 5000, "dry_run": False, "root_prefix": root or None}
-            out = api_client.post("/organization/apply", json=payload, timeout=180.0)
-            applied = int(out.get("applied", 0))
-            failed = int(out.get("failed", 0))
+            
+            job_id = organization_service.create_job(OrgJobType.APPLY, {"root": root})
+            self.worker = ApplyProposalsWorker(job_id, root)
+            organization_service.register_worker(job_id, self.worker)
+            
+            def _on_finished(out):
+                applied = int(out.get("applied", 0))
+                failed = int(out.get("failed", 0))
+                
+                # Persist an apply audit artifact
+                try:
+                    logs_dir = Path("logs")
+                    logs_dir.mkdir(parents=True, exist_ok=True)
+                    audit_path = logs_dir / "organization_apply_last.json"
+                    audit_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
 
-            # Persist an apply audit artifact for easy recovery/debugging.
-            try:
-                logs_dir = Path("logs")
-                logs_dir.mkdir(parents=True, exist_ok=True)
-                audit_path = logs_dir / "organization_apply_last.json"
-                audit_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
-            except Exception:
-                pass
-
-            # Best-effort index refresh so searches reflect moved files sooner.
-            try:
-                api_client.post(
-                    "/files/refresh?run_watches=false&stale_after_hours=1&use_taskmaster=false",
-                    json={},
-                    timeout=120.0,
-                )
-            except Exception:
-                pass
-
-            self.results_browser.setPlainText(str(out))
-            if failed == 0:
-                self.status.success(f"Applied {applied} moves")
-            else:
-                self.status.error(f"Applied {applied}, failed {failed}")
-            self._audit(
-                "apply_approved",
-                {
+                self.results_browser.setPlainText(str(out))
+                if failed == 0:
+                    self.status.success(f"Applied {applied} moves")
+                else:
+                    self.status.error(f"Applied {applied}, failed {failed}")
+                
+                self._audit("apply_approved", {
                     "action": "apply_approved",
                     "outcome": "success" if failed == 0 else "partial",
                     "root": root,
                     "applied": applied,
                     "failed": failed,
                     "results_count": len(out.get("results", []) or []),
-                },
-            )
-            for item in out.get("results", []) or []:
-                if not isinstance(item, dict):
-                    continue
-                self._audit(
-                    "apply_result",
-                    {
+                })
+                
+                for item in out.get("results", []) or []:
+                    if not isinstance(item, dict): continue
+                    self._audit("apply_result", {
                         "action": "move",
                         "proposal_id": item.get("proposal_id"),
                         "old_path": item.get("from"),
@@ -1091,15 +977,22 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                         "ok": bool(item.get("ok")),
                         "outcome": "success" if bool(item.get("ok")) else "failed",
                         "error": item.get("error"),
-                        "proposal": self._proposal_snapshot(
-                            self._find_proposal_by_id(item.get("proposal_id"))
-                        ),
-                    },
-                )
-            self.org_load_proposals()
+                        "proposal": self._proposal_snapshot(self._find_proposal_by_id(item.get("proposal_id"))),
+                    })
+                
+                self.worker = None
+                self.org_load_proposals()
+
+            def _on_error(err):
+                self.status.error(f"Apply failed: {err}")
+                self.worker = None
+
+            self.worker.finished_ok.connect(_on_finished)
+            self.worker.finished_err.connect(_on_error)
+            self.worker.start()
+            
         except Exception as e:
-            self.status.error(f"Apply failed: {e}")
-            self.results_browser.setPlainText(f"Error: {e}")
+            self.status.error(f"Failed to initiate apply: {e}")
 
     def org_on_selection_changed(self):
         """Handle proposal selection in table - populate refinement inputs."""
@@ -1109,19 +1002,20 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             import json as _j, time
             from pathlib import Path as _P
             _log = _P(__file__).resolve().parent.parent.parent / "debug-4d484f.log"
-            _p = {"sessionId": "4d484f", "location": "organization_tab.py:org_on_selection_changed", "message": "selection_changed", "data": {"row": row, "cache_len": len(self.proposals_cache), "row_valid": 0 <= row < len(self.proposals_cache)}, "timestamp": int(time.time() * 1000), "hypothesisId": "C"}
+            _resolved = self._proposal_for_table_row(row)
+            _p = {"sessionId": "4d484f", "location": "organization_tab.py:org_on_selection_changed", "message": "selection_changed", "data": {"row": row, "cache_len": len(self.proposals_cache), "resolved_proposal_id": _resolved.get("id") if isinstance(_resolved, dict) else None}, "timestamp": int(time.time() * 1000), "hypothesisId": "C"}
             with open(_log, "a", encoding="utf-8") as _f:
                 _f.write(_j.dumps(_p) + "\n")
         except Exception:
             pass
         # #endregion
-        if row < 0 or row >= len(self.proposals_cache):
+        p = self._proposal_for_table_row(row)
+        if not isinstance(p, dict):
             self.selected_proposal = None
             self.org_folder_input.clear()
             self.org_filename_input.clear()
             return
-        
-        p = self.proposals_cache[row]
+
         self.selected_proposal = p
         # #region agent log
         try:
@@ -1160,158 +1054,154 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             return None
 
     def org_approve_selected(self):
-        """Approve the currently selected proposal."""
+        """Approve the currently selected proposal (non-blocking)."""
         pid = self._selected_proposal_id()
-        # #region agent log
-        try:
-            import json as _j, time
-            from pathlib import Path as _P
-            _log = _P(__file__).resolve().parent.parent.parent / "debug-4d484f.log"
-            _p = {"sessionId": "4d484f", "location": "organization_tab.py:org_approve_selected", "message": "approve_start", "data": {"proposal_id": pid, "selected_proposal_exists": self.selected_proposal is not None, "cache_len": len(self.proposals_cache)}, "timestamp": int(time.time() * 1000), "hypothesisId": "B"}
-            with open(_log, "a", encoding="utf-8") as _f:
-                _f.write(_j.dumps(_p) + "\n")
-        except Exception:
-            pass
-        # #endregion
         if pid is None:
             self.status.info("Please select a proposal first")
             return
         
-        try:
-            self.status.info(f"Approving proposal #{pid}...")
-            out = api_client.post(
-                f"/organization/proposals/{pid}/approve", 
-                json={}, 
-                timeout=60.0
-            )
-            
-            self.results_browser.setPlainText(str(out))
-            self.status.success(f"Proposal #{pid} approved")
-            # #region agent log
-            try:
-                _p2 = {"sessionId": "4d484f", "location": "organization_tab.py:org_approve_selected", "message": "approve_api_success", "data": {"proposal_id": pid, "api_response": str(out)[:200]}, "timestamp": int(time.time() * 1000), "hypothesisId": "B"}
-                with open(_log, "a", encoding="utf-8") as _f:
-                    _f.write(_j.dumps(_p2) + "\n")
-            except Exception:
-                pass
-            # #endregion
-            self._audit(
-                "approve_proposal",
-                {
-                    "action": "approve",
-                    "proposal_id": pid,
-                    "ok": True,
-                    "outcome": "success",
-                    "proposal": self._proposal_snapshot(self.selected_proposal),
-                },
-            )
-            
-            # Reload proposals to show updated state
-            self.org_load_proposals()
-            
-        except Exception as e:
-            # #region agent log
-            try:
-                _p3 = {"sessionId": "4d484f", "location": "organization_tab.py:org_approve_selected", "message": "approve_error", "data": {"proposal_id": pid, "error": str(e)}, "timestamp": int(time.time() * 1000), "hypothesisId": "B"}
-                with open(_log, "a", encoding="utf-8") as _f:
-                    _f.write(_j.dumps(_p3) + "\n")
-            except Exception:
-                pass
-            # #endregion
-            self.status.error(f"Approve failed: {e}")
-            self.results_browser.setPlainText(f"Error: {e}")
+        if self.worker and self.worker.isRunning():
+            self.status.info("Another task is in progress")
+            return
 
-    def org_reject_selected(self):
-        """Reject the currently selected proposal."""
-        pid = self._selected_proposal_id()
-        if pid is None:
-            self.status.info("Please select a proposal first")
-            return
-        
         try:
-            self.status.info(f"Rejecting proposal #{pid}...")
-            out = api_client.post(
-                f"/organization/proposals/{pid}/reject",
-                json={"note": self.org_note_input.toPlainText() or None},
-                timeout=60.0,
-            )
-            
-            self.results_browser.setPlainText(str(out))
-            self.status.success(f"Proposal #{pid} rejected")
-            self._audit(
-                "reject_proposal",
-                {
-                    "action": "reject",
-                    "proposal_id": pid,
-                    "ok": True,
-                    "outcome": "success",
-                    "note": self.org_note_input.toPlainText() or None,
-                    "proposal": self._proposal_snapshot(self.selected_proposal),
-                },
-            )
-            
-            # Clear note input
-            self.org_note_input.clear()
-            
-            # Reload proposals
-            self.org_load_proposals()
-            
-        except Exception as e:
-            self.status.error(f"Reject failed: {e}")
-            self.results_browser.setPlainText(f"Error: {e}")
-
-    def org_edit_approve_selected(self):
-        """Refine and approve the currently selected proposal."""
-        pid = self._selected_proposal_id()
-        if pid is None:
-            self.status.info("Please select a proposal first")
-            return
-        
-        try:
-            self.status.info(f"Refining and approving proposal #{pid}...")
-            
+            # Approve should persist current folder/filename values to avoid losing user edits.
             payload = {
                 "proposed_folder": self._folder_value(),
                 "proposed_filename": self.org_filename_input.text(),
                 "note": self.org_note_input.toPlainText() or None,
             }
+            self.status.info(f"Approving proposal #{pid} with current values...")
+
+            import threading
+
+            def _thread_target():
+                try:
+                    res = api_client.post(
+                        f"/organization/proposals/{pid}/edit",
+                        json=payload,
+                        timeout=60.0,
+                    )
+                    QTimer.singleShot(0, lambda: _handle_approve_sync(True, res))
+                except Exception as e:
+                    QTimer.singleShot(0, lambda: _handle_approve_sync(False, str(e)))
+
+            def _handle_approve_sync(success, res):
+                if success:
+                    self.status.success(f"Proposal #{pid} approved")
+                    self._audit(
+                        "approve_proposal",
+                        {
+                            **payload,
+                            "action": "approve",
+                            "proposal_id": pid,
+                            "ok": True,
+                            "outcome": "success",
+                        },
+                    )
+                else:
+                    self.status.error(f"Approve failed: {res}")
+                self.org_note_input.clear()
+                self.org_load_proposals()
+
+            threading.Thread(target=_thread_target, daemon=True).start()
+        except Exception as e:
+            self.status.error(f"Failed to start approve: {e}")
+
+    def org_reject_selected(self):
+        """Reject the currently selected proposal (non-blocking)."""
+        pid = self._selected_proposal_id()
+        if pid is None:
+            self.status.info("Please select a proposal first")
+            return
+        
+        if self.worker and self.worker.isRunning():
+            self.status.info("Another task is in progress")
+            return
+
+        try:
+            note = self.org_note_input.toPlainText() or None
+            self.status.info(f"Rejecting proposal #{pid}...")
+            job_id = organization_service.create_job(OrgJobType.BULK_REJECT, {"pid": pid})
+            self.worker = BulkActionWorker(job_id, [pid], "reject", note=note)
+            organization_service.register_worker(job_id, self.worker)
             
-            out = api_client.post(
-                f"/organization/proposals/{pid}/edit",
-                json=payload,
-                timeout=60.0,
-            )
+            def _on_finished(results):
+                if results['success'] > 0:
+                    self.status.success(f"Proposal #{pid} rejected")
+                    self._audit("reject_proposal", {"action": "reject", "proposal_id": pid, "ok": True, "outcome": "success", "note": note})
+                else:
+                    self.status.error(f"Reject failed: {results['errors'][0] if results['errors'] else 'Unknown'}")
+                self.org_note_input.clear()
+                self.worker = None
+                self.org_load_proposals()
+
+            self.worker.finished_ok.connect(_on_finished)
+            self.worker.start()
+        except Exception as e:
+            self.status.error(f"Failed to start reject: {e}")
+
+    def org_edit_approve_selected(self):
+        """Refine and approve the currently selected proposal (non-blocking)."""
+        pid = self._selected_proposal_id()
+        if pid is None:
+            self.status.info("Please select a proposal first")
+            return
+        
+        if self.worker and self.worker.isRunning():
+            self.status.info("Another task is in progress")
+            return
+
+        try:
+            payload = {
+                "proposed_folder": self._folder_value(),
+                "proposed_filename": self.org_filename_input.text(),
+                "note": self.org_note_input.toPlainText() or None,
+            }
+            self.status.info(f"Refining proposal #{pid}...")
             
-            self.results_browser.setPlainText(str(out))
-            self.status.success(f"Proposal #{pid} refined and approved")
-            self._audit(
-                "edit_approve_proposal",
-                {
-                    "action": "edit_approve",
-                    "outcome": "success",
-                    "proposal_id": pid,
-                    "current_path": (self.selected_proposal or {}).get("current_path"),
-                    "recommended_folder": (self.selected_proposal or {}).get("proposed_folder"),
-                    "recommended_filename": (self.selected_proposal or {}).get("proposed_filename"),
-                    "final_folder": payload.get("proposed_folder"),
-                    "final_filename": payload.get("proposed_filename"),
-                    "note": payload.get("note"),
-                    "proposed_folder": payload.get("proposed_folder"),
-                    "proposed_filename": payload.get("proposed_filename"),
-                    "ok": True,
-                    "proposal": self._proposal_snapshot(self.selected_proposal),
-                },
-            )
-            
-            # Clear note input
-            self.org_note_input.clear()
-            
-            # Reload proposals
-            self.org_load_proposals()
+            async def _do_edit():
+                try:
+                    # Individual edit still uses direct API for now but in background
+                    # Note: /organization/proposals/{pid}/edit
+                    res = api_client.post(f"/organization/proposals/{pid}/edit", json=payload, timeout=60.0)
+                    return True, res
+                except Exception as e:
+                    return False, str(e)
+
+            def _handle_edit(future):
+                success, res = future.result()
+                if success:
+                    self.status.success(f"Proposal #{pid} refined and approved")
+                    self._audit("edit_approve_proposal", {**payload, "action": "edit_approve", "proposal_id": pid, "ok": True})
+                else:
+                    self.status.error(f"Refine failed: {res}")
+                self.org_note_input.clear()
+                self.org_load_proposals()
+
+            # Using the tab's AsyncioThread if available, otherwise just use a QThread
+            # For now, let's keep it simple and use a QThread for this specific one too if we had a worker,
+            # but we can also call the API in a simple lambda thread.
+            import threading
+            def _thread_target():
+                try:
+                    res = api_client.post(f"/organization/proposals/{pid}/edit", json=payload, timeout=60.0)
+                    QTimer.singleShot(0, lambda: _handle_edit_sync(True, res))
+                except Exception as e:
+                    QTimer.singleShot(0, lambda: _handle_edit_sync(False, str(e)))
+
+            def _handle_edit_sync(success, res):
+                if success:
+                    self.status.success(f"Proposal #{pid} refined and approved")
+                else:
+                    self.status.error(f"Refine failed: {res}")
+                self.org_note_input.clear()
+                self.org_load_proposals()
+
+            threading.Thread(target=_thread_target, daemon=True).start()
             
         except Exception as e:
-            self.status.error(f"Refine+Approve failed: {e}")
-            self.results_browser.setPlainText(f"Error: {e}")
+            self.status.error(f"Failed to initiate refine: {e}")
 
     # -------------------------------------------------------------------------
     # LLM Provider Management
@@ -1319,6 +1209,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
     def on_backend_ready(self):
         """Called when backend is ready - load initial data."""
+        print("[OrganizationTab] on_backend_ready signal received. Starting init...")
         self.backend_ready = True
         self.llm_status_label.setText("Current: Loading...")
         self.llm_status_label.setStyleSheet("color: #666;")
@@ -1326,6 +1217,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         
         # Auto-load proposals if any exist (non-blocking)
         try:
+            print("[OrganizationTab] Scheduling silent load of proposals...")
             QTimer.singleShot(150, self.org_load_proposals_silent)
         except Exception as e:
             print(f"[OrganizationTab] Auto-load proposals failed: {e}")
@@ -1338,8 +1230,9 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             return
             
         try:
-            print("[OrganizationTab] Loading current LLM provider...")
+            print("[OrganizationTab] GET /organization/llm ...")
             data = api_client.get("/organization/llm", timeout=10.0)
+            print(f"[OrganizationTab] Received: {data}")
             
             # API returns nested structure: {"active": {...}, "configured": {...}}
             active = data.get("active", {})
@@ -1356,7 +1249,6 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 configured = bool(config_map)
             
             # Update status label
-            print(f"[OrganizationTab] LLM Config: configured={configured}, provider={current_provider}, model={current_model}")
             if configured:
                 self.llm_status_label.setText(f"Current: {current_provider} ({current_model})")
                 self.llm_status_label.setStyleSheet("color: green;")
@@ -1374,7 +1266,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         except Exception as e:
             self.llm_status_label.setText("Current: Error loading")
             self.llm_status_label.setStyleSheet("color: red;")
-            print(f"[OrganizationTab] Failed to load LLM provider: {e}")
+            print(f"[OrganizationTab] Failed to load LLM provider ERROR: {e}")
             self.status.error(f"Failed to load LLM provider: {e}")
 
     def switch_llm_provider(self):
@@ -1383,8 +1275,10 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             selected_provider = self.llm_provider_combo.currentText()
             self.status.info(f"Switching to {selected_provider}...")
             
+            print(f"[OrganizationTab] POST /organization/llm/switch provider={selected_provider} ...")
             payload = {"provider": selected_provider}
             data = api_client.post("/organization/llm/switch", json=payload, timeout=15.0)
+            print(f"[OrganizationTab] Switch response: {data}")
             
             success = data.get("success", False)
             message = data.get("message", "")
@@ -1402,7 +1296,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 )
             
         except Exception as e:
-            print(f"[OrganizationTab] Switch provider failed: {e}")
+            print(f"[OrganizationTab] Switch provider failed ERROR: {e}")
             self.status.error(f"Switch provider failed: {e}")
             QMessageBox.critical(
                 self,
@@ -1414,7 +1308,9 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         """Display organization statistics."""
         try:
             self.status.info("Loading statistics...")
+            print("[OrganizationTab] GET /organization/stats ...")
             data = api_client.get("/organization/stats", timeout=30.0)
+            print(f"[OrganizationTab] Stats response: {data}")
             
             # Format statistics
             stats_text = "Organization Statistics:\n\n"
@@ -1432,6 +1328,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             self.status.success("Statistics loaded")
             
         except Exception as e:
+            print(f"[OrganizationTab] Failed to load statistics ERROR: {e}")
             self.status.error(f"Failed to load statistics: {e}")
             QMessageBox.critical(
                 self,
@@ -1475,18 +1372,18 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.bulk_reject_btn.setEnabled(False)
 
     def bulk_approve_proposals(self):
-        """Approve all selected proposals (via checkboxes)."""
-        checked_rows = self._checked_or_selected_rows()
+        """Approve all selected proposals via worker (non-blocking)."""
+        proposal_ids = self._checked_or_selected_proposal_ids()
+        edits_by_id = self._selected_proposal_edits()
         
-        if not checked_rows:
-            self.status.info("No proposals selected (check boxes to select)")
+        if not proposal_ids:
+            self.status.info("No proposals selected (check boxes or select rows)")
             return
         
-        # Confirm bulk action
         reply = QMessageBox.question(
             self,
             "Confirm Bulk Approve",
-            f"Approve {len(checked_rows)} selected proposals?\n\nThis action will move files to their proposed locations.",
+            f"Approve {len(proposal_ids)} selected proposals?\n\nThis action will move files to their proposed locations.",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -1494,73 +1391,49 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         if reply != QMessageBox.Yes:
             return
         
+        if self.worker and self.worker.isRunning():
+            self.status.info("Another task is in progress")
+            return
+
         try:
-            self.status.info(f"Bulk approving {len(checked_rows)} proposals...")
+            job_id = organization_service.create_job(OrgJobType.BULK_APPROVE, {"count": len(proposal_ids)})
+            self.worker = BulkActionWorker(
+                job_id,
+                proposal_ids,
+                "approve",
+                edits_by_id=edits_by_id,
+            )
+            organization_service.register_worker(job_id, self.worker)
             
-            success_count = 0
-            fail_count = 0
-            errors = []
-            
-            for row in checked_rows:
-                if row >= len(self.proposals_cache):
-                    continue
-                
-                p = self.proposals_cache[row]
-                pid = p.get("id")
-                
-                try:
-                    api_client.post(
-                        f"/organization/proposals/{pid}/approve",
-                        {},
-                        timeout=30.0
-                    )
-                    success_count += 1
-                except Exception as e:
-                    fail_count += 1
-                    errors.append(f"Proposal #{pid}: {e}")
-            
-            # Show results
-            result_msg = f"Approved: {success_count}, Failed: {fail_count}"
-            
-            if errors:
-                error_details = "\n".join(errors[:5])  # Show first 5 errors
-                if len(errors) > 5:
-                    error_details += f"\n... and {len(errors) - 5} more errors"
-                
-                QMessageBox.warning(
-                    self,
-                    "Bulk Approve Complete",
-                    f"{result_msg}\n\nErrors:\n{error_details}"
-                )
-            else:
-                QMessageBox.information(
-                    self,
-                    "Bulk Approve Complete",
-                    result_msg
-                )
-            
-            self.status.success(result_msg)
-            
-            # Reload proposals
-            self.org_load_proposals()
+            def _on_finished(results):
+                msg = f"Bulk Approve complete: {results['success']} success, {results['failed']} failed"
+                if results['failed'] > 0:
+                    self.status.warning(msg)
+                    QMessageBox.warning(self, "Bulk Approve Partial Success", f"{msg}\n\nFirst few errors:\n" + "\n".join(results['errors'][:5]))
+                else:
+                    self.status.success(msg)
+                    QMessageBox.information(self, "Bulk Approve Success", msg)
+                self.worker = None
+                self.org_load_proposals()
+
+            self.worker.finished_ok.connect(_on_finished)
+            self.worker.start()
             
         except Exception as e:
-            self.status.error(f"Bulk approve failed: {e}")
-            QMessageBox.critical(self, "Error", f"Bulk approve failed:\n{e}")
+            self.status.error(f"Failed to start bulk approve: {e}")
 
     def bulk_reject_proposals(self):
-        """Reject all selected proposals (via checkboxes)."""
-        checked_rows = self._checked_or_selected_rows()
+        """Reject all selected proposals via worker (non-blocking)."""
+        proposal_ids = self._checked_or_selected_proposal_ids()
         
-        if not checked_rows:
-            self.status.info("No proposals selected (check boxes to select)")
+        if not proposal_ids:
+            self.status.info("No proposals selected (check boxes or select rows)")
             return
         
-        # Confirm bulk action
         reply = QMessageBox.question(
             self,
             "Confirm Bulk Reject",
-            f"Reject {len(checked_rows)} selected proposals?",
+            f"Reject {len(proposal_ids)} selected proposals?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -1568,64 +1441,31 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         if reply != QMessageBox.Yes:
             return
         
+        if self.worker and self.worker.isRunning():
+            self.status.info("Another task is in progress")
+            return
+
         try:
-            self.status.info(f"Bulk rejecting {len(checked_rows)} proposals...")
-            
-            success_count = 0
-            fail_count = 0
-            errors = []
-            
             note = self.org_note_input.toPlainText() or "Bulk reject"
+            job_id = organization_service.create_job(OrgJobType.BULK_REJECT, {"count": len(proposal_ids)})
+            self.worker = BulkActionWorker(job_id, proposal_ids, "reject", note=note)
+            organization_service.register_worker(job_id, self.worker)
             
-            for row in checked_rows:
-                if row >= len(self.proposals_cache):
-                    continue
-                
-                p = self.proposals_cache[row]
-                pid = p.get("id")
-                
-                try:
-                    api_client.post(
-                        f"/organization/proposals/{pid}/reject",
-                        {"note": note},
-                        timeout=30.0
-                    )
-                    success_count += 1
-                except Exception as e:
-                    fail_count += 1
-                    errors.append(f"Proposal #{pid}: {e}")
-            
-            # Show results
-            result_msg = f"Rejected: {success_count}, Failed: {fail_count}"
-            
-            if errors:
-                error_details = "\n".join(errors[:5])
-                if len(errors) > 5:
-                    error_details += f"\n... and {len(errors) - 5} more errors"
-                
-                QMessageBox.warning(
-                    self,
-                    "Bulk Reject Complete",
-                    f"{result_msg}\n\nErrors:\n{error_details}"
-                )
-            else:
-                QMessageBox.information(
-                    self,
-                    "Bulk Reject Complete",
-                    result_msg
-                )
-            
-            self.status.success(result_msg)
-            
-            # Clear note input
-            self.org_note_input.clear()
-            
-            # Reload proposals
-            self.org_load_proposals()
+            def _on_finished(results):
+                msg = f"Bulk Reject complete: {results['success']} success, {results['failed']} failed"
+                if results['failed'] > 0:
+                    self.status.warning(msg)
+                else:
+                    self.status.success(msg)
+                self.worker = None
+                self.org_note_input.clear()
+                self.org_load_proposals()
+
+            self.worker.finished_ok.connect(_on_finished)
+            self.worker.start()
             
         except Exception as e:
-            self.status.error(f"Bulk reject failed: {e}")
-            QMessageBox.critical(self, "Error", f"Bulk reject failed:\n{e}")
+            self.status.error(f"Failed to start bulk reject: {e}")
 
     def export_proposals(self):
         """Export proposals to JSON or CSV file."""
@@ -1673,6 +1513,13 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             self.status.error(f"Export failed: {e}")
             QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
 
+    def closeEvent(self, event):
+        """Clean up workers on close."""
+        if self.worker:
+            self.worker.requestInterruption()
+            self.worker.wait(1000)
+        super().closeEvent(event)
+
     # -------------------------------------------------------------------------
     # Inline Editing
     # -------------------------------------------------------------------------
@@ -1685,21 +1532,24 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         row = item.row()
         col = item.column()
         
-        if row >= len(self.proposals_cache):
+        p = self._proposal_for_table_row(row)
+        if not isinstance(p, dict):
             return
-        
-        p = self.proposals_cache[row]
         pid = p.get("id")
         
         # Only allow editing of folder (col 4) and filename (col 5)
         if col == 4:  # Proposed Folder
             new_folder = item.text()
             p["proposed_folder"] = new_folder
+            if self._selected_proposal_id() == int(pid):
+                self.org_folder_input.setEditText(new_folder)
             self.status.info(f"Proposal #{pid} folder updated to: {new_folder}")
             
         elif col == 5:  # Proposed Filename
             new_filename = item.text()
             p["proposed_filename"] = new_filename
+            if self._selected_proposal_id() == int(pid):
+                self.org_filename_input.setText(new_filename)
             self.status.info(f"Proposal #{pid} filename updated to: {new_filename}")
         
         # Note: Changes are cached locally. User must use "Edit & Approve" to persist

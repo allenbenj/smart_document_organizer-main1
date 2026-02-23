@@ -13,12 +13,14 @@ from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
     QSizePolicy,
     QSplitter,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
     QPushButton,
@@ -29,6 +31,8 @@ try:
     import requests
 except Exception:
     requests = None
+
+from utils.backend_runtime import backend_base_url, backend_health_url, launch_health_timeout_seconds
 
 # Support both module import and direct script execution.
 if __package__:
@@ -42,14 +46,17 @@ if __package__:
     from .tabs.embedding_operations_tab import EmbeddingOperationsTab
     from .tabs.entity_extraction_tab import EntityExtractionTab
     from .tabs.expert_prompts_tab import ExpertPromptsTab
+    from .tabs.canonical_artifacts_tab import CanonicalArtifactsTab
     from .tabs.knowledge_graph_tab import KnowledgeGraphTab
     from .tabs.legal_reasoning_tab import LegalReasoningTab
+    from .tabs.ontology_registry_tab import OntologyRegistryTab
     from .tabs.pipelines_tab import PipelinesTab
     from .tabs.semantic_analysis_tab import SemanticAnalysisTab
     from .tabs.vector_search_tab import VectorSearchTab
     from .violations_tab import ViolationsTab
     from .services import api_client
     from .ui import RunConsolePanel, SystemHealthStrip, NLPModelManagerDialog
+    from .core import AsyncioThread
 else:
     # Running as script: `python gui/gui_dashboard.py`
     _here = os.path.dirname(__file__)
@@ -66,14 +73,17 @@ else:
     from gui.tabs.embedding_operations_tab import EmbeddingOperationsTab
     from gui.tabs.entity_extraction_tab import EntityExtractionTab
     from gui.tabs.expert_prompts_tab import ExpertPromptsTab
+    from gui.tabs.canonical_artifacts_tab import CanonicalArtifactsTab
     from gui.tabs.knowledge_graph_tab import KnowledgeGraphTab
     from gui.tabs.legal_reasoning_tab import LegalReasoningTab
+    from gui.tabs.ontology_registry_tab import OntologyRegistryTab
     from gui.tabs.pipelines_tab import PipelinesTab
     from gui.tabs.semantic_analysis_tab import SemanticAnalysisTab
     from gui.tabs.vector_search_tab import VectorSearchTab
     from gui.violations_tab import ViolationsTab
     from gui.services import api_client
     from gui.ui import RunConsolePanel, SystemHealthStrip, NLPModelManagerDialog
+    from gui.core import AsyncioThread
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +104,117 @@ PLATFORM_TAB_LABELS = {
     "Memory Review",
 }
 
+TAB_WORKFLOW_CONTEXT: dict[str, dict[str, str]] = {
+    "Organization": {
+        "purpose": "Set folder strategy and organization proposals.",
+        "when": "After ingestion, before large batch review.",
+        "output": "Organization proposals and folder routing decisions.",
+        "next": "Document Processing or Knowledge Graph review.",
+    },
+    "Document Processing": {
+        "purpose": "Parse files into normalized text/metadata artifacts.",
+        "when": "First step for new files/folders.",
+        "output": "Processed document content consumable by all analysis tabs.",
+        "next": "Entity Extraction and Semantic Analysis.",
+    },
+    "Semantic Analysis": {
+        "purpose": "Theme discovery, clustering, summarization, semantic signals.",
+        "when": "After document text is available.",
+        "output": "Themes, summaries, and semantic groupings.",
+        "next": "Legal Reasoning or Knowledge Graph categorization.",
+    },
+    "Entity Extraction": {
+        "purpose": "Extract entities/relations with provenance spans.",
+        "when": "After processing text or loading a target file.",
+        "output": "Candidate entities and relationships for memory review.",
+        "next": "Knowledge Graph and Memory Review.",
+    },
+    "Legal Reasoning": {
+        "purpose": "Generate legal analysis from evidence text.",
+        "when": "After extraction/semantic pass for better grounding.",
+        "output": "Reasoning outputs, risks, and legal analysis artifacts.",
+        "next": "Contradictions, Violations, or export/report steps.",
+    },
+    "Classification": {
+        "purpose": "Label document type/category quickly.",
+        "when": "Early triage for large mixed corpora.",
+        "output": "Document class labels and confidence.",
+        "next": "Route to extraction/reasoning workflows.",
+    },
+    "Embedding Operations": {
+        "purpose": "Generate vectors and run embedding operations.",
+        "when": "For semantic search, pattern matching, clustering setup.",
+        "output": "Embeddings and similarity operation results.",
+        "next": "Vector Search and cross-document analysis.",
+    },
+    "Knowledge Graph": {
+        "purpose": "Curate memory items and graph-ready knowledge.",
+        "when": "After extraction created candidate entities.",
+        "output": "Approved/updated memory records and graph candidates.",
+        "next": "Vector Search, reasoning loops, and audits.",
+    },
+    "Ontology Registry": {
+        "purpose": "Manage ontology versions and activation state.",
+        "when": "When labels/types need controlled updates.",
+        "output": "Versioned ontology state used across tabs.",
+        "next": "Entity extraction reruns under updated ontology.",
+    },
+    "Canonical Artifacts": {
+        "purpose": "Inspect canonical artifact lineage and versions.",
+        "when": "During audit, provenance, or contract checks.",
+        "output": "Artifact lifecycle visibility and diagnostics.",
+        "next": "Planner/Judge and governance decisions.",
+    },
+    "Vector Search": {
+        "purpose": "Semantic retrieval across embedded content.",
+        "when": "After embeddings have been generated.",
+        "output": "Nearest-neighbor evidence hits.",
+        "next": "Reasoning, contradictions, and evidence review.",
+    },
+    "Pipelines": {
+        "purpose": "Run orchestrated multi-step workflows.",
+        "when": "For repeatable process runs.",
+        "output": "Batch execution results from chained stages.",
+        "next": "Review outputs in specialized tabs.",
+    },
+    "Expert Prompts": {
+        "purpose": "Generate expert prompt scaffolds.",
+        "when": "When preparing guided LLM analysis tasks.",
+        "output": "Prompt templates and task-specific instructions.",
+        "next": "Use in reasoning/extraction loops.",
+    },
+    "Contradictions": {
+        "purpose": "Find conflicting statements and claims.",
+        "when": "After facts/entities have been extracted.",
+        "output": "Potential contradiction sets.",
+        "next": "Violation analysis and evidence verification.",
+    },
+    "Violations": {
+        "purpose": "Assess potential legal/procedural violations.",
+        "when": "After contradiction and fact analysis.",
+        "output": "Violation candidates and related evidence.",
+        "next": "Case strategy and reporting.",
+    },
+    "Diagnostics": {
+        "purpose": "System and service troubleshooting.",
+        "when": "Any time behavior is unexpected.",
+        "output": "Health and debug signals.",
+        "next": "Return to failing workflow stage with fixes.",
+    },
+    "Memory Review": {
+        "purpose": "Review, verify, and curate memory entries.",
+        "when": "After extraction imports candidates to memory.",
+        "output": "Verified memory data for downstream reasoning.",
+        "next": "Knowledge graph and retrieval workflows.",
+    },
+    "Memory Analytics": {
+        "purpose": "Track memory quality, trends, and coverage.",
+        "when": "Periodic governance and quality review.",
+        "output": "Analytics over memory store behavior.",
+        "next": "Tune extraction and review strategy.",
+    },
+}
+
 # ---------------------------------------------------------------------------
 # WSL Backend Configuration
 # ---------------------------------------------------------------------------
@@ -101,10 +222,8 @@ _WSL_DISTRO = os.getenv("WSL_DISTRO", "Ubuntu")
 _WSL_PROJECT_PATH = os.getenv(
     "WSL_PROJECT_PATH", "/mnt/e/Project/smart_document_organizer-main"
 )
-_BACKEND_HEALTH_URL = os.getenv(
-    "BACKEND_HEALTH_URL", "http://127.0.0.1:8000/api/health"
-)
-_HEALTH_TIMEOUT = int(os.getenv("BACKEND_HEALTH_TIMEOUT", "120"))
+_BACKEND_HEALTH_URL = os.getenv("BACKEND_HEALTH_URL", backend_health_url())
+_HEALTH_TIMEOUT = launch_health_timeout_seconds(120)
 
 
 class WslBackendThread(QThread):
@@ -283,6 +402,8 @@ class WslBackendThread(QThread):
             # Update the global api_client so all tabs use the correct URL
             if wsl_ip:
                 api_client.base_url = f"http://{wsl_ip}:8000"
+            else:
+                api_client.base_url = backend_base_url()
             self.status_update.emit("Backend healthy")
             self.healthy.emit()
         else:
@@ -291,24 +412,6 @@ class WslBackendThread(QThread):
                 f"Check: wsl -d {self.distro} bash -lc "
                 f"\"tail -n 80 '{self.linux_path}/logs/backend-wsl.log'\""
             )
-
-
-class AsyncioThread(QThread):
-    """Background thread hosting an asyncio event loop."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.loop = asyncio.new_event_loop()
-
-    def run(self):
-        asyncio.set_event_loop(self.loop)
-        self.loop.run_forever()
-
-    def stop(self):
-        try:
-            self.loop.call_soon_threadsafe(self.loop.stop)
-        except Exception:
-            pass
 
 
 class AgentStatusWidget(QWidget):
@@ -365,8 +468,8 @@ class LegalAIDashboard(QMainWindow):
         self.asyncio_thread = asyncio_thread
         self.agent_manager = None
         self._init_ui()
-        # Optional: avoid heavyweight agent imports on GUI startup unless explicitly enabled.
-        if os.getenv("GUI_ENABLE_AGENT_MANAGER", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        # Enable Agent Manager by default for local model access
+        if os.getenv("GUI_ENABLE_AGENT_MANAGER", "1").strip().lower() in {"1", "true", "yes", "on"}:
             self._setup_agent_manager()
 
     def launch_db_monitor(self):
@@ -379,13 +482,23 @@ class LegalAIDashboard(QMainWindow):
     def launch_professional_manager(self):
         try:
             script_path = os.path.join(os.path.dirname(__file__), "professional_manager.py")
-            subprocess.Popen([sys.executable, script_path])
+            env = os.environ.copy()
+            env["SMART_DOC_API_BASE_URL"] = api_client.base_url
+            subprocess.Popen([sys.executable, script_path], env=env)
         except Exception as e:
             QMessageBox.warning(self, "Launch Error", f"Could not launch Professional Manager: {e}")
 
     def _safe_tab(self, title: str, factory: Callable[[], QWidget]) -> QWidget:
         try:
-            return factory()
+            from PySide6.QtWidgets import QScrollArea
+            widget = factory()
+            
+            # Wrap in scroll area to handle window shrinking
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setWidget(widget)
+            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            return scroll
         except Exception as e:
             logger.exception("Failed to create tab %s", title)
             return ErrorTab(title, str(e))
@@ -428,14 +541,20 @@ class LegalAIDashboard(QMainWindow):
         )
         workflow_label.setWordWrap(True)
         main_layout.addWidget(workflow_label)
+        self.tab_context_label = QLabel("")
+        self.tab_context_label.setWordWrap(True)
+        self.tab_context_label.setStyleSheet(
+            "padding: 8px; border: 1px solid #2f3742; border-radius: 4px;"
+        )
+        main_layout.addWidget(self.tab_context_label)
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setChildrenCollapsible(True)
         main_layout.addWidget(splitter)
 
         self.status_widget = AgentStatusWidget(self.asyncio_thread)
-        self.status_widget.setMinimumHeight(0)
-        self.status_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        self.status_widget.setMinimumHeight(60) # Ensure minimal visibility
+        self.status_widget.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         splitter.addWidget(self.status_widget)
 
         self.tab_widget = QTabWidget()
@@ -443,19 +562,25 @@ class LegalAIDashboard(QMainWindow):
         self.tab_widget.setMovable(True)
         self.tab_widget.setDocumentMode(True)
         self.tab_widget.setElideMode(Qt.TextElideMode.ElideRight)
+        # Ensure tabs can shrink but have a reasonable baseline
+        self.tab_widget.setMinimumHeight(300)
         splitter.addWidget(self.tab_widget)
 
         self.run_console = RunConsolePanel()
-        self.run_console.setMinimumHeight(0)
-        self.run_console.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Ignored)
+        self.run_console.setMinimumHeight(100) # Minimum height for console
+        self.run_console.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding)
         splitter.addWidget(self.run_console)
-        splitter.setCollapsible(0, True)
-        splitter.setCollapsible(1, True)
-        splitter.setCollapsible(2, True)
+        
+        splitter.setCollapsible(0, False) # Don't hide status
+        splitter.setCollapsible(1, False) # Don't hide main tabs
+        splitter.setCollapsible(2, True)  # Console can be collapsed
+        
         splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 1) # Give most space to tabs
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([100, 560, 180])
+        
+        # Initial proportions
+        splitter.setSizes([80, 500, 150])
 
         all_tabs = [
             ("Organization", lambda: OrganizationTab()),
@@ -469,6 +594,8 @@ class LegalAIDashboard(QMainWindow):
             ("Classification", lambda: ClassificationTab()),
             ("Embedding Operations", lambda: EmbeddingOperationsTab(self.asyncio_thread)),
             ("Knowledge Graph", lambda: KnowledgeGraphTab(self.asyncio_thread)),
+            ("Ontology Registry", lambda: OntologyRegistryTab()),
+            ("Canonical Artifacts", lambda: CanonicalArtifactsTab()),
             ("Vector Search", lambda: VectorSearchTab()),
             ("Pipelines", lambda: PipelinesTab()),
             ("Expert Prompts", lambda: ExpertPromptsTab()),
@@ -482,6 +609,8 @@ class LegalAIDashboard(QMainWindow):
         tabs = [(label, factory) for label, factory in all_tabs if label not in PLATFORM_TAB_LABELS]
         for label, factory in tabs:
             self.tab_widget.addTab(self._safe_tab(label, factory), label)
+        self.tab_widget.currentChanged.connect(self._update_tab_context_panel)
+        self._update_tab_context_panel(self.tab_widget.currentIndex())
 
         try:
             self.setWindowIcon(QIcon("assets/icon.png"))
@@ -511,6 +640,9 @@ class LegalAIDashboard(QMainWindow):
         act_docs = QAction("Open API Docs (/docs)", self)
         act_docs.triggered.connect(lambda: webbrowser.open(f"{api_client.base_url}/docs"))
         help_menu.addAction(act_docs)
+        act_workflow = QAction("Workflow Map", self)
+        act_workflow.triggered.connect(self.open_workflow_map)
+        help_menu.addAction(act_workflow)
 
         mem_menu = menu_bar.addMenu("Memory")
         act_flags = QAction("Open Memory Flags", self)
@@ -524,6 +656,9 @@ class LegalAIDashboard(QMainWindow):
             else:
                 from agents import get_agent_manager
             self.agent_manager = get_agent_manager()
+            # Share manager with asyncio thread for worker access
+            if self.asyncio_thread:
+                self.asyncio_thread.agent_manager = self.agent_manager
         except Exception as e:
             logger.warning("Agent manager initialization warning: %s", e)
 
@@ -582,6 +717,50 @@ class LegalAIDashboard(QMainWindow):
                 "Error",
                 f"Failed to open NLP Model Manager: {str(e)}"
             )
+
+    def _update_tab_context_panel(self, tab_index: int) -> None:
+        """Update the read-only workflow context panel for the selected tab."""
+        if tab_index < 0:
+            self.tab_context_label.setText("")
+            return
+        tab_name = self.tab_widget.tabText(tab_index)
+        info = TAB_WORKFLOW_CONTEXT.get(tab_name)
+        if not info:
+            self.tab_context_label.setText(
+                f"Where This Fits ({tab_name}):\n"
+                "Purpose: Specialized module.\n"
+                "When to use: As needed for targeted operations.\n"
+                "Output: Module-specific results.\n"
+                "Next step: Continue the workflow in the next relevant tab."
+            )
+            return
+        self.tab_context_label.setText(
+            f"Where This Fits ({tab_name}):\n"
+            f"Purpose: {info['purpose']}\n"
+            f"When to use: {info['when']}\n"
+            f"Output: {info['output']}\n"
+            f"Next step: {info['next']}"
+        )
+
+    def open_workflow_map(self) -> None:
+        """Open a global workflow map dialog."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Workflow Map")
+        dialog.resize(820, 620)
+        layout = QVBoxLayout(dialog)
+        help_text = QTextEdit(dialog)
+        help_text.setReadOnly(True)
+        lines = ["GLOBAL WORKFLOW MAP", "=" * 80, ""]
+        for tab_name, info in TAB_WORKFLOW_CONTEXT.items():
+            lines.append(tab_name.upper())
+            lines.append(f"Purpose: {info['purpose']}")
+            lines.append(f"When: {info['when']}")
+            lines.append(f"Output: {info['output']}")
+            lines.append(f"Next: {info['next']}")
+            lines.append("")
+        help_text.setPlainText("\n".join(lines))
+        layout.addWidget(help_text)
+        dialog.exec()
 
     def _stop_tab_workers(self, timeout_ms: int = 2000) -> None:
         """Best-effort shutdown of active QThread workers held by tabs."""

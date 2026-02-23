@@ -222,6 +222,20 @@ class LegalReasoningEngine(EnhancedCoreAgent):
         self.legal_domain = legal_domain
         self.hybrid_extractor = HybridLegalExtractor(service_container)
 
+        # Initialize NLI Evidence Verifier
+        self.nli_pipeline = None
+        try:
+            from transformers import pipeline as transformers_pipeline
+            nli_ref = r"E:\Project\smart_document_organizer-main\models\nli-deberta-v3-base"
+            self.nli_pipeline = transformers_pipeline(
+                "text-classification",
+                model=nli_ref,
+                tokenizer=nli_ref,
+            )
+            reasoning_logger.info("Loaded NLI Evidence Verifier successfully")
+        except Exception as e:
+            reasoning_logger.warning(f"Could not load NLI Verifier: {e}")
+
         # Legal knowledge bases
         self.statute_database = {}  # Would be loaded from external sources
         self.case_law_database = {}  # Would be loaded from external sources
@@ -776,19 +790,56 @@ class LegalReasoningEngine(EnhancedCoreAgent):
     async def _evaluate_evidence_quality(
         self, content: str, issue: LegalIssue
     ) -> List[Dict[str, Any]]:
-        """Evaluate the quality and reliability of evidence."""
+        """Evaluate the quality and reliability of evidence using NLI verification."""
         evidence = await self._gather_evidence_for_issue(content, issue)
         if not evidence:
             return []
-        return [
-            {
+            
+        evaluated = []
+        for item in evidence:
+            snippet = item.get("content", "")
+            verification = await self._verify_evidence_with_nli(issue.description, snippet)
+            
+            evaluated.append({
                 "evidence_type": item.get("type", "unknown"),
-                "quality_score": min(1.0, max(0.0, float(item.get("relevance", 0.0)))),
-                "reliability": "medium" if item.get("relevance", 0.0) < 0.8 else "high",
+                "quality_score": verification.get("score", item.get("relevance", 0.0)),
+                "reliability": verification.get("label", "neutral"),
                 "source": item.get("source", "document_content"),
+                "verification_reasoning": f"NLI Class: {verification.get('label')} with {verification.get('score', 0):.2f} confidence"
+            })
+        return evaluated
+
+    async def _verify_evidence_with_nli(self, claim: str, premise: str) -> Dict[str, Any]:
+        """Use the DeBERTa-NLI model to verify if a premise supports a legal claim."""
+        if not hasattr(self, "nli_pipeline") or not self.nli_pipeline:
+            return {"label": "neutral", "score": 0.5}
+            
+        try:
+            # Format for NLI: Premise [SEP] Hypothesis
+            # In transformers pipeline, we can pass them as a pair
+            result = self.nli_pipeline({"text": premise, "text_pair": f"This supports the claim: {claim}"})
+            
+            # Map NLI labels (typically entailment, neutral, contradiction)
+            label = result[0]["label"].lower()
+            score = result[0]["score"]
+            
+            # Map typical model labels to AEDIS labels
+            label_map = {
+                "entailment": "supports",
+                "neutral": "neutral",
+                "contradiction": "contradicts",
+                "label_0": "contradicts", # Common for some DeBERTa models
+                "label_1": "neutral",
+                "label_2": "supports"
             }
-            for item in evidence
-        ]
+            
+            return {
+                "label": label_map.get(label, label),
+                "score": float(score)
+            }
+        except Exception as e:
+            reasoning_logger.warning(f"NLI Verification failed: {e}")
+            return {"label": "error", "score": 0.0}
 
     async def _consider_alternative_interpretations(
         self, content: str, issue: LegalIssue
@@ -883,19 +934,25 @@ class LegalReasoningEngine(EnhancedCoreAgent):
 
     async def _process_task(self, task_data: Any, metadata: Dict[str, Any]) -> Any:
         """Implementation of abstract method from BaseAgent."""
-        if isinstance(task_data, dict) and "content" in task_data:
+        content = ""
+        if isinstance(task_data, dict):
+            content = task_data.get("content") or task_data.get("text") or ""
+        elif isinstance(task_data, str):
+            content = task_data
+
+        if content:
             document_id = metadata.get("document_id", "unknown")
             analysis_type = metadata.get("analysis_type", "comprehensive")
 
             result = await self.analyze_legal_document(
-                document_content=task_data["content"],
+                document_content=content,
                 document_id=document_id,
                 analysis_type=analysis_type,
             )
 
             return result.to_dict()
 
-        raise ValueError("Invalid task data for Legal Reasoning Engine")
+        raise ValueError("Invalid or empty task data for Legal Reasoning Engine")
 
 
 # Factory function for service container integration

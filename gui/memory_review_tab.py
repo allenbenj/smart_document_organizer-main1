@@ -1,3 +1,4 @@
+import json
 import sys
 from typing import Any, Dict, List  # noqa: E402
 
@@ -10,6 +11,7 @@ if TYPE_CHECKING:
 
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (  # noqa: E402
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -58,24 +61,51 @@ class MemoryReviewTab(QWidget):
         self.table.setHorizontalHeaderLabels(
             ["ID", "Namespace", "Key", "Status", "Flags", "Confidence", "Importance"]
         )
+        self.table.itemSelectionChanged.connect(self.on_selection_changed)
         layout.addWidget(self.table)
 
+        # Detail View
+        detail_group = QGroupBox("Proposal Content Detail")
+        detail_layout = QVBoxLayout()
+        self.detail_view = QTextEdit()
+        self.detail_view.setReadOnly(True)
+        detail_layout.addWidget(self.detail_view)
+        detail_group.setLayout(detail_layout)
+        layout.addWidget(detail_group)
+
         self.setLayout(layout)
+        self.items: List[Dict[str, Any]] = []
+
+    def on_selection_changed(self):
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self.items):
+            self.detail_view.clear()
+            return
+        
+        item = self.items[row]
+        content = item.get("content", "")
+        try:
+            # Try to format JSON content nicely
+            parsed = json.loads(content)
+            formatted = json.dumps(parsed, indent=2)
+            self.detail_view.setPlainText(formatted)
+        except Exception:
+            self.detail_view.setPlainText(content)
 
     def refresh(self):
         try:
             filt = (self.filter_input.text() or "").strip().lower()
             data = api_client._make_request("GET", "/api/agents/memory/proposals", params={"limit": 50})
-            items: List[Dict[str, Any]] = data.get("proposals", [])
+            self.items = data.get("proposals", [])
             if filt:
-                items = [
+                self.items = [
                     p
-                    for p in items
+                    for p in self.items
                     if filt in ",".join(p.get("flags", [])).lower()
                     or filt in str(p.get("status", "")).lower()
                 ]
-            self.table.setRowCount(len(items))
-            for i, p in enumerate(items):
+            self.table.setRowCount(len(self.items))
+            for i, p in enumerate(self.items):
                 self.table.setItem(i, 0, QTableWidgetItem(str(p.get("id"))))
                 self.table.setItem(i, 1, QTableWidgetItem(p.get("namespace", "")))
                 self.table.setItem(i, 2, QTableWidgetItem(p.get("key", "")))

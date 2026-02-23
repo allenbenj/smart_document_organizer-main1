@@ -191,6 +191,8 @@ class DocumentPreviewWidget(QWidget):  # type: ignore[misc]
             file_path: Path to the document file
             metadata: Optional metadata dict to display
         """
+        self.clear() # Close existing handles
+        
         if not os.path.exists(file_path):
             self.preview_error.emit(f"File not found: {file_path}")
             self.status_label.setText(f"❌ Error: File not found")
@@ -499,3 +501,11 @@ class DocumentPreviewWidget(QWidget):  # type: ignore[misc]
         
         self.nav_widget.setVisible(False)
         self.zoom_widget.setVisible(False)
+
+    def __del__(self):
+        """Ensure resources are released."""
+        if hasattr(self, 'pdf_document') and self.pdf_document:
+            try:
+                self.pdf_document.close()
+            except Exception:
+                pass

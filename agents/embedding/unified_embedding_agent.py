@@ -80,7 +80,11 @@ class EmbeddingModel(Enum):
 
     LEGAL_BERT = "nlpaueb/legal-bert-base-uncased"
     SENTENCE_TRANSFORMER = "all-MiniLM-L6-v2"
+    MINILM_L6 = "all-MiniLM-L6-v2"
     LEGAL_SENTENCE_TRANSFORMER = "law-ai/InLegalBERT"
+    NOMIC_EMBED = "nomic-ai/nomic-embed-text-v1.5"
+    BGE_RERANKER = "BAAI/bge-reranker-v2-m3"
+    JINA_EMBED = "jinaai/jina-embeddings-v2-base-en"
     OPENAI_ADA = "text-embedding-ada-002"
     OPENAI_3_SMALL = "text-embedding-3-small"
     OPENAI_3_LARGE = "text-embedding-3-large"
@@ -224,35 +228,49 @@ class UnifiedEmbeddingAgent(BaseAgent):
             return False
 
     async def _init_embedding_models(self):
-        """Initialize embedding models based on configuration."""
+        """Initialize embedding models based on configuration, preferring local weights."""
         model_name = self.config.model.value
+        
+        # Local model resolution helper
+        def _get_local_path(preferred_name: str) -> str:
+            # Map common names to folder names
+            folder_map = {
+                "all-MiniLM-L6-v2": "all-minilm-L6-v2",
+                "nomic-ai/nomic-embed-text-v1.5": "nomic-embed-text",
+                "BAAI/bge-reranker-v2-m3": "bge-reranker-v2-m3",
+                "jinaai/jina-embeddings-v2-base-en": "jina_embeddings"
+            }
+            folder_name = folder_map.get(preferred_name, preferred_name.split("/")[-1])
+            local_path = Path("models") / folder_name
+            if local_path.exists():
+                return str(local_path.absolute())
+            return preferred_name
 
         if self.config.model in [
             EmbeddingModel.LEGAL_BERT,
             EmbeddingModel.LEGAL_SENTENCE_TRANSFORMER,
+            EmbeddingModel.MINILM_L6,
+            EmbeddingModel.SENTENCE_TRANSFORMER,
+            EmbeddingModel.NOMIC_EMBED,
+            EmbeddingModel.JINA_EMBED,
+            EmbeddingModel.BGE_RERANKER
         ]:
+            model_path = _get_local_path(model_name)
             if SENTENCE_TRANSFORMERS_AVAILABLE:
-                self._embedding_models[model_name] = SentenceTransformer(model_name)
-                self.logger.info(f"Loaded Sentence Transformer model: {model_name}")
-            elif TRANSFORMERS_AVAILABLE:
-                self._embedding_models[f"{model_name}_tokenizer"] = (
-                    AutoTokenizer.from_pretrained(model_name)
-                )
-                self._embedding_models[f"{model_name}_model"] = (
-                    AutoModel.from_pretrained(model_name)
-                )
-                self.logger.info(f"Loaded Transformers model: {model_name}")
-            else:
-                raise RuntimeError(
-                    f"Neither sentence-transformers nor transformers available for {model_name}"
-                )
-
-        elif self.config.model == EmbeddingModel.SENTENCE_TRANSFORMER:
-            if SENTENCE_TRANSFORMERS_AVAILABLE:
-                self._embedding_models[model_name] = SentenceTransformer(model_name)
-                self.logger.info(f"Loaded Sentence Transformer model: {model_name}")
-            else:
-                raise RuntimeError("sentence-transformers not available")
+                try:
+                    self._embedding_models[model_name] = SentenceTransformer(model_path)
+                    self.logger.info(f"Loaded model from: {model_path}")
+                except Exception as e:
+                    self.logger.warning(f"Failed to load {model_name} via sentence-transformers: {e}")
+                    # Fallback to manual transformers if needed
+            
+            if model_name not in self._embedding_models and TRANSFORMERS_AVAILABLE:
+                try:
+                    self._embedding_models[f"{model_name}_tokenizer"] = AutoTokenizer.from_pretrained(model_path)
+                    self._embedding_models[f"{model_name}_model"] = AutoModel.from_pretrained(model_path, trust_remote_code=True)
+                    self.logger.info(f"Loaded manual transformers model from: {model_path}")
+                except Exception as e:
+                    raise RuntimeError(f"Failed to load model {model_name}: {e}")
 
         elif self.config.model in [
             EmbeddingModel.OPENAI_ADA,

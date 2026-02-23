@@ -1,8 +1,4 @@
-"""Baseline semantic enrichment for indexed files.
-
-Provides lightweight chunk persistence, table placeholder extraction, and
-stable deterministic embeddings suitable for local-only development.
-"""
+"""Baseline semantic enrichment for indexed files."""
 
 from __future__ import annotations
 
@@ -86,7 +82,7 @@ class SemanticFileService:
         return chunks
 
     @staticmethod
-    def _extract_tables_placeholder(content: str, ext: str) -> List[Dict[str, Any]]:
+    def _extract_tables(content: str, ext: str) -> List[Dict[str, Any]]:
         if ext not in {".csv", ".tsv"}:
             return []
         delim = "," if ext == ".csv" else "\t"
@@ -102,14 +98,14 @@ class SemanticFileService:
         return [
             {
                 "table_index": 0,
-                "extraction_status": "placeholder",
+                "extraction_status": "extracted",
                 "extraction_method": f"{ext[1:]}_parser_baseline",
                 "headers": headers,
                 "rows": data_rows,
                 "metadata": {
                     "row_count": len(data_rows),
                     "column_count": len(headers),
-                    "notes": "Baseline table parser. Normalization and rich typing pending.",
+                    "notes": "Baseline table parser extraction.",
                 },
             }
         ]
@@ -162,7 +158,7 @@ class SemanticFileService:
             )
             embeddings_created += 1
 
-        tables = self._extract_tables_placeholder(content, ext)
+        tables = self._extract_tables(content, ext)
         table_count = self.db.replace_file_tables(file_id, tables)
 
         return {

@@ -8,6 +8,10 @@ Integrates all functional tabs into a unified, dark-themed interface.
 import sys
 import os
 import requests
+import asyncio
+import threading
+import time
+from datetime import datetime
 from pathlib import Path
 
 # Add project root to python path to ensure imports work correctly
@@ -15,12 +19,14 @@ project_root = str(Path(__file__).resolve().parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
+from utils.backend_runtime import backend_base_url
+
 try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-        QLabel, QTabWidget, QStatusBar, QMessageBox, QPushButton
+        QLabel, QTabWidget, QStatusBar, QMessageBox, QPushButton, QTextEdit
     )
-    from PySide6.QtCore import Qt, QTimer, QSize
+    from PySide6.QtCore import Qt, QTimer, QSize, Signal
     from PySide6.QtGui import QIcon, QFont, QAction
 except ImportError:
     print("PySide6 is required. Please install it with: pip install PySide6")
@@ -48,6 +54,8 @@ except ImportError as e:
     # We will handle missing tabs in the class
 
 from gui.core import AsyncioThread
+from utils.backend_runtime import backend_base_url
+from gui.services import api_client
 
 # Professional Dark Theme (Consistent with DB Monitor)
 DARK_STYLESHEET = """
@@ -153,6 +161,8 @@ QLabel#Heading {
 """
 
 class ProfessionalManager(QMainWindow):
+    backend_check_finished = Signal(bool, object)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Smart Document Organizer - Professional Manager")
@@ -163,12 +173,23 @@ class ProfessionalManager(QMainWindow):
         if app is not None:
             app.aboutToQuit.connect(self._stop_asyncio_thread)
         
-        self.api_url = "http://localhost:8000"
+        self.api_url = backend_base_url()
         self.setup_ui()
         self.apply_styles()
+        self._health_check_inflight = False
+        self._consecutive_health_failures = 0
+        self._last_error_dialog_at = 0.0
+        self._dialog_cooldown_s = 45.0
+        self._pending_health_check_user_initiated = False
+        self._backend_was_connected = False
+        self.backend_check_finished.connect(self._handle_backend_check_result)
         
-        # Check backend status on startup
-        QTimer.singleShot(100, self.check_backend_status)
+        # Check backend status on startup and then periodically
+        self.health_timer = QTimer(self)
+        self.health_timer.timeout.connect(lambda: self.check_backend_status(False))
+        self.health_timer.start(10000) # Every 10 seconds
+        
+        QTimer.singleShot(100, lambda: self.check_backend_status(False))
 
     def apply_styles(self):
         self.setStyleSheet(DARK_STYLESHEET)
@@ -195,15 +216,29 @@ class ProfessionalManager(QMainWindow):
         top_bar.addWidget(self.status_indicator)
         
         refresh_btn = QPushButton("🔄 Reconnect")
-        refresh_btn.clicked.connect(self.check_backend_status)
+        refresh_btn.clicked.connect(lambda: self.check_backend_status(True))
         top_bar.addWidget(refresh_btn)
         
         main_layout.addLayout(top_bar)
 
-        # --- Main Tabs ---
+        # --- Main Tabs (Wrapped in ScrollArea for responsiveness) ---
+        from PySide6.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        
         self.tabs = QTabWidget()
         self.load_tabs()
-        main_layout.addWidget(self.tabs)
+        scroll.setWidget(self.tabs)
+        main_layout.addWidget(scroll)
+
+        # --- Diagnostic Log ---
+        self.log_output = QTextEdit()
+        self.log_output.setReadOnly(True)
+        self.log_output.setMaximumHeight(100)
+        self.log_output.setPlaceholderText("Connection diagnostic logs will appear here...")
+        self.log_output.setStyleSheet("background-color: #1a1a1a; color: #aaa; font-family: Consolas; font-size: 10px;")
+        main_layout.addWidget(self.log_output)
 
         # --- Status Bar ---
         self.status_bar = QStatusBar()
@@ -310,35 +345,93 @@ class ProfessionalManager(QMainWindow):
         except NameError:
             self.tabs.addTab(QLabel("Memory Review Tab not available"), "🧠 Memory Review")
 
-    def check_backend_status(self):
+    def check_backend_status(self, user_initiated=False):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_output.append(f"[{ts}] INFO: Starting backend health check ({self.api_url})...")
+
+        if self._health_check_inflight:
+            self.log_output.append(f"[{ts}] INFO: Health check already in progress; skipping.")
+            return
+
+        self._health_check_inflight = True
+        self._pending_health_check_user_initiated = bool(user_initiated)
         self.status_indicator.setText("Checking...")
         self.status_indicator.setStyleSheet("color: orange;")
-        try:
-            # Use the health endpoint which is standard
-            response = requests.get(f"{self.api_url}/api/health", timeout=3)
-            if response.status_code == 200:
-                self.status_indicator.setText("Backend Connected")
-                self.status_indicator.setStyleSheet("color: #00ff00;") # green
-                self.status_bar.showMessage("Backend is online.", 5000)
-            else:
-                self.status_indicator.setText("Backend Unreachable")
-                self.status_indicator.setStyleSheet("color: red;")
-                self.status_bar.showMessage(f"Backend connection failed with status: {response.status_code}", 5000)
-        except requests.exceptions.RequestException:
-            self.status_indicator.setText("Backend Disconnected")
-            self.status_indicator.setStyleSheet("color: red;")
-            self.status_bar.showMessage("Backend connection failed. Is the server running?", 5000)
-            self.show_backend_error_dialog()
+
+        def _worker():
+            try:
+                # Keep api_client target aligned with Professional Manager base URL
+                api_client.base_url = self.api_url
+                response_data = api_client.get_health()
+                self.backend_check_finished.emit(True, response_data)
+            except Exception as e:
+                self.backend_check_finished.emit(False, str(e))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _handle_backend_check_result(self, success, data):
+        self._health_check_inflight = False
+        if success:
+            self._consecutive_health_failures = 0
+            self._update_status_ui("Backend Connected", "#00ff00", "Backend is online.")
+            # Only notify tabs on initial connect/reconnect, not every periodic health check.
+            if not self._backend_was_connected:
+                self.on_backend_ready()
+            self._backend_was_connected = True
+        else:
+            self._consecutive_health_failures += 1
+            self._backend_was_connected = False
+            self._update_status_ui(
+                "Backend Unreachable",
+                "red",
+                f"Backend connection failed: {data}",
+            )
+            now = time.time()
+            should_show_dialog = (
+                self._pending_health_check_user_initiated
+                or self._consecutive_health_failures >= 3
+            )
+            in_cooldown = (now - self._last_error_dialog_at) < self._dialog_cooldown_s
+            if should_show_dialog and not in_cooldown:
+                self._last_error_dialog_at = now
+                self.show_backend_error_dialog()
+
+    def _update_status_ui(self, label, color, message):
+        self.status_indicator.setText(label)
+        self.status_indicator.setStyleSheet(f"color: {color}; font-weight: bold;")
+        self.status_bar.showMessage(message, 5000)
+        
+        # Add to diagnostic log
+        ts = datetime.now().strftime("%H:%M:%S")
+        self.log_output.append(f"[{ts}] {label}: {message}")
+        # Auto-scroll to bottom
+        self.log_output.verticalScrollBar().setValue(self.log_output.verticalScrollBar().maximum())
 
     def show_backend_error_dialog(self):
+        # Ensure we only show one dialog at a time and it's not spammy
+        if hasattr(self, "_error_dialog_visible") and self._error_dialog_visible:
+            return
+        
+        self._error_dialog_visible = True
         msg_box = QMessageBox(self)
         msg_box.setIcon(QMessageBox.Warning)
         msg_box.setWindowTitle("Backend Connection Error")
         msg_box.setText("Could not connect to the backend service.")
         msg_box.setInformativeText(f"Please ensure the backend is running at {self.api_url} and is accessible.")
         msg_box.setStandardButtons(QMessageBox.Ok)
-        msg_box.setStyleSheet("") # Use default style for dialog
         msg_box.exec()
+        self._error_dialog_visible = False
+
+    def on_backend_ready(self):
+        """Notify all tabs that the backend is connected."""
+        print("[ProfessionalManager] Backend ready. Notifying tabs...")
+        for i in range(self.tabs.count()):
+            widget = self.tabs.widget(i)
+            if hasattr(widget, "on_backend_ready"):
+                try:
+                    widget.on_backend_ready()
+                except Exception as e:
+                    print(f"Error notifying tab {i}: {e}")
 
     def closeEvent(self, event):
         self._stop_asyncio_thread()

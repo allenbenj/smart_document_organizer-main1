@@ -18,6 +18,15 @@ class LLMProviderEnum(str, Enum):
     XAI = "xai"
     DEEPSEEK = "deepseek"
 
+    @classmethod
+    def _missing_(cls, value: object) -> "LLMProviderEnum | None":
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            for member in cls:
+                if member.value == normalized:
+                    return member
+        return None
+
 
 class LLMCompletion(str):
     """String response that also supports `.content` access for compatibility."""
@@ -302,4 +311,3 @@ class LLMManager:
                 if c.get("type") == "output_text" and c.get("text"):
                     chunks.append(c["text"])
         return "\n".join(chunks).strip()
-

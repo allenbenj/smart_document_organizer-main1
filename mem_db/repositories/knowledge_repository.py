@@ -7,6 +7,25 @@ from .base import BaseRepository
 
 
 class KnowledgeRepository(BaseRepository):
+    @staticmethod
+    def _decode_knowledge_item(item: Dict[str, Any]) -> Dict[str, Any]:
+        for key, fallback in (
+            ("components_json", {}),
+            ("legal_use_cases_json", []),
+            ("root_cause_json", []),
+            ("related_frameworks_json", []),
+            ("aliases_json", []),
+            ("attributes_json", {}),
+            ("relations_json", []),
+            ("sources_json", []),
+        ):
+            try:
+                item[key] = json.loads(item.get(key) or json.dumps(fallback))
+            except Exception:
+                item[key] = fallback
+        item["verified"] = bool(item.get("verified"))
+        return item
+
     def add_proposal(
         self,
         *,
@@ -206,15 +225,81 @@ class KnowledgeRepository(BaseRepository):
             ).fetchall()
             out: List[Dict[str, Any]] = []
             for r in rows:
-                item = dict(r)
-                for key, fallback in (("components_json", {}), ("legal_use_cases_json", []), ("root_cause_json", []), ("related_frameworks_json", []), ("aliases_json", []), ("attributes_json", {}), ("relations_json", []), ("sources_json", [])):
-                    try:
-                        item[key] = json.loads(item.get(key) or json.dumps(fallback))
-                    except Exception:
-                        item[key] = fallback
-                item["verified"] = bool(item.get("verified"))
-                out.append(item)
+                out.append(self._decode_knowledge_item(dict(r)))
             return out
+
+    def get_item(self, knowledge_id: int) -> Optional[Dict[str, Any]]:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM manager_knowledge WHERE id = ?",
+                (int(knowledge_id),),
+            ).fetchone()
+        if not row:
+            return None
+        return self._decode_knowledge_item(dict(row))
+
+    def update_item(
+        self,
+        knowledge_id: int,
+        *,
+        canonical_value: Optional[str] = None,
+        ontology_entity_id: Optional[str] = None,
+        confidence: Optional[float] = None,
+        status: Optional[str] = None,
+        verified: Optional[bool] = None,
+        verified_by: Optional[str] = None,
+        user_notes: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        updates: list[str] = []
+        params: list[Any] = []
+        if canonical_value is not None:
+            updates.append("canonical_value = ?")
+            params.append(canonical_value)
+        if ontology_entity_id is not None:
+            updates.append("ontology_entity_id = ?")
+            params.append(ontology_entity_id)
+        if confidence is not None:
+            updates.append("confidence = ?")
+            params.append(float(confidence))
+        if status is not None:
+            updates.append("status = ?")
+            params.append(status)
+        if verified is not None:
+            updates.append("verified = ?")
+            params.append(1 if verified else 0)
+        if verified_by is not None:
+            updates.append("verified_by = ?")
+            params.append(verified_by)
+        if user_notes is not None:
+            updates.append("user_notes = ?")
+            params.append(user_notes)
+        if notes is not None:
+            updates.append("notes = ?")
+            params.append(notes)
+        if not updates:
+            return False
+
+        with self.connection() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE manager_knowledge
+                SET {", ".join(updates)}, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                [*params, int(knowledge_id)],
+            )
+            conn.commit()
+            return (cur.rowcount or 0) > 0
+
+    def delete_item(self, knowledge_id: int) -> bool:
+        with self.connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM manager_knowledge WHERE id = ?",
+                (int(knowledge_id),),
+            )
+            conn.commit()
+            return (cur.rowcount or 0) > 0
 
     def set_ontology_link(self, knowledge_id: int, ontology_entity_id: str) -> bool:
         with self.connection() as conn:

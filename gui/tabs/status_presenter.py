@@ -53,6 +53,12 @@ class TabStatusPresenter:
         if modal and hasattr(QMessageBox, "warning"):
             QMessageBox.warning(self.parent, title, message)
 
+    def warning(
+        self, message: str, *, title: str = "Warning", modal: bool = False
+    ) -> None:
+        """Compatibility alias for tabs calling .warning(...)."""
+        self.warn(message, title=title, modal=modal)
+
     def _set(self, message: str, color: str) -> None:
         if not self.label:
             return

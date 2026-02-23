@@ -1,0 +1,12 @@
+{
+  "folder": {
+    "replace_underscore_with_dash": true,
+    "number_all_segments": true,
+    "number_start_at": 1,
+    "number_width": 2,
+    "number_separator": "-"
+  },
+  "filename": {
+    "replace_underscore_with_dash": true
+  }
+}

@@ -101,6 +101,9 @@ class AgentService:
                 file_path = payload.get("file_path")
                 if not file_path:
                     raise ValueError("file_path required for process_document")
+                options = payload.get("options") or {}
+                if not isinstance(options, dict):
+                    options = {}
 
                 normalized_path = _normalize_path_for_runtime(file_path)
                 exists = Path(normalized_path).exists()
@@ -119,13 +122,28 @@ class AgentService:
                     raise ValueError(
                         "Document processing not supported by this agent manager"
                     )
-                return await self.agent_manager.process_document(normalized_path)
+                result = await self.agent_manager.process_document(
+                    normalized_path, **options
+                )
+                if self._should_retry_document_processor(result):
+                    logger.warning(
+                        "Document processor unavailable, reinitializing manager and retrying once"
+                    )
+                    if hasattr(self.agent_manager, "initialize"):
+                        await self.agent_manager.initialize()
+                    result = await self.agent_manager.process_document(
+                        normalized_path, **options
+                    )
+                return result
 
             elif task_type == "extract_entities":
                 text = payload.get("text")
                 if not text:
                     raise ValueError("text required for extract_entities")
-                return await self.agent_manager.extract_entities(text)
+                options = payload.get("options") or {}
+                if not isinstance(options, dict):
+                    options = {}
+                return await self.agent_manager.extract_entities(text, **options)
 
             elif task_type == "analyze_legal":
                 text = payload.get("text")
@@ -238,6 +256,22 @@ class AgentService:
             logger.error(f"Task dispatch failed for {task_type}: {e}")
             # unify return structure?
             return {"success": False, "error": str(e), "task_type": task_type}
+
+    @staticmethod
+    def _should_retry_document_processor(result: Any) -> bool:
+        """Return True when process_document should be retried once."""
+        if result is None:
+            return True
+        if isinstance(result, dict):
+            if result.get("success", True):
+                return False
+            error = str(result.get("error", "")).lower()
+            return "document processor not available" in error
+        success = bool(getattr(result, "success", False))
+        if success:
+            return False
+        error = str(getattr(result, "error", "")).lower()
+        return "document processor not available" in error
 
     async def get_agent_status(self) -> Dict[str, Any]:
         """

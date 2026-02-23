@@ -6,6 +6,7 @@ using the legal AI agents.
 """
 
 import json
+from html import escape
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -67,212 +68,144 @@ class LegalReasoningTab(QWidget):
         layout = QVBoxLayout(self)
 
         # Title
-        title = QLabel("Legal Reasoning")
+        title = QLabel("Legal Reasoning & Analysis")
         title.setFont(QFont("Arial", 14, QFont.Bold))
         layout.addWidget(title)
 
         # Main splitter
-        splitter = QSplitter(Qt.Horizontal)
-        layout.addWidget(splitter)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        layout.addWidget(self.main_splitter)
 
         # Left panel - Input
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
 
-        # File/Folder Selection
-        file_group = QGroupBox("File Input")
+        # File Selection
+        file_group = QGroupBox("Target Document")
         file_layout = QVBoxLayout(file_group)
         
         file_row = QHBoxLayout()
-        file_row.addWidget(QLabel("File:"))
         self.file_path = QLineEdit()
-        self.file_path.setPlaceholderText("Select a file...")
+        self.file_path.setPlaceholderText("Select file...")
         file_row.addWidget(self.file_path)
-        self.browse_file_btn = QPushButton("Browse File")
+        self.browse_file_btn = QPushButton("...")
+        self.browse_file_btn.setMaximumWidth(40)
         self.browse_file_btn.clicked.connect(self.browse_file)
         file_row.addWidget(self.browse_file_btn)
         file_layout.addLayout(file_row)
-        
-        folder_row = QHBoxLayout()
-        folder_row.addWidget(QLabel("Folder:"))
-        self.folder_path = QLineEdit()
-        self.folder_path.setPlaceholderText("Or select a folder...")
-        folder_row.addWidget(self.folder_path)
-        self.browse_folder_btn = QPushButton("Browse Folder")
-        self.browse_folder_btn.clicked.connect(self.browse_folder)
-        folder_row.addWidget(self.browse_folder_btn)
-        file_layout.addLayout(folder_row)
-        
         left_layout.addWidget(file_group)
 
         # Input group
-        input_group = QGroupBox("Or Enter Legal Query Directly")
+        input_group = QGroupBox("Query Context")
         input_layout = QVBoxLayout(input_group)
-
         self.input_text = QTextEdit()
-        self.input_text.setPlaceholderText("Enter legal question or scenario to analyze...")
-        self.input_text.setMaximumHeight(120)
+        self.input_text.setPlaceholderText("Enter legal scenario...")
+        self.input_text.setMinimumHeight(200)
         input_layout.addWidget(self.input_text)
-
-        # Reasoning options
-        options_layout = QVBoxLayout()
-
-        # Reasoning type
-        type_layout = QHBoxLayout()
-        type_layout.addWidget(QLabel("Reasoning Type:"))
-
-        self.reasoning_type_combo = QComboBox()
-        self.reasoning_type_combo.addItems([
-            "General Analysis",
-            "Case Law Analysis",
-            "Statutory Interpretation",
-            "Contract Analysis",
-            "Precedent Analysis",
-            "Legal Risk Assessment"
-        ])
-        type_layout.addWidget(self.reasoning_type_combo)
-        type_layout.addStretch()
-        options_layout.addLayout(type_layout)
-
-        # Options checkboxes
-        self.include_precedents = QCheckBox("Include Precedents")
-        self.include_precedents.setChecked(True)
-        options_layout.addWidget(self.include_precedents)
-
-        self.include_statutes = QCheckBox("Include Statutes")
-        self.include_statutes.setChecked(True)
-        options_layout.addWidget(self.include_statutes)
-
-        self.deep_analysis = QCheckBox("Deep Analysis")
-        options_layout.addWidget(self.deep_analysis)
-
-        input_layout.addLayout(options_layout)
         left_layout.addWidget(input_group)
 
-        # Control buttons
-        button_layout = QHBoxLayout()
+        # Options
+        options_group = QGroupBox("Analysis Mode")
+        options_layout = QVBoxLayout(options_group)
+        self.reasoning_type_combo = QComboBox()
+        self.reasoning_type_combo.addItems([
+            "General Analysis", 
+            "Case Law Analysis", 
+            "Statutory Interpretation", 
+            "Contract Analysis", 
+            "Precedent Analysis", 
+            "Legal Risk Assessment"
+        ])
+        options_layout.addWidget(self.reasoning_type_combo)
+        
+        self.deep_analysis = QCheckBox("Deep Analysis")
+        options_layout.addWidget(self.deep_analysis)
+        left_layout.addWidget(options_group)
 
-        self.analyze_button = QPushButton("Analyze")
+        self.analyze_button = QPushButton("⚡ RUN ANALYSIS")
         self.analyze_button.setStyleSheet("""
             QPushButton {
-                background-color: #2196F3;
-                color: white;
-                padding: 8px 16px;
-                border: none;
+                background-color: #0e639c; 
+                color: white; 
+                font-weight: bold; 
+                padding: 12px;
                 border-radius: 4px;
-                font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #1976D2;
-            }
-            QPushButton:pressed {
-                background-color: #1565C0;
+                background-color: #1177bb;
             }
         """)
-        button_layout.addWidget(self.analyze_button)
-
-        self.clear_button = QPushButton("Clear")
-        button_layout.addWidget(self.clear_button)
-
-        button_layout.addStretch()
-        left_layout.addLayout(button_layout)
-
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        left_layout.addWidget(self.progress_bar)
-
-        self.status_label = QLabel("Ready")
-        left_layout.addWidget(self.status_label)
-        self.status = TabStatusPresenter(self, self.status_label, source="Legal Reasoning")
-        self.job_status = JobStatusWidget("Legal Reasoning Job")
-        left_layout.addWidget(self.job_status)
-
-        self.results_summary = ResultsSummaryBox()
-        left_layout.addWidget(self.results_summary)
-
-        splitter.addWidget(left_widget)
+        left_layout.addWidget(self.analyze_button)
+        
+        left_layout.addStretch()
+        
+        # Wrap left widget in a scroll area for small windows
+        from PySide6.QtWidgets import QScrollArea
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setWidget(left_widget)
+        left_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.main_splitter.addWidget(left_scroll)
 
         # Right panel - Results
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
-
-        # Results group
-        results_group = QGroupBox("Legal Analysis Results")
-        results_layout = QVBoxLayout(results_group)
-
+        
         self.results_browser = QTextBrowser()
         self.results_browser.setOpenExternalLinks(True)
-        results_layout.addWidget(self.results_browser)
+        right_layout.addWidget(self.results_browser)
+        
+        # Status & Summary area
+        self.status_label = QLabel("Ready")
+        right_layout.addWidget(self.status_label)
+        self.status = TabStatusPresenter(self, self.status_label, source="Legal Reasoning")
+        
+        self.job_status = JobStatusWidget("Legal Reasoning Job")
+        right_layout.addWidget(self.job_status)
 
-        right_layout.addWidget(results_group)
+        self.results_summary = ResultsSummaryBox()
+        right_layout.addWidget(self.results_summary)
 
-        # Export buttons
-        export_layout = QHBoxLayout()
-
-        self.export_json_button = QPushButton("Export JSON")
-        self.export_json_button.setEnabled(False)
-        export_layout.addWidget(self.export_json_button)
-
-        self.export_html_button = QPushButton("Export HTML")
-        self.export_html_button.setEnabled(False)
-        export_layout.addWidget(self.export_html_button)
-
-        export_layout.addStretch()
-        right_layout.addLayout(export_layout)
-
-        splitter.addWidget(right_widget)
-
-        # Set splitter proportions
-        splitter.setSizes([400, 400])
+        self.main_splitter.addWidget(right_widget)
+        
+        # Proportions: 35% left, 65% right
+        self.main_splitter.setSizes([450, 850])
 
     def connect_signals(self):
         """Connect UI signals to handlers."""
         self.analyze_button.clicked.connect(self.start_reasoning)
-        self.clear_button.clicked.connect(self.clear_results)
-        self.export_json_button.clicked.connect(self.export_json)
-        self.export_html_button.clicked.connect(self.export_html)
+        self.file_path.textChanged.connect(self.clear_results_on_input)
+        self.input_text.textChanged.connect(self.clear_results_on_input)
+
+    def clear_results_on_input(self):
+        """Partially clear results when input changes to avoid confusion."""
+        if self.current_results:
+            self.status.info("Input changed - ready for new analysis")
 
     def browse_file(self):
         """Browse for a single file."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Document",
-            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
-            "All Files (*);;Text Files (*.txt);;PDF Files (*.pdf);;Word Files (*.docx);;Markdown (*.md)",
+            get_default_dialog_dir(self.file_path.text()),
+            "Legal Documents (*.pdf *.docx *.txt *.md);;All Files (*)",
         )
         if file_path:
             self.file_path.setText(file_path)
-            self.folder_path.clear()
-            self.input_text.clear()
-
-    def browse_folder(self):
-        """Browse for a folder."""
-        folder_path = QFileDialog.getExistingDirectory(
-            self,
-            "Select Folder",
-            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
-        )
-        if folder_path:
-            self.folder_path.setText(folder_path)
-            self.file_path.clear()
             self.input_text.clear()
 
     def start_reasoning(self):
         """Start legal reasoning process."""
         text = self.input_text.toPlainText().strip()
         file_path = self.file_path.text().strip()
-        folder_path = self.folder_path.text().strip()
         
-        if not text and not file_path and not folder_path:
-            self.status.warn("Please enter text, select a file, or select a folder.")
+        if not text and not file_path:
+            self.status.warn("Please enter text or select a file.")
             return
 
         # Get reasoning options
         options = {
             "reasoning_type": self.reasoning_type_combo.currentText(),
-            "include_precedents": self.include_precedents.isChecked(),
-            "include_statutes": self.include_statutes.isChecked(),
             "deep_analysis": self.deep_analysis.isChecked(),
         }
 
@@ -281,14 +214,13 @@ class LegalReasoningTab(QWidget):
             return
 
         # Show progress
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # Indeterminate progress
         self.analyze_button.setEnabled(False)
-        self.analyze_button.setText("Analyzing...")
+        self.analyze_button.setText("ANALYZING...")
 
         # Start worker thread
-        self.job_status.set_status("running", "Analysis in progress")
+        self.job_status.set_status("running", "Running legal analysis engine...")
         self.status.loading("Running legal analysis...")
+        
         self.worker = LegalReasoningWorker(
             asyncio_thread=None,
             file_path=file_path,
@@ -309,26 +241,22 @@ class LegalReasoningTab(QWidget):
         self.job_status.set_status("success", "Completed")
         self.results_summary.set_summary(
             "Legal reasoning completed successfully",
-            "Displayed in Legal Analysis Results (export JSON/HTML optional)",
+            "Review findings in the results browser.",
             "Run Console",
         )
         self.status.success("Legal reasoning complete")
-
-        # Emit signal
         self.reasoning_completed.emit(results)
 
     def on_reasoning_error(self, error_msg):
         """Handle reasoning error."""
         self.job_status.set_status("failed", "Analysis failed")
         self.results_summary.set_summary(
-            f"Legal reasoning failed: {error_msg}",
+            f"Error: {error_msg}",
             "No output generated",
             "Run Console",
         )
-        self.status.error(f"Failed to perform legal analysis: {error_msg}")
+        self.status.error(f"Analysis failed: {error_msg}")
         self.cleanup_worker()
-
-        # Emit signal
         self.reasoning_error.emit(error_msg)
 
     def cleanup_worker(self):
@@ -336,115 +264,92 @@ class LegalReasoningTab(QWidget):
         if self.worker:
             self.worker.deleteLater()
             self.worker = None
-
-        self.progress_bar.setVisible(False)
         self.analyze_button.setEnabled(True)
-        self.analyze_button.setText("Analyze")
+        self.analyze_button.setText("⚡ RUN ANALYSIS")
 
     def display_results(self, results):
         """Display reasoning results."""
-        # Format results as HTML for better display
         html_content = self.format_results_html(results)
         self.results_browser.setHtml(html_content)
 
-        # Enable export buttons
-        self.export_json_button.setEnabled(True)
-        self.export_html_button.setEnabled(True)
-
     def format_results_html(self, results):  # noqa: C901
-        """Format results as HTML for display."""
-        html = ["<html><body>"]
+        """Format results as HTML for display with a professional dark theme."""
+        def _safe(value):
+            return escape(str(value if value is not None else ""))
 
+        html = ["""
+        <html>
+        <head>
+            <style>
+                body { font-family: 'Segoe UI', Arial, sans-serif; background-color: #1e1e1e; color: #e0e0e0; line-height: 1.6; padding: 20px; }
+                h2 { color: #4dabf7; border-bottom: 2px solid #3e3e3e; padding-bottom: 8px; margin-top: 30px; }
+                h3 { color: #91a7ff; margin-top: 20px; }
+                .conclusion { background-color: #252526; border-left: 4px solid #4CAF50; padding: 15px; border-radius: 4px; margin: 10px 0; font-size: 1.1em; }
+                .reasoning { background-color: #2d2d2d; padding: 15px; border-radius: 4px; border: 1px solid #3e3e3e; white-space: pre-wrap; font-family: 'Consolas', monospace; }
+                .metadata { color: #888; font-size: 0.9em; margin-bottom: 20px; }
+                ul { padding-left: 20px; }
+                li { margin-bottom: 8px; }
+                .risk-item { color: #ff8787; }
+                .rec-item { color: #63e6be; }
+            </style>
+        </head>
+        <body>
+        """]
+
+        # Handle different result structures (from direct result or nested data)
+        data = results.get("data") if isinstance(results.get("data"), dict) else results
+        
         # Analysis summary
-        if "analysis" in results:
-            analysis = results["analysis"]
-            html.append("<h2>Legal Analysis</h2>")
-            html.append(f"<p><strong>Conclusion:</strong> {analysis.get('conclusion', 'N/A')}</p>")
+        html.append("<h2>⚖️ Legal Analysis Results</h2>")
+        
+        conclusion = data.get("conclusion") or data.get("summary") or "No conclusion provided."
+        html.append("<h3>Final Conclusion</h3>")
+        html.append(f"<div class='conclusion'>{_safe(conclusion)}</div>")
 
-            if "confidence" in analysis:
-                html.append(f"<p><strong>Confidence:</strong> {analysis['confidence']:.2f}</p>")
+        reasoning = data.get("reasoning") or data.get("analysis") or "No detailed reasoning available."
+        html.append("<h3>Detailed Reasoning</h3>")
+        html.append(f"<div class='reasoning'>{_safe(reasoning)}</div>")
 
-            if "reasoning" in analysis:
-                html.append("<h3>Reasoning</h3>")
-                html.append(f"<p>{analysis['reasoning']}</p>")
+        # Supporting evidence (with NLI verification)
+        evidence = data.get("legal_issues", [])
+        if not evidence:
+            evidence = data.get("evidence", [])
+            
+        if evidence:
+            html.append("<h2>📚 Verified Evidence & Issues</h2>")
+            for issue in evidence:
+                desc = issue.get("description") or str(issue)
+                confidence = issue.get("confidence", 0.0)
+                entities = issue.get("entities_involved", [])
+                
+                html.append(f"<h3>Issue: {_safe(desc)}</h3>")
+                html.append(f"<div class='metadata'>Base Confidence: {confidence:.2f}</div>")
+                
+                if entities:
+                    html.append("<p><b>Parties Involved:</b> " + ", ".join([e.get("text") for e in entities if "text" in e]) + "</p>")
 
-        # Supporting evidence
-        if "evidence" in results:
-            evidence = results["evidence"]
-            html.append("<h2>Supporting Evidence</h2>")
-
-            if "precedents" in evidence and evidence["precedents"]:
-                html.append("<h3>Relevant Precedents</h3><ul>")
-                for precedent in evidence["precedents"]:
-                    html.append(f"<li>{precedent}</li>")
-                html.append("</ul>")
-
-            if "statutes" in evidence and evidence["statutes"]:
-                html.append("<h3>Relevant Statutes</h3><ul>")
-                for statute in evidence["statutes"]:
-                    html.append(f"<li>{statute}</li>")
-                html.append("</ul>")
-
-        # Recommendations
-        if "recommendations" in results:
-            html.append("<h2>Recommendations</h2><ul>")
-            for rec in results["recommendations"]:
-                html.append(f"<li>{rec}</li>")
+        # Actionable Recommendations
+        recs = data.get("recommendations", [])
+        if recs:
+            html.append("<h2>💡 Recommendations</h2><ul>")
+            for rec in recs:
+                html.append(f"<li class='rec-item'>{_safe(rec)}</li>")
             html.append("</ul>")
 
         # Risks
-        if "risks" in results:
-            html.append("<h2>Risks Identified</h2><ul>")
-            for risk in results["risks"]:
-                html.append(f"<li>{risk}</li>")
+        risks = data.get("risks", [])
+        if risks:
+            html.append("<h2>⚠️ Identified Risks</h2><ul>")
+            for risk in risks:
+                html.append(f"<li class='risk-item'>{_safe(risk)}</li>")
             html.append("</ul>")
 
         html.append("</body></html>")
         return "\n".join(html)
 
-    def clear_results(self):
-        """Clear all results and input."""
-        self.input_text.clear()
-        self.file_path.clear()
-        self.folder_path.clear()
-        self.results_browser.clear()
-        self.export_json_button.setEnabled(False)
-        self.export_html_button.setEnabled(False)
-        self.current_results = None
-        self.job_status.reset()
-        self.results_summary.set_summary("No run yet", "N/A", "Run Console")
-
-    def export_json(self):
-        """Export results to JSON file."""
-        if not self.current_results:
-            return
-
-        try:
-            from PySide6.QtWidgets import QFileDialog  # noqa: E402
-            file_path, _ = QFileDialog.getSaveFileName(
-                self, "Save JSON", "", "JSON files (*.json)"
-            )
-            if file_path:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(self.current_results, f, indent=2, ensure_ascii=False)
-                QMessageBox.information(self, "Export Successful", "Results exported to JSON.")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to export JSON: {e}")
-
-    def export_html(self):
-        """Export results to HTML file."""
-        if not self.current_results:
-            return
-
-        try:
-            from PySide6.QtWidgets import QFileDialog  # noqa: E402
-            file_path, _ = QFileDialog.getSaveFileName(
-                self, "Save HTML", "", "HTML files (*.html)"
-            )
-            if file_path:
-                html_content = self.format_results_html(self.current_results)
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    f.write(html_content)
-                QMessageBox.information(self, "Export Successful", "Results exported to HTML.")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to export HTML: {e}")
+    def closeEvent(self, event):
+        """Stop background work on tab close."""
+        if self.worker and self.worker.isRunning():
+            self.worker.requestInterruption()
+            self.worker.wait(1000)
+        super().closeEvent(event)

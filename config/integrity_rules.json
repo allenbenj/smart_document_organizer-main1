@@ -1,0 +1,53 @@
+{
+  "layers": {
+    "h1": {
+      "paths": ["routes", "services", "agents", "gui", "mem_db"],
+      "must_include_any": ["AgentService", "_v(", "STARTUP_OFFLINE_SAFE", "AnalysisVersion"]
+    },
+    "p0_contracts": {
+      "paths": ["services/contracts", "gui/services/aedis_contract_adapters.py"],
+      "must_include_any": [
+        "CanonicalArtifact",
+        "AnalysisVersion",
+        "ProvenanceRecord",
+        "HeuristicEntry",
+        "PlannerRun",
+        "JudgeRun",
+        "EvidenceSpan",
+        "AuditDelta"
+      ]
+    },
+    "canonical": {
+      "paths": ["services/canonical_artifact_service.py", "mem_db/repositories/canonical_repository.py"],
+      "must_include_any": ["CanonicalArtifactService", "CanonicalRepository"]
+    },
+    "ontology": {
+      "paths": ["services/ontology_registry_service.py", "routes/ontology.py"],
+      "must_include_any": ["OntologyRegistryService", "OntologyType"]
+    },
+    "provenance": {
+      "paths": ["services/provenance_service.py", "gui/tabs/provenance_highlighting.py"],
+      "must_include_any": ["ProvenanceRecord", "EvidenceSpan", "record_provenance"]
+    },
+    "planner_judge": {
+      "paths": ["services/planner_judge_service.py"],
+      "must_include_any": ["PlannerJudgeService", "create_plan", "judge_plan", "ruleset"]
+    },
+    "heuristics": {
+      "paths": ["services/heuristic_governance_service.py"],
+      "must_include_any": ["HeuristicStage", "register_heuristic", "detect_collisions", "dissent"]
+    },
+    "generative_instructional": {
+      "paths": ["services", "routes", "gui/tabs"],
+      "must_include_any": ["Generative", "LearningPath", "learning"]
+    },
+    "ontology_enforcement": {
+      "paths": ["agents/extractors", "services", "routes", "gui/tabs"],
+      "must_include_any": ["ontology", "entity_type", "entity"]
+    },
+    "measurement": {
+      "paths": ["services", "routes", "gui/tabs"],
+      "must_include_any": ["metrics", "measurement", "KPI", "evaluation"]
+    }
+  }
+}

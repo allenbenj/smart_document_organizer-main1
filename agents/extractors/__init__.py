@@ -21,7 +21,7 @@ try:
         EntityExtractionConfig,
         create_legal_entity_extractor,
     )
-except ImportError:
+except Exception:
     LegalEntityExtractor = None
     EntityExtractionConfig = None
     create_legal_entity_extractor = None

@@ -541,10 +541,26 @@ class DocumentOrganizationTab(QWidget):  # type: ignore[misc]
     def org_load_proposals(self):
         try:
             root = self._normalize_root_scope(self.org_root_input.text())
-            data = self._api_get("/organization/proposals?status=proposed&limit=1000&offset=0", timeout=30.0)
+            data = self._api_get(
+                "/organization/proposals?status=proposed&limit=10000&offset=0",
+                timeout=60.0,
+            )
             items = data.get("items", []) if isinstance(data, dict) else []
+            if not items:
+                fallback = self._api_get(
+                    "/organization/proposals?limit=10000&offset=0",
+                    timeout=60.0,
+                )
+                fallback_items = fallback.get("items", []) if isinstance(fallback, dict) else []
+                if fallback_items:
+                    items = fallback_items
             if root:
-                items = [x for x in items if str(x.get("current_path") or "").replace("\\", "/").startswith(root)]
+                root_norm = root.lower()
+                items = [
+                    x
+                    for x in items
+                    if str(x.get("current_path") or "").replace("\\", "/").lower().startswith(root_norm)
+                ]
             self.proposals_cache = items
             self.org_table.setRowCount(len(items))
             for i, p in enumerate(items):

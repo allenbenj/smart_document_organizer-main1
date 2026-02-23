@@ -6,12 +6,17 @@ import re
 import time
 import uuid
 import difflib
+from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from core.llm_providers import LLMManager
 from mem_db.database import DatabaseManager
 from services.organization_llm import OrganizationLLMPolicy, OrganizationPromptAdapter
+from services.organization_naming_rules import OrganizationNamingRules
+from services.provenance_service import provenance_service
+from services.contracts.aedis_models import ProvenanceRecord, EvidenceSpan
 
 
 class OrganizationService:
@@ -22,6 +27,7 @@ class OrganizationService:
 
     def __init__(self, db: DatabaseManager):
         self.db = db
+        self.naming_rules = OrganizationNamingRules()
         self.llm_manager = LLMManager(
             api_key=os.getenv("XAI_API_KEY", "").strip() or None,
             provider="xai",
@@ -53,8 +59,7 @@ class OrganizationService:
         cls._llm_fail_count = 0
         cls._llm_circuit_open_until = 0.0
 
-    @staticmethod
-    def _sanitize_path_parts(folder: str, filename: str) -> tuple[str, str]:
+    def _sanitize_path_parts(self, folder: str, filename: str) -> tuple[str, str]:
         safe_folder = str(folder or "Inbox/Review").replace("\\", "/").strip().strip("/")
         safe_folder = "/".join(p for p in safe_folder.split("/") if p and p not in {".", ".."})
         if not safe_folder:
@@ -65,7 +70,14 @@ class OrganizationService:
         safe_name = re.sub(r"[^A-Za-z0-9._()\- ]+", "", safe_name).strip(" .")
         if not safe_name:
             safe_name = "document"
-        return safe_folder, safe_name
+        return self._normalize_naming_rules(safe_folder, safe_name)
+
+    def _normalize_naming_rules(self, folder: str, filename: str) -> tuple[str, str]:
+        """Apply configurable global naming policy for folder + filename."""
+        try:
+            return self.naming_rules.apply(folder, filename)
+        except Exception:
+            return folder, filename
 
     def _llm_suggest(
         self,
@@ -207,6 +219,64 @@ class OrganizationService:
         return list(dict.fromkeys(prefixes))
 
     @staticmethod
+    def _path_matches_prefixes(path_value: Optional[str], prefixes: List[str]) -> bool:
+        """Case-insensitive prefix match across Windows/WSL path variants."""
+        if not prefixes:
+            return True
+        path_norm = str(path_value or "").replace("\\", "/").strip().lower()
+        if not path_norm:
+            return False
+        for pref in prefixes:
+            pref_norm = str(pref or "").replace("\\", "/").strip().lower()
+            if pref_norm and path_norm.startswith(pref_norm):
+                return True
+        return False
+
+    def _seed_index_from_root(self, root_prefix: Optional[str], max_items: int = 3000) -> int:
+        """Best-effort index seeding from filesystem for scoped generation."""
+        root = self._resolve_root_prefix_path(root_prefix)
+        if root is None or not root.exists() or not root.is_dir():
+            return 0
+
+        allowed_exts = {
+            ".txt", ".md", ".doc", ".docx", ".pdf", ".rtf",
+            ".xls", ".xlsx", ".csv", ".ppt", ".pptx",
+            ".eml", ".msg", ".json", ".xml", ".html", ".htm",
+            ".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".gif",
+            ".mp4", ".mov", ".avi", ".mkv", ".mp3", ".wav", ".m4a",
+            ".log",
+        }
+        seeded = 0
+        for dirpath, _, filenames in os.walk(str(root)):
+            for name in filenames:
+                ext = Path(name).suffix.lower()
+                if ext not in allowed_exts:
+                    continue
+                p = Path(dirpath) / name
+                try:
+                    st = p.stat()
+                    self.db.upsert_indexed_file(
+                        display_name=p.name,
+                        original_path=str(p),
+                        normalized_path=str(p),
+                        file_size=int(st.st_size),
+                        mtime=float(st.st_mtime),
+                        mime_type=None,
+                        mime_source=None,
+                        sha256=None,
+                        ext=ext,
+                        status="indexed",
+                        last_error=None,
+                        metadata={"seeded_by": "organization_service", "root_prefix": root_prefix},
+                    )
+                    seeded += 1
+                except Exception:
+                    continue
+                if seeded >= max_items:
+                    return seeded
+        return seeded
+
+    @staticmethod
     def _rank_known_folder_suggestions(current: str, known_folders: List[str], limit: int = 5) -> List[str]:
         if not known_folders:
             return []
@@ -224,6 +294,33 @@ class OrganizationService:
                 if len(ranked) >= limit:
                     break
         return ranked[:limit]
+
+    @staticmethod
+    def _normalize_alternatives(values: Any) -> List[str]:
+        """Normalize LLM alternatives into a deduplicated list of folder strings."""
+        if not isinstance(values, list):
+            return []
+        out: List[str] = []
+        seen = set()
+        for item in values:
+            candidate = ""
+            if isinstance(item, str):
+                candidate = item
+            elif isinstance(item, dict):
+                candidate = str(
+                    item.get("folder")
+                    or item.get("path")
+                    or item.get("name")
+                    or ""
+                )
+            else:
+                candidate = str(item or "")
+            candidate = candidate.strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            out.append(candidate)
+        return out
 
     def _folder_preference_scores(self) -> Dict[str, int]:
         """Learn simple folder preferences from historical feedback.
@@ -255,6 +352,139 @@ class OrganizationService:
                 scores[target_folder] = scores.get(target_folder, 0) - 1
         return scores
 
+    @staticmethod
+    def _path_signature(path_value: Optional[str]) -> str:
+        """Stable key for matching near-identical documents across runs."""
+        name = Path(str(path_value or "")).name.strip().lower()
+        if not name:
+            return ""
+        stem = Path(name).stem
+        return re.sub(r"[^a-z0-9]+", "", stem)
+
+    def _historical_folder_corrections(self, min_votes: int = 1) -> Dict[str, str]:
+        """Build signature -> preferred folder mapping from user edit feedback."""
+        votes: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        feedback = self.db.organization_list_feedback(limit=5000, offset=0)
+        for f in feedback:
+            action = str(f.get("action") or "").strip().lower()
+            if action != "edit":
+                continue
+            original = f.get("original") or {}
+            final = f.get("final") or {}
+            sig = self._path_signature(original.get("current_path"))
+            folder = str(final.get("proposed_folder") or "").strip()
+            if not sig or not folder:
+                continue
+            votes[sig][folder] += 1
+
+        out: Dict[str, str] = {}
+        threshold = max(1, int(min_votes))
+        for sig, folder_counts in votes.items():
+            best_folder = ""
+            best_votes = 0
+            for folder, count in folder_counts.items():
+                if count > best_votes:
+                    best_folder = folder
+                    best_votes = count
+            if best_folder and best_votes >= threshold:
+                out[sig] = best_folder
+        return out
+
+    def _historical_filename_corrections(self, min_votes: int = 1) -> Dict[str, str]:
+        """Build signature -> preferred filename mapping from user edit feedback."""
+        votes: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        feedback = self.db.organization_list_feedback(limit=5000, offset=0)
+        for f in feedback:
+            action = str(f.get("action") or "").strip().lower()
+            if action != "edit":
+                continue
+            original = f.get("original") or {}
+            final = f.get("final") or {}
+            sig = self._path_signature(original.get("current_path"))
+            filename = str(final.get("proposed_filename") or "").strip()
+            if not sig or not filename:
+                continue
+            votes[sig][filename] += 1
+
+        out: Dict[str, str] = {}
+        threshold = max(1, int(min_votes))
+        for sig, name_counts in votes.items():
+            best_name = ""
+            best_votes = 0
+            for name, count in name_counts.items():
+                if count > best_votes:
+                    best_name = name
+                    best_votes = count
+            if best_name and best_votes >= threshold:
+                out[sig] = best_name
+        return out
+
+    def _auto_correct_existing_proposals(
+        self,
+        *,
+        root_prefix: Optional[str] = None,
+        min_votes: int = 1,
+        limit: int = 2000,
+    ) -> int:
+        """Auto-correct existing proposed items using learned edit history."""
+        learned_folders = self._historical_folder_corrections(min_votes=min_votes)
+        learned_filenames = self._historical_filename_corrections(min_votes=min_votes)
+        if not learned_folders and not learned_filenames:
+            return 0
+
+        proposals = self.db.organization_list_proposals(
+            status="proposed",
+            limit=limit,
+            offset=0,
+        )
+        prefixes = self._scope_prefixes(root_prefix)
+        if prefixes:
+            proposals = [
+                p
+                for p in proposals
+                if self._path_matches_prefixes(p.get("current_path"), prefixes)
+            ]
+
+        corrected = 0
+        for p in proposals:
+            sig = self._path_signature(p.get("current_path"))
+            target_folder = learned_folders.get(sig)
+            target_filename = learned_filenames.get(sig)
+            if not target_folder and not target_filename:
+                continue
+            current_folder = str(p.get("proposed_folder") or "").strip()
+            current_filename = str(p.get("proposed_filename") or "").strip()
+
+            next_folder = target_folder or current_folder
+            next_filename = target_filename or current_filename
+            if current_folder == next_folder and current_filename == next_filename:
+                continue
+
+            safe_folder, safe_name = self._sanitize_path_parts(
+                next_folder,
+                next_filename or "document",
+            )
+            pid = int(p.get("id"))
+            self.db.organization_update_proposal(
+                pid,
+                proposed_folder=safe_folder,
+                proposed_filename=safe_name,
+                confidence=max(float(p.get("confidence") or 0.0), 0.98),
+                rationale="Auto-corrected from historical user edits",
+            )
+            self.db.organization_add_feedback(
+                {
+                    "proposal_id": pid,
+                    "file_id": p.get("file_id"),
+                    "action": "auto_correct",
+                    "original": p,
+                    "final": self.db.organization_get_proposal(pid) or {},
+                    "note": "auto-corrected_from_historical_feedback",
+                }
+            )
+            corrected += 1
+        return corrected
+
     def generate_proposals(
         self,
         *,
@@ -264,18 +494,36 @@ class OrganizationService:
         model: Optional[str] = None,
         root_prefix: Optional[str] = None,
     ) -> Dict[str, Any]:
-        items = [x for x in self.db.list_all_indexed_files() if str(x.get("status")) == "ready"]
+        auto_corrected_existing = self._auto_correct_existing_proposals(
+            root_prefix=root_prefix,
+        )
+        # Always seed scoped index view from filesystem first when scope is provided.
+        seeded_count = 0
+        if root_prefix and root_prefix.strip():
+            seeded_count = self._seed_index_from_root(
+                root_prefix,
+                max_items=max(int(limit) * 20, 4000),
+            )
+
+        scoped_items = list(self.db.list_all_indexed_files())
         prefixes = self._scope_prefixes(root_prefix)
         if prefixes:
-            items = [
+            scoped_items = [
                 x
-                for x in items
-                if any(
-                    str(x.get("normalized_path") or "").replace("\\", "/").startswith(pref)
-                    for pref in prefixes
-                )
+                for x in scoped_items
+                if self._path_matches_prefixes(x.get("normalized_path"), prefixes)
             ]
-        items = items[: int(limit)]
+        ready_items = [
+            x for x in scoped_items if str(x.get("status") or "").strip().lower() == "ready"
+        ]
+        candidate_items = [
+            x
+            for x in scoped_items
+            if str(x.get("status") or "").strip().lower() not in {"missing"}
+        ]
+        items = candidate_items[: int(limit)]
+        active_generation_mode = True
+
         created = 0
         rows: List[Dict[str, Any]] = []
         runtime = self.get_runtime_llm()
@@ -296,11 +544,14 @@ class OrganizationService:
             )
 
         folder_pref_scores = self._folder_preference_scores()
+        learned_folders = self._historical_folder_corrections(min_votes=1)
+        learned_filenames = self._historical_filename_corrections(min_votes=1)
 
         for rec in items:
             name = str(rec.get("display_name") or "")
             meta = rec.get("metadata_json") or {}
             preview = str(meta.get("preview") or "")
+            row_status = str(rec.get("status") or "").strip().lower()
             llm = self._llm_suggest(
                 provider=provider_name,
                 model=model_name,
@@ -325,6 +576,20 @@ class OrganizationService:
                 else ["Inbox/Review"]
             )
             source = "llm"
+            used_provider = provider_name
+            used_model = model_name
+
+            sig = self._path_signature(rec.get("normalized_path"))
+            learned_folder = learned_folders.get(sig)
+            learned_filename = learned_filenames.get(sig)
+            if learned_folder or learned_filename:
+                folder, fname = self._sanitize_path_parts(
+                    learned_folder or folder,
+                    learned_filename or fname,
+                )
+                source = "historical_edit_feedback"
+                rationale = "Auto-adjusted from historical user edits"
+                conf = max(conf, 0.98)
 
             # Apply learned confidence adjustment from past folder decisions.
             folder_bias = int(folder_pref_scores.get(folder, 0))
@@ -332,7 +597,7 @@ class OrganizationService:
                 conf = max(0.05, min(0.99, conf + (0.03 * folder_bias)))
             if known_folders:
                 ranked = self._rank_known_folder_suggestions(folder, known_folders, limit=5)
-                alternatives = list(dict.fromkeys([*alternatives, *ranked]))
+                alternatives = self._normalize_alternatives([*alternatives, *ranked])
 
 
             proposal = {
@@ -344,18 +609,63 @@ class OrganizationService:
                 "confidence": conf,
                 "rationale": rationale,
                 "alternatives": alternatives,
-                "provider": provider_name,
-                "model": model_name,
+                "provider": used_provider,
+                "model": used_model,
                 "status": "proposed",
                 "metadata": {
                     "source": "organize_indexed",
                     "decision_source": source,
                     "folder_preference_bias": folder_bias,
                     "known_folders_count": len(known_folders),
+                    "file_status": row_status or "unknown",
                 },
             }
             pid = self.db.organization_add_proposal(proposal)
             proposal["id"] = pid
+
+            # Phase 3: Record Provenance
+            try:
+                # Capture spans from LLM response
+                raw_spans = llm.get("evidence_spans", [])
+                spans = []
+                for s in raw_spans:
+                    try:
+                        spans.append(EvidenceSpan(
+                            artifact_row_id=int(rec.get("id")),
+                            start_char=int(s.get("start_char")),
+                            end_char=int(s.get("end_char")),
+                            quote=s.get("quote")
+                        ))
+                    except (ValueError, TypeError):
+                        continue
+                
+                # If no spans provided by LLM, create a contextual file-level span (0-preview_len)
+                if not spans:
+                    spans.append(EvidenceSpan(
+                        artifact_row_id=int(rec.get("id")),
+                        start_char=0,
+                        end_char=len(preview),
+                        quote=preview[:100] + "..." if len(preview) > 100 else preview
+                    ))
+
+                prov_record = ProvenanceRecord(
+                    source_artifact_row_id=int(rec.get("id")),
+                    source_sha256=str(rec.get("sha256") or "0"*64), # Temporary until Phase 1 active
+                    captured_at=datetime.now(timezone.utc),
+                    extractor=f"organizer:{provider_name}:{model_name}",
+                    spans=spans,
+                    notes=f"Auto-generated proposal for {name}"
+                )
+                
+                prov_id = provenance_service.record_provenance(
+                    prov_record, 
+                    target_type="organization_proposal", 
+                    target_id=str(pid)
+                )
+                proposal["metadata"]["provenance_id"] = prov_id
+            except Exception as prov_err:
+                logger.warning(f"Failed to record provenance for proposal {pid}: {prov_err}")
+
             rows.append(proposal)
             created += 1
 
@@ -363,8 +673,14 @@ class OrganizationService:
             "success": True,
             "created": created,
             "items": rows,
+            "auto_corrected_existing": auto_corrected_existing,
             "requested_provider": resolved.provider,
             "active_provider": provider_name,
+            "active_generation_mode": active_generation_mode,
+            "seeded_indexed_count": seeded_count,
+            "scoped_indexed_count": len(scoped_items),
+            "scoped_candidate_count": len(candidate_items),
+            "scoped_ready_count": len(ready_items),
         }
 
     def list_proposals(
@@ -375,6 +691,11 @@ class OrganizationService:
         offset: int = 0,
         root_prefix: Optional[str] = None,
     ) -> Dict[str, Any]:
+        auto_corrected_existing = 0
+        if status is None or str(status).strip().lower() == "proposed":
+            auto_corrected_existing = self._auto_correct_existing_proposals(
+                root_prefix=root_prefix,
+            )
         # Scope first, then apply paging to avoid cross-root bleed in first page.
         if root_prefix and root_prefix.strip():
             items = self.db.organization_list_proposals(status=status, limit=100000, offset=0)
@@ -383,17 +704,19 @@ class OrganizationService:
                 items = [
                     x
                     for x in items
-                    if any(
-                        str(x.get("current_path") or "").replace("\\", "/").startswith(pref)
-                        for pref in prefixes
-                    )
+                    if self._path_matches_prefixes(x.get("current_path"), prefixes)
                 ]
             start = max(0, int(offset))
             end = start + max(1, int(limit))
             items = items[start:end]
         else:
             items = self.db.organization_list_proposals(status=status, limit=limit, offset=offset)
-        return {"success": True, "total": len(items), "items": items}
+        return {
+            "success": True,
+            "total": len(items),
+            "items": items,
+            "auto_corrected_existing": auto_corrected_existing,
+        }
 
     def clear_proposals(
         self,
@@ -408,10 +731,7 @@ class OrganizationService:
             items = [
                 x
                 for x in items
-                if any(
-                    str(x.get("current_path") or "").replace("\\", "/").startswith(pref)
-                    for pref in prefixes
-                )
+                if self._path_matches_prefixes(x.get("current_path"), prefixes)
             ]
 
         cleared = 0
@@ -541,10 +861,7 @@ class OrganizationService:
             items = [
                 p
                 for p in items
-                if any(
-                    str(p.get("current_path") or "").replace("\\", "/").startswith(pref)
-                    for pref in prefixes
-                )
+                if self._path_matches_prefixes(p.get("current_path"), prefixes)
             ]
         rollback_group = uuid.uuid4().hex
         applied = 0

@@ -13,6 +13,7 @@ import json
 import hashlib
 import logging
 import os  # noqa: E402
+import re
 import sqlite3
 import subprocess
 import sys  # noqa: E402
@@ -22,10 +23,11 @@ import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional  # noqa: E402
+from typing import Any, Optional  # noqa: E402
 
 from fastapi import Depends, FastAPI, Header, HTTPException  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from pydantic import BaseModel, ValidationError  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 from starlette.responses import JSONResponse, Response  # noqa: E402
 
@@ -44,13 +46,13 @@ if STARTUP_PROFILE not in {"api", "minimal", "full", "gui"}:
 
 _agents_lazy_env = os.getenv("AGENTS_LAZY_INIT")
 if _agents_lazy_env is None:
-    AGENTS_LAZY_INIT = False
+    AGENTS_LAZY_INIT = True
 else:
     AGENTS_LAZY_INIT = _agents_lazy_env.strip().lower() in {"1", "true", "yes", "on"}
 
 _offline_safe_env = os.getenv("STARTUP_OFFLINE_SAFE")
 if _offline_safe_env is None:
-    STARTUP_OFFLINE_SAFE = False
+    STARTUP_OFFLINE_SAFE = True
 else:
     STARTUP_OFFLINE_SAFE = _offline_safe_env.strip().lower() in {
         "1",
@@ -73,6 +75,117 @@ DEFAULT_REQUIRED_PRODUCTION_AGENTS = [
     "legal_reasoning",
     "irac_analyzer",
 ]
+
+DEFAULT_INTEGRITY_LAYER_TARGETS: dict[str, dict[str, list[str]]] = {
+    "h1": {
+        "paths": [
+            "routes",
+            "services",
+            "agents",
+            "gui",
+            "mem_db",
+        ],
+        "must_include_any": ["AgentService", "_v(", "STARTUP_OFFLINE_SAFE", "AnalysisVersion"],
+    },
+    "p0_contracts": {
+        "paths": ["services/contracts", "gui/services"],
+        "must_include_any": [
+            "CanonicalArtifact",
+            "AnalysisVersion",
+            "ProvenanceRecord",
+            "HeuristicEntry",
+            "PlannerRun",
+            "JudgeRun",
+            "EvidenceSpan",
+            "AuditDelta",
+        ],
+    },
+    "canonical": {
+        "paths": ["services", "routes", "gui/tabs"],
+        "must_include_any": ["CanonicalArtifactService", "CanonicalRepository"],
+    },
+    "ontology": {
+        "paths": ["services", "routes", "agents/extractors", "gui/tabs"],
+        "must_include_any": ["OntologyRegistryService", "OntologyType"],
+    },
+    "provenance": {
+        "paths": ["services", "routes", "gui/tabs"],
+        "must_include_any": ["Provenance", "provenance"],
+    },
+    "planner_judge": {
+        "paths": ["services", "routes", "gui/tabs"],
+        "must_include_any": ["Judge", "judge", "Planner", "planner"],
+    },
+    "heuristics": {
+        "paths": ["services", "routes", "gui/tabs"],
+        "must_include_any": ["Heuristic", "heuristic"],
+    },
+    "generative_instructional": {
+        "paths": ["services", "routes", "gui/tabs"],
+        "must_include_any": ["Generative", "LearningPath", "learning"],
+    },
+    "ontology_enforcement": {
+        "paths": ["agents/extractors", "services", "routes", "gui/tabs"],
+        "must_include_any": ["ontology", "entity_type", "entity"],
+    },
+    "measurement": {
+        "paths": ["services", "routes", "gui/tabs"],
+        "must_include_any": ["metrics", "measurement", "KPI", "evaluation"],
+    },
+}
+
+
+def _load_integrity_layer_targets() -> dict[str, dict[str, list[str]]]:
+    config_path = Path(__file__).resolve().parent / "config" / "integrity_rules.json"
+    if not config_path.exists():
+        logger.warning("Integrity rules file not found, using defaults: %s", config_path)
+        return DEFAULT_INTEGRITY_LAYER_TARGETS
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.error("Failed to parse integrity rules file: %s", exc)
+        return DEFAULT_INTEGRITY_LAYER_TARGETS
+
+    layers = raw.get("layers")
+    if not isinstance(layers, dict) or not layers:
+        logger.error("Integrity rules config missing valid 'layers', using defaults")
+        return DEFAULT_INTEGRITY_LAYER_TARGETS
+
+    out: dict[str, dict[str, list[str]]] = {}
+    for layer_name, layer_cfg in layers.items():
+        if not isinstance(layer_cfg, dict):
+            continue
+        paths = layer_cfg.get("paths")
+        markers = layer_cfg.get("must_include_any")
+        if not isinstance(paths, list) or not isinstance(markers, list):
+            continue
+        if not all(isinstance(x, str) and x.strip() for x in paths):
+            continue
+        if not all(isinstance(x, str) and x.strip() for x in markers):
+            continue
+        out[layer_name] = {
+            "paths": [p.strip() for p in paths],
+            "must_include_any": [m.strip() for m in markers],
+        }
+    if not out:
+        logger.error("Integrity rules config contains no valid layers, using defaults")
+        return DEFAULT_INTEGRITY_LAYER_TARGETS
+    return out
+
+
+INTEGRITY_LAYER_TARGETS = _load_integrity_layer_targets()
+
+
+class IntegrityReportModel(BaseModel):
+    schema_version: str
+    status: str
+    layer: str
+    checked_paths: list[str]
+    files_scanned: int
+    required_marker_hits: int
+    fallback_count: int
+    placeholder_count: int
+    generated_at: str
 
 
 try:
@@ -97,6 +210,128 @@ def _required_production_agents() -> list[str]:
             seen.add(v)
             out.append(v)
     return out
+
+
+def _count_file_markers(path: Path, markers: list[str]) -> int:
+    try:
+        content = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return 0
+    
+    count = 0
+    for marker in markers:
+        # For 'placeholder', we ignore common UI methods like setPlaceholderText
+        if marker.lower() == "placeholder":
+            # Find all 'placeholder' occurrences
+            matches = re.finditer(re.escape(marker), content, re.IGNORECASE)
+            for m in matches:
+                # Get surrounding context to check for 'setPlaceholderText'
+                start, end = m.span()
+                context = content[max(0, start-20):min(len(content), end+20)]
+                if "setPlaceholderText" not in context and "placeholder_text" not in context:
+                    count += 1
+        else:
+            # Standard count for other markers
+            count += len(re.findall(re.escape(marker), content, re.IGNORECASE))
+    return count
+
+
+def _count_text_markers(base: Path, roots: list[str], markers: list[str]) -> int:
+    total = 0
+    for rel_root in roots:
+        root = (base / rel_root).resolve()
+        if not root.exists():
+            continue
+        if root.is_file() and root.suffix == ".py":
+            total += _count_file_markers(root, markers)
+            continue
+        for path in root.rglob("*.py"):
+            total += _count_file_markers(path, markers)
+    return total
+
+
+def _collect_python_files(base: Path, roots: list[str]) -> int:
+    count = 0
+    for rel_root in roots:
+        root = (base / rel_root).resolve()
+        if not root.exists():
+            continue
+        if root.is_file() and root.suffix == ".py":
+            count += 1
+            continue
+        count += sum(1 for _ in root.rglob("*.py"))
+    return count
+
+
+def _run_integrity_check(
+    layer: str,
+    output: Optional[str] = None,
+    *,
+    json_only: bool = False,
+) -> int:
+    base = Path(__file__).resolve().parent
+    target = INTEGRITY_LAYER_TARGETS.get(layer, INTEGRITY_LAYER_TARGETS["h1"])
+    marker_hits = _count_text_markers(
+        base=base,
+        roots=target["paths"],
+        markers=target["must_include_any"],
+    )
+    # H1 remains a global debt gate; later phases should evaluate their own layer scope.
+    fallback_roots = (
+        ["routes", "services", "agents", "gui", "mem_db"]
+        if layer == "h1"
+        else target["paths"]
+    )
+    fallback_count = _count_text_markers(
+        base=base,
+        roots=fallback_roots,
+        markers=["fallback", "placeholder", "mock response", "stub"],
+    )
+    file_count = _collect_python_files(base=base, roots=target["paths"])
+    status = "pass" if marker_hits > 0 and fallback_count == 0 else "fail"
+
+    report = {
+        "schema_version": "1.0.0",
+        "status": status,
+        "layer": layer,
+        "checked_paths": target["paths"],
+        "files_scanned": file_count,
+        "required_marker_hits": marker_hits,
+        "fallback_count": fallback_count,
+        "placeholder_count": _count_text_markers(
+            base=base,
+            roots=fallback_roots,
+            markers=["placeholder"],
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    validation_errors = _validate_integrity_report(report)
+    if validation_errors:
+        report["status"] = "fail"
+        report["validation_errors"] = validation_errors
+    text = json.dumps(report, indent=2)
+    if output:
+        output_path = Path(output).resolve()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(text + "\n", encoding="utf-8")
+        if not json_only:
+            print(f"[integrity] wrote report: {output_path}")
+    print(text if not json_only else json.dumps(report, separators=(",", ":")))
+    return 0 if report.get("status") == "pass" else 1
+
+
+def _validate_integrity_report(report: dict) -> list[str]:
+    errors: list[str] = []
+    try:
+        model = IntegrityReportModel.model_validate(report)
+    except ValidationError as exc:
+        return [f"schema_validation_error: {msg}" for msg in exc.errors()]
+
+    if model.status not in {"pass", "fail"}:
+        errors.append("status must be pass or fail")
+    if model.layer not in INTEGRITY_LAYER_TARGETS:
+        errors.append("layer not in allowed integrity layers")
+    return errors
 
 
 def verify_api_key(x_api_key: Optional[str] = Header(default=None)) -> None:
@@ -420,7 +655,7 @@ async def _startup_services():
             await bootstrap.configure(services, app)
             logger.info("Service container bootstrap completed")
         except Exception as e:
-            logger.warning(f"Service bootstrap failed: {e}")
+            raise RuntimeError(f"Service container bootstrap failed: {e}") from e
         _finish_step(step_di)
 
         step_agents = _start_step("module_initialization")
@@ -489,10 +724,12 @@ async def _startup_services():
 
         step_plugins = _start_step("plugin_loading")
         failed_critical, failed_optional = _split_router_failures()
-        if failed_critical or failed_optional:
+        if failed_critical:
             raise RuntimeError(
                 f"Router/plugin load failures: critical={failed_critical} optional={failed_optional}"
             )
+        if failed_optional:
+            logger.warning("Optional router/plugin load failures: %s", failed_optional)
         plugin_status = "Complete"
         plugin_error = None
         _finish_step(step_plugins, status=plugin_status, error=plugin_error)
@@ -624,7 +861,7 @@ def _backend_readiness_urls(port: int = 8000) -> list[str]:
 
 def _wait_for_backend(
     urls: list[str],
-    timeout_s: int = 60,
+    timeout_s: int = 120,
     initial_interval_s: float = 0.25,
     max_interval_s: float = 2.0,
 ) -> bool:
@@ -797,6 +1034,27 @@ async def startup_control_restart(payload: dict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Smart Document Organizer launcher")
     parser.add_argument(
+        "--check-integrity",
+        action="store_true",
+        help="Run static integrity checks and exit",
+    )
+    parser.add_argument(
+        "--layer",
+        default="h1",
+        choices=list(INTEGRITY_LAYER_TARGETS.keys()),
+        help="Integrity target layer",
+    )
+    parser.add_argument(
+        "--output",
+        default="",
+        help="Optional output JSON report path for integrity checks",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit JSON-only integrity output (single line)",
+    )
+    parser.add_argument(
         "--backend",
         action="store_true",
         help="Start backend API instead of GUI dashboard",
@@ -813,6 +1071,15 @@ if __name__ == "__main__":
         help="Startup profile (api|minimal|full|gui)",
     )
     args = parser.parse_args()
+    if args.check_integrity:
+        raise SystemExit(
+            _run_integrity_check(
+                layer=str(args.layer),
+                output=str(args.output or ""),
+                json_only=bool(args.json),
+            )
+        )
+
     selected_mode = _resolve_launch_mode(
         backend_requested=bool(args.backend),
         gui_requested=bool(args.gui),
@@ -823,9 +1090,9 @@ if __name__ == "__main__":
     if STARTUP_PROFILE not in {"api", "minimal", "full", "gui"}:
         STARTUP_PROFILE = "full"
     if _agents_lazy_env is None:
-        AGENTS_LAZY_INIT = False
+        AGENTS_LAZY_INIT = True
     if _offline_safe_env is None:
-        STARTUP_OFFLINE_SAFE = False
+        STARTUP_OFFLINE_SAFE = True
     app.state.startup_profile = STARTUP_PROFILE
     app.state.agents_lazy_init = AGENTS_LAZY_INIT
     app.state.startup_offline_safe = STARTUP_OFFLINE_SAFE
@@ -845,7 +1112,13 @@ if __name__ == "__main__":
                 [sys.executable, __file__, "--backend"],
                 cwd=os.path.dirname(__file__) or None,
             )
-            if not _wait_for_backend(backend_urls, timeout_s=75, initial_interval_s=0.25, max_interval_s=2.0):
+            launch_timeout_s = int(os.getenv("GUI_BACKEND_START_TIMEOUT_SECONDS", "120"))
+            if not _wait_for_backend(
+                backend_urls,
+                timeout_s=launch_timeout_s,
+                initial_interval_s=0.25,
+                max_interval_s=2.0,
+            ):
                 raise RuntimeError("Backend readiness check failed before GUI launch")
 
             def _cleanup_backend() -> None:

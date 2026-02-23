@@ -23,12 +23,14 @@ Features:
 
 import json
 import logging  # noqa: E402
+import os  # noqa: E402
 import re  # noqa: E402
 import inspect  # noqa: E402
 import uuid  # noqa: E402
+from pathlib import Path  # noqa: E402
 from dataclasses import dataclass, field  # noqa: E402
 from datetime import datetime  # noqa: E402
-from typing import Any, Dict, List, Optional, Set, cast  # noqa: E402
+from typing import Any, Dict, List, Optional, Set, Tuple, cast  # noqa: E402
 
 # Core imports
 from agents.base import BaseAgent  # noqa: E402
@@ -53,6 +55,20 @@ except ImportError:
     GLiNER = None
     GLINER_AVAILABLE = False
 
+try:
+    from transformers import (  # noqa: E402
+        AutoModelForTokenClassification,
+        AutoTokenizer,
+        pipeline as transformers_pipeline,
+    )
+
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    AutoModelForTokenClassification = None
+    AutoTokenizer = None
+    transformers_pipeline = None
+    TRANSFORMERS_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -64,8 +80,10 @@ class EntityExtractionConfig:
     use_gliner: bool = True
     use_patterns: bool = True
     use_llm_enhancement: bool = True
+    use_hf_ner: bool = True
     spacy_model: str = "en_core_web_lg"
-    gliner_model: str = "urchade/gliner_base"
+    gliner_model: str = "urchade/gliner_medium-v2.1"
+    hf_ner_model: str = "dslim/bert-base-NER"
     min_confidence: float = 0.6
     max_entities_per_document: int = 1000
     enable_deduplication: bool = True
@@ -156,6 +174,7 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
         # Initialize extraction models
         self.spacy_nlp = None
         self.gliner_model = None
+        self.hf_ner_pipeline = None
         self._initialize_models()
 
         # Legal entity patterns
@@ -199,13 +218,141 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
         # Initialize GLiNER if available and configured
         if self.config.use_gliner and GLINER_AVAILABLE and GLiNER is not None:
             try:
-                self.gliner_model = cast(Any, GLiNER).from_pretrained(
-                    self.config.gliner_model
+                model_ref = self._resolve_local_model_ref(
+                    preferred=self.config.gliner_model,
+                    candidates=["gliner_zero_shot", "gliner", "gliner_medium-v2.1", "gliner_large-v2.1"],
                 )
-                logger.info(f"Loaded GLiNER model: {self.config.gliner_model}")
+                self.gliner_model = cast(Any, GLiNER).from_pretrained(model_ref)
+                logger.info(f"Loaded GLiNER model: {model_ref}")
             except Exception as e:
                 logger.warning(f"Could not load GLiNER model: {e}")
                 self.config.use_gliner = False
+
+        # Initialize HuggingFace token-classification NER pipelines.
+        if (
+            self.config.use_hf_ner
+            and TRANSFORMERS_AVAILABLE
+            and AutoTokenizer is not None
+            and AutoModelForTokenClassification is not None
+            and transformers_pipeline is not None
+        ):
+            self.hf_pipelines = {}
+            # Initialize BART-large-NER (High Fidelity)
+            try:
+                bart_ref = self._resolve_local_model_ref(
+                    preferred="facebook/bart-large-ner",
+                    candidates=["bart-large-NER"]
+                )
+                self.hf_pipelines["bart"] = transformers_pipeline(
+                    "token-classification",
+                    model=bart_ref,
+                    tokenizer=bart_ref,
+                    aggregation_strategy="simple",
+                )
+                logger.info(f"Loaded BART-large-NER from: {bart_ref}")
+            except Exception as e:
+                logger.warning(f"Could not load BART NER: {e}")
+
+            # Initialize REBEL for Relation Extraction
+            try:
+                rebel_ref = self._resolve_local_model_ref(
+                    preferred="Babelscape/rebel-large",
+                    candidates=["rebel-large"]
+                )
+                self.rebel_pipeline = transformers_pipeline(
+                    "text2text-generation",
+                    model=rebel_ref,
+                    tokenizer=rebel_ref,
+                )
+                logger.info(f"Loaded REBEL Relationship Extraction from: {rebel_ref}")
+            except Exception as e:
+                logger.warning(f"Could not load REBEL: {e}")
+
+            # Initialize BERT baseline
+            try:
+                model_ref = self._resolve_local_model_ref(
+                    preferred=self.config.hf_ner_model,
+                    candidates=[
+                        "distilbert-NER",
+                        "bert-base-NER",
+                        "bert-large-NER",
+                        "bert-legal",
+                        "bert-legal-uncased",
+                        "deberta-v3-large",
+                    ],
+                )
+                self.hf_ner_pipeline = transformers_pipeline(
+                    "token-classification",
+                    model=model_ref,
+                    tokenizer=model_ref,
+                    aggregation_strategy="simple",
+                )
+                self.hf_pipelines["bert"] = self.hf_ner_pipeline
+                logger.info("Loaded HF BERT NER model: %s", model_ref)
+            except Exception as e:
+                logger.warning("Could not load HF BERT NER model: %s", e)
+                if not self.hf_pipelines:
+                    self.config.use_hf_ner = False
+
+    @staticmethod
+    def _model_roots() -> List[Path]:
+        """Resolve local model roots, preferring configured model directories."""
+        roots: List[Path] = []
+        env_value = (
+            os.getenv("SDO_MODEL_DIR")
+            or os.getenv("MODEL_DIR")
+            or r"E:\Project\smart_document_organizer-main\models"
+        )
+        candidates = [env_value]
+        # Support WSL/Linux execution when a Windows path is provided.
+        if len(env_value) > 2 and env_value[1:3] == ":\\":
+            drive = env_value[0].lower()
+            tail = env_value[2:].replace("\\", "/").lstrip("/")
+            candidates.append(f"/mnt/{drive}/{tail}")
+        for raw in candidates:
+            try:
+                p = Path(raw)
+                if p.exists() and p.is_dir():
+                    roots.append(p)
+            except Exception:
+                continue
+        try:
+            repo_root = Path(__file__).resolve().parents[2]
+            fallback = repo_root / "models"
+            if fallback.exists() and fallback.is_dir():
+                roots.append(fallback)
+        except Exception:
+            pass
+        # Keep order, remove duplicates.
+        unique: List[Path] = []
+        seen = set()
+        for root in roots:
+            key = str(root.resolve()) if root.exists() else str(root)
+            if key not in seen:
+                seen.add(key)
+                unique.append(root)
+        return unique
+
+    @staticmethod
+    def _resolve_local_model_ref(preferred: str, candidates: List[str]) -> str:
+        """Prefer local model directory under ./models when available."""
+        for root in LegalEntityExtractor._model_roots():
+            for name in candidates:
+                p = root / name
+                if p.exists() and p.is_dir():
+                    # GLiNER cache layouts often store real artifacts under snapshots/<hash>/.
+                    snapshots = p / "snapshots"
+                    if snapshots.exists() and snapshots.is_dir():
+                        for sub in sorted(snapshots.iterdir()):
+                            if not sub.is_dir():
+                                continue
+                            if (
+                                (sub / "gliner_config.json").exists()
+                                and (sub / "pytorch_model.bin").exists()
+                            ):
+                                return str(sub)
+                    return str(p)
+        return preferred
 
     def _compile_legal_patterns(self) -> Dict[str, List[re.Pattern]]:
         """Compile regex patterns for legal entity extraction"""
@@ -261,39 +408,27 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
         return patterns
 
     def _define_legal_entity_types(self) -> Dict[str, Dict[str, Any]]:
-        """Define legal entity types with validation rules"""
+        """Define legal entity types with ontology-first validation rules."""
+        types: Dict[str, Dict[str, Any]] = {}
 
-        return {
-            "Person": {
-                "description": "Individual person (plaintiff, defendant, judge, attorney)",
-                "required_fields": ["text"],
-                "optional_fields": ["role", "title"],
-                "validation_pattern": r"^[A-Z][a-z]+(?: [A-Z][a-z]*)*$",
-            },
-            "Organization": {
-                "description": "Legal entity, company, government agency",
-                "required_fields": ["text"],
-                "optional_fields": ["org_type", "jurisdiction"],
-                "validation_pattern": r"^.+$",
-            },
-            "Case": {
-                "description": "Legal case or court decision",
-                "required_fields": ["text"],
-                "optional_fields": ["citation", "court", "year"],
-                "validation_pattern": r".+",
-            },
-            "Statute": {
-                "description": "Law, statute, regulation, or code",
-                "required_fields": ["text"],
-                "optional_fields": ["code_section", "jurisdiction"],
-                "validation_pattern": r".+",
-            },
-            "Court": {
-                "description": "Judicial court or tribunal",
-                "required_fields": ["text"],
-                "optional_fields": ["jurisdiction", "level"],
-                "validation_pattern": r".+[Cc]ourt.+",
-            },
+        # Core contract: ontology labels are the primary source of entity types.
+        try:
+            from agents.extractors.ontology import LegalEntityType
+
+            for et in LegalEntityType:
+                canonical = str(et.value.label).replace(" ", "")
+                attrs = list(getattr(et.value, "attributes", []) or [])
+                types[canonical] = {
+                    "description": str(getattr(et.value, "prompt_hint", "") or f"Ontology entity: {canonical}"),
+                    "required_fields": ["text"],
+                    "optional_fields": attrs,
+                    "validation_pattern": r".+",
+                }
+        except Exception:
+            logger.warning("Ontology types unavailable in LegalEntityExtractor; using fallback core types")
+
+        # Extensions remain supported, but ontology stays the baseline contract.
+        extras = {
             "LegalConcept": {
                 "description": "Legal principle, doctrine, or concept",
                 "required_fields": ["text"],
@@ -310,22 +445,68 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                 "description": "Geographic location relevant to legal matter",
                 "required_fields": ["text"],
                 "optional_fields": ["country", "state", "jurisdiction"],
-                "validation_pattern": r"^[A-Z][a-z]+(?: [A-Z][a-z]*)*$",
+                "validation_pattern": r".+",
             },
         }
+        for k, v in extras.items():
+            types.setdefault(k, v)
+
+        # Hard fallback in case ontology import failed.
+        if not types:
+            types = {
+                "Person": {"description": "Individual person", "required_fields": ["text"], "optional_fields": ["role"], "validation_pattern": r".+"},
+                "Organization": {"description": "Legal entity or agency", "required_fields": ["text"], "optional_fields": ["jurisdiction"], "validation_pattern": r".+"},
+                "Case": {"description": "Legal case", "required_fields": ["text"], "optional_fields": ["citation"], "validation_pattern": r".+"},
+                "Statute": {"description": "Law or code", "required_fields": ["text"], "optional_fields": ["code_section"], "validation_pattern": r".+"},
+            }
+
+        return types
+
+    def _canonical_entity_type(self, raw_label: str) -> Optional[str]:
+        """Map incoming labels to a known canonical entity type key."""
+        if not raw_label:
+            return None
+        normalized = re.sub(r"[^a-z0-9]+", "", str(raw_label).strip().lower())
+        if not normalized:
+            return None
+        for canonical in self.legal_entity_types.keys():
+            ck = re.sub(r"[^a-z0-9]+", "", str(canonical).strip().lower())
+            if ck == normalized:
+                return canonical
+        return None
+
+    def _requested_entity_types(self, metadata: Dict[str, Any]) -> Optional[Set[str]]:
+        """Resolve requested filter labels into canonical entity type keys."""
+        requested = metadata.get("entity_types")
+        if not isinstance(requested, list) or not requested:
+            return None
+        out: Set[str] = set()
+        for item in requested:
+            canonical = self._canonical_entity_type(str(item))
+            if canonical:
+                out.add(canonical)
+        return out or None
+
+    @staticmethod
+    def _requested_extraction_model(metadata: Dict[str, Any]) -> str:
+        value = str(metadata.get("extraction_model", "auto") or "auto").strip().lower()
+        aliases = {
+            "hf ner": "hf_ner",
+            "hf_ner": "hf_ner",
+            "gliner": "gliner",
+            "spacy": "spacy",
+            "patterns": "patterns",
+            "llm": "llm",
+            "auto": "auto",
+            "hybrid": "auto",
+        }
+        return aliases.get(value, "auto")
 
     async def _process_task(  # noqa: C901
         self, task_data: Any, metadata: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Process entity extraction task with collective intelligence integration.
-
-        Args:
-            task_data: Document text or structured input for entity extraction
-            metadata: Task metadata including document_id, correlation_id, etc.
-
-        Returns:
-            Entity extraction result with collective intelligence enhancements
+        Process entity extraction task with collective intelligence and Memory Anchoring.
         """
 
         try:
@@ -334,45 +515,78 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                 document_text = task_data
                 document_id = metadata.get("document_id", f"doc_{hash(task_data)}")
             elif isinstance(task_data, dict):
-                document_text = task_data.get("text", task_data.get("content", ""))  # noqa: F841
+                document_text = task_data.get("text", task_data.get("content", ""))
                 document_id = task_data.get(
                     "document_id", metadata.get("document_id", f"doc_{id(task_data)}")
                 )
             else:
                 raise ValueError(f"Unsupported task_data type: {type(task_data)}")
 
-            if not document_text:  # noqa: F821
+            if not document_text:
                 raise ValueError("No document text provided for entity extraction")
 
             logger.info(f"Starting entity extraction for document {document_id}")
             start_time = datetime.now()
 
-            # Step 1: Check shared memory for similar entity extractions
-            similar_extractions = await self._find_similar_extractions(document_text)  # noqa: F821
-            logger.info(
-                f"Found {len(similar_extractions)} similar entity extractions from collective memory"
-            )
+            # Step 1: Memory Bootstrap - Retrieve Ground Truth from Knowledge Graph
+            all_entities = []
+            similar_extractions = await self._find_similar_extractions(document_text)
+            
+            # Find entities already verified by the expert
+            anchors = []
+            for result in similar_extractions:
+                if result.record.metadata.get("expert_verified") is True:
+                    # Capture name and type from ground truth
+                    name = result.record.key.split("_")[-1] # Simple heuristic for entity name
+                    etype = result.record.metadata.get("entity_type")
+                    if name and etype and name in document_text:
+                        # Auto-extract based on verified anchor
+                        matches = re.finditer(re.escape(name), document_text)
+                        for m in matches:
+                            anchors.append(ExtractedEntity(
+                                entity_id=str(uuid.uuid4()),
+                                entity_type=etype,
+                                text=name,
+                                start_pos=m.start(),
+                                end_pos=m.end(),
+                                confidence=1.0, # Ground truth
+                                extraction_method="memory_anchor",
+                                attributes={"expert_verified": True}
+                            ))
+            
+            if anchors:
+                logger.info(f"Bootstrapped {len(anchors)} entities from Expert Ground Truth")
+                all_entities.extend(anchors)
 
             # Step 2: Multi-method entity extraction
-            all_entities = []
-            extraction_methods_used = set()
+            extraction_methods_used = set(e.extraction_method for e in all_entities)
+            requested_types = self._requested_entity_types(metadata)
+            requested_model = self._requested_extraction_model(metadata)
 
             # Method 1: spaCy NER
-            if self.config.use_spacy and self.spacy_nlp:
+            if (
+                requested_model in {"auto", "spacy"}
+                and self.config.use_spacy
+                and self.spacy_nlp
+            ):
                 spacy_entities = await self._extract_with_spacy(document_text)  # noqa: F821
                 all_entities.extend(spacy_entities)
                 extraction_methods_used.add("spacy")
                 logger.info(f"spaCy extracted {len(spacy_entities)} entities")
 
             # Method 2: GLiNER
-            if self.config.use_gliner and self.gliner_model:
+            if (
+                requested_model in {"auto", "gliner"}
+                and self.config.use_gliner
+                and self.gliner_model
+            ):
                 gliner_entities = await self._extract_with_gliner(document_text)  # noqa: F821
                 all_entities.extend(gliner_entities)
                 extraction_methods_used.add("gliner")
                 logger.info(f"GLiNER extracted {len(gliner_entities)} entities")
 
             # Method 3: Pattern-based extraction
-            if self.config.use_patterns:
+            if requested_model in {"auto", "patterns"} and self.config.use_patterns:
                 pattern_entities = await self._extract_with_patterns(document_text)  # noqa: F821
                 all_entities.extend(pattern_entities)
                 extraction_methods_used.add("patterns")
@@ -380,10 +594,24 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                     f"Pattern matching extracted {len(pattern_entities)} entities"
                 )
 
-            # Method 4: LLM enhancement
-            if self.config.use_llm_enhancement:
+            # Method 4: HF NER fallback/augmentation
+            if (
+                requested_model in {"auto", "hf_ner"}
+                and self.config.use_hf_ner
+                and self.hf_ner_pipeline
+            ):
+                hf_entities = await self._extract_with_hf_ner(document_text)
+                all_entities.extend(hf_entities)
+                extraction_methods_used.add("hf_ner")
+                logger.info("HF NER extracted %s entities", len(hf_entities))
+
+            # Method 5: LLM enhancement
+            if (
+                requested_model in {"auto", "llm"}
+                and self.config.use_llm_enhancement
+            ):
                 llm_entities = await self._extract_with_llm(
-                    document_text, all_entities, similar_extractions  # noqa: F821
+                    document_text, all_entities, similar_extractions, metadata
                 )
                 all_entities.extend(llm_entities)
                 extraction_methods_used.add("llm")
@@ -407,12 +635,23 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                 )
                 all_entities = validated_entities
 
-            # Step 5: Extract relationships between entities
+            if requested_types:
+                before = len(all_entities)
+                all_entities = [
+                    e for e in all_entities if e.entity_type in requested_types
+                ]
+                logger.info(
+                    "Applied requested ontology type filter: %s -> %s entities",
+                    before,
+                    len(all_entities),
+                )
+
+            # Step 6: Extract relationships between entities
             relationships = await self._extract_relationships(
                 all_entities, document_text  # noqa: F821
             )
 
-            # Step 6: Calculate overall confidence and statistics
+            # Step 7: Calculate overall confidence and statistics
             processing_time = (datetime.now() - start_time).total_seconds()
             overall_confidence = (
                 sum(entity.confidence for entity in all_entities) / len(all_entities)
@@ -441,10 +680,10 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                 overall_confidence=overall_confidence,
             )
 
-            # Step 7: Store results in shared memory for collective intelligence
+            # Step 8: Store results in shared memory for collective intelligence
             await self._store_extraction_result(extraction_result)
 
-            # Step 8: Store entities in legal entity memory
+            # Step 9: Store entities in legal entity memory
             entity_record_ids = await self.store_legal_entities(
                 document_id=document_id,
                 entities=[entity.to_dict() for entity in all_entities],
@@ -490,9 +729,7 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
 
     async def _find_similar_extractions(self, document_text: str) -> List[Any]:
         """
-        Find similar entity extractions from shared memory to enhance current extraction.
-
-        This is a key collective intelligence feature - learning from other agents.
+        Find similar entity extractions from shared memory, prioritizing expert-verified ones.
         """
         if not self._is_memory_available():
             return []
@@ -500,28 +737,33 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
         try:
             # Extract key terms for similarity search
             key_terms = self._extract_key_terms(document_text)
-            search_query = " ".join(key_terms[:10])  # Use top 10 terms
+            search_query = " ".join(key_terms[:10])
 
             # Search for similar entity extractions
             similar_results = await self.search_memory(
                 query=search_query,
                 memory_types=[MemoryType.ENTITY, MemoryType.ANALYSIS],
                 namespaces=["legal_entities", "legal_analysis"],
-                limit=5,
+                limit=10, # Get more to allow filtering for verified ones
                 min_similarity=0.5,
             )
 
-            # Filter for entity extraction results
-            entity_extractions = []
+            # Separate into verified and unverified
+            verified = []
+            unverified = []
             for result in similar_results:
                 metadata = result.record.metadata
                 if (
                     "entity" in metadata.get("analysis_type", "")
                     or result.record.memory_type == MemoryType.ENTITY
                 ):
-                    entity_extractions.append(result)
+                    if metadata.get("expert_verified") is True:
+                        verified.append(result)
+                    else:
+                        unverified.append(result)
 
-            return entity_extractions
+            # Prioritize verified ones in the final list
+            return verified + unverified
 
         except Exception as e:
             logger.warning(f"Failed to find similar entity extractions: {e}")
@@ -615,61 +857,52 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
         return entities
 
     async def _extract_with_gliner(self, text: str) -> List[ExtractedEntity]:
-        """Extract entities using GLiNER model"""
-
+        """Extract entities using the Multi-Task GLiNER Oracle."""
         entities = []
-
         if not self.gliner_model:
             return entities
 
         try:
-            # Define legal entity types for GLiNER
-            legal_labels = [
-                "Person",
-                "Organization",
-                "Court",
-                "Case",
-                "Statute",
-                "Legal Concept",
-                "Contract",
-                "Location",
-                "Date",
-                "Money",
-            ]
+            # High-Resolution Label Mapping
+            label_map = {}
+            try:
+                from agents.extractors.ontology import LegalEntityType
+                for et in LegalEntityType:
+                    label_map[et.value.label] = str(et.value.label).replace(" ", "")
+            except Exception:
+                for k in self.legal_entity_types.keys():
+                    label_map[k] = k
 
-            # Extract entities with GLiNER
-            gliner_entities = self.gliner_model.predict_entities(text, legal_labels)
-
-            for ent in gliner_entities:
-                # Map GLiNER results to our format
-                entity_type = ent["label"].replace(" ", "")  # Remove spaces
-                if entity_type not in self.legal_entity_types:
-                    logger.debug(
-                        "Skipping GLiNER entity with unsupported type: %s",
-                        ent["label"],
-                    )
-                    continue
-
-                entity = ExtractedEntity(
-                    entity_id=str(uuid.uuid4()),
-                    entity_type=entity_type,
-                    text=ent["text"].strip(),
-                    start_pos=ent["start"],
-                    end_pos=ent["end"],
-                    confidence=ent.get(
-                        "score", 0.8
-                    ),  # GLiNER provides confidence scores
-                    extraction_method="gliner",
-                    attributes={
-                        "gliner_label": ent["label"],
-                        "original_score": ent.get("score", 0.8),
-                    },
-                )
-
-                entities.append(entity)
+            legal_labels = list(label_map.keys())
+            
+            # Process in high-fidelity chunks (1024 chars for GLiNER)
+            max_chunk = 1024
+            chunks = [text[i : i + max_chunk] for i in range(0, len(text), max_chunk)]
+            
+            for i, chunk in enumerate(chunks):
+                offset = i * max_chunk
+                gliner_entities = self.gliner_model.predict_entities(chunk, legal_labels, threshold=self.config.min_confidence)
+                
+                for ent in gliner_entities:
+                    raw_label = ent.get("label", "")
+                    canonical_type = label_map.get(raw_label) or self._canonical_entity_type(raw_label)
+                    
+                    if canonical_type:
+                        entities.append(ExtractedEntity(
+                            entity_id=str(uuid.uuid4()),
+                            entity_type=canonical_type,
+                            text=ent["text"].strip(),
+                            start_pos=ent["start"] + offset,
+                            end_pos=ent["end"] + offset,
+                            confidence=float(ent.get("score", 0.8)),
+                            extraction_method="gliner_multi_task",
+                            attributes={"raw_label": raw_label}
+                        ))
+            
+            logger.info(f"GLiNER Multi-Task Oracle found {len(entities)} entities")
 
         except Exception as e:
-            logger.error(f"GLiNER extraction failed: {e}")
+            logger.error(f"GLiNER Oracle failed: {e}")
 
         return entities
 
@@ -710,136 +943,170 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
 
         return entities
 
-    async def _extract_with_llm(  # noqa: C901
+    async def _extract_with_hf_ner(self, text: str) -> List[ExtractedEntity]:
+        """Extract entities using the HuggingFace ensemble (BART, BERT, etc.)"""
+        if not self.config.use_hf_ner or not hasattr(self, "hf_pipelines"):
+            return []
+
+        all_hf_entities = []
+        label_mapping = {
+            "PER": "Person", "PERSON": "Person", "ORG": "Organization",
+            "LOC": "Location", "GPE": "Location", "MISC": "LegalConcept",
+        }
+        
+        for name, pipeline in self.hf_pipelines.items():
+            try:
+                # Process in chunks if text is long
+                max_chunk = 512
+                chunks = [text[i : i + max_chunk] for i in range(0, len(text), max_chunk)]
+                
+                for chunk_idx, chunk in enumerate(chunks):
+                    offset = chunk_idx * max_chunk
+                    results = pipeline(chunk)
+                    
+                    for res in results:
+                        raw_label = str(res.get("entity_group") or res.get("entity") or "").upper()
+                        ctype = label_mapping.get(raw_label)
+                        if ctype:
+                            all_hf_entities.append(ExtractedEntity(
+                                entity_id=str(uuid.uuid4()),
+                                entity_type=ctype,
+                                text=res["word"].replace("##", "").strip(),
+                                start_pos=res["start"] + offset,
+                                end_pos=res["end"] + offset,
+                                confidence=float(res["score"]),
+                                extraction_method=f"hf_{name}",
+                                attributes={"model": name, "hf_label": raw_label}
+                            ))
+            except Exception as e:
+                logger.warning(f"HF pipeline '{name}' failed: {e}")
+
+        return all_hf_entities
+
+    async def _extract_with_llm(
         self,
         text: str,
         existing_entities: List[ExtractedEntity],
         similar_extractions: List[Any],
+        metadata: Dict[str, Any],
     ) -> List[ExtractedEntity]:
-        """Extract additional entities using LLM with collective intelligence"""
-
+        """Extract additional entities using LLM with collective intelligence, prioritizing expert truth."""
         entities = []
-
         try:
-            # Get LLM service from container
+            # Resolve LLM Service
             llm_service = None
             try:
-                from core.llm_providers import LLMManager  # noqa: E402
-
-                try:
-                    maybe = self.services.get_service(LLMManager)
-                    llm_service = await maybe if inspect.isawaitable(maybe) else maybe
-                except Exception:
-                    maybe = self.services.get_service("llm_manager")
-                    llm_service = await maybe if inspect.isawaitable(maybe) else maybe
+                from core.llm_providers import LLMManager
+                maybe = self.services.get_service(LLMManager)
+                llm_service = await maybe if inspect.isawaitable(maybe) else maybe
             except Exception:
-                pass
+                maybe = self.services.get_service("llm_manager")
+                llm_service = await maybe if inspect.isawaitable(maybe) else maybe
 
             if not llm_service:
                 logger.warning("LLM service not available, skipping LLM enhancement")
                 return entities
 
-            # Build context from existing entities
-            existing_context = ""
+            # Build collective context with Expert Truth priority
+            verified_context = ""
+            general_context = ""
+            
+            for i, result in enumerate(similar_extractions):
+                try:
+                    content = result.record.content
+                    entity_data = json.loads(content) if isinstance(content, str) else content
+                    if isinstance(entity_data, dict) and "extraction_result" in entity_data:
+                        entity_data = entity_data["extraction_result"]
+                    
+                    labels = entity_data.get("entity_types") or [e.get("type") for e in entity_data.get("entities", [])]
+                    summary = f"({', '.join(filter(None, labels))})"
+                    
+                    if result.record.metadata.get("expert_verified") is True:
+                        verified_context += f"\n- [VERIFIED TRUTH]: {summary}"
+                    else:
+                        general_context += f"\n- [COLLECTIVE]: {summary}"
+                except Exception as exc:
+                    logger.warning(
+                        "Skipping malformed similar extraction at index=%s: %s",
+                        i,
+                        exc,
+                    )
+
+            # Build Local Context
+            local_context = ""
             if existing_entities:
-                existing_context = "\n\nEntities already found:\n"
-                for entity in existing_entities[:10]:  # Limit context size
-                    existing_context += f"- {entity.entity_type}: {entity.text}\n"
+                local_context = "\nAlready found by local models: " + ", ".join([f"{e.entity_type}:{e.text}" for e in existing_entities[:15]])
 
-            # Build context from similar extractions
-            collective_context = ""
-            if similar_extractions:
-                collective_context = (
-                    "\n\nSimilar entity extractions from other legal documents:\n"
-                )
-                for i, result in enumerate(similar_extractions[:3], 1):
-                    try:
-                        entity_data = (
-                            json.loads(result.record.content)
-                            if isinstance(result.record.content, str)
-                            else result.record.content
-                        )
-                        collective_context += f"\n{i}. Found entities: {', '.join(entity_data.get('entity_types', []))}\n"
-                    except Exception:
-                        pass
+            # USE THE ROBUST ONTOLOGY PROMPT
+            from agents.extractors.ontology import get_extraction_prompt
+            base_instructions = get_extraction_prompt()
 
-            # Enhanced entity extraction prompt
-            prompt = """
-            Extract additional legal entities from the following text that might have been missed by automated tools.
-            Focus on complex legal concepts, implied relationships, and domain-specific terminology.
+            prompt = f"""
+            {base_instructions}
+            
+            IMPORTANT: Use the following [VERIFIED TRUTH] examples as high-confidence guidance for your reasoning. 
+            They represent manual corrections made by a legal expert.
 
-            Legal Text:
-            {text[:3000]}  # Limit text size
-            {existing_context}
-            {collective_context}
+            COLLECTIVE INTELLIGENCE (Past Examples):
+            {verified_context if verified_context else "None available yet."}
+            {general_context}
 
-            Entity types to look for:
-            - Person (judges, attorneys, parties)
-            - Organization (law firms, government agencies, companies)
-            - Court (specific courts and tribunals)
-            - Case (case names and citations)
-            - Statute (laws, regulations, codes)
-            - LegalConcept (legal principles, doctrines)
-            - Contract (agreements, legal documents)
-            - Location (jurisdictions, venues)
+            LOCAL CONTEXT:
+            {local_context}
 
-            Return ONLY JSON format:
+            Legal Text to Analyze:
+            \"\"\"{text[:4000]}\"\"\"
+
+            Return your findings in the following JSON format:
             {{
                 "entities": [
                     {{
-                        "type": "entity_type",
-                        "text": "extracted text",
-                        "start": 0,
-                        "end": 10,
-                        "confidence": 0.8,
-                        "reason": "why this is a legal entity"
+                        "type": "entity_type_label",
+                        "text": "verbatim text",
+                        "start_char": 0,
+                        "end_char": 10,
+                        "confidence": 0.95,
+                        "reason": "why this matches the ontology and verified patterns"
                     }}
                 ]
             }}
             """
 
-            # Make LLM call
             response = await llm_service.complete(
-                prompt=prompt,
-                model="gpt-4",  # Use capable model for entity extraction
-                temperature=0.1,  # Low temperature for consistent extraction
-                max_tokens=1500,
+                prompt=prompt, 
+                model="gpt-4",
+                temperature=0.1,
+                max_tokens=2000
             )
-
-            # Parse LLM response
+            
+            # Parse and validate against canonical types
             try:
-                llm_result = json.loads(response)
-                for entity_data in llm_result.get("entities", []):
-                    entity_type = entity_data.get("type")
-                    if entity_type not in self.legal_entity_types:
-                        logger.debug(
-                            "Skipping LLM entity with unsupported type: %s",
-                            entity_type,
-                        )
-                        continue
-                    entity = ExtractedEntity(
-                        entity_id=str(uuid.uuid4()),
-                        entity_type=entity_type,
-                        text=entity_data.get("text", "").strip(),
-                        start_pos=entity_data.get("start", 0),
-                        end_pos=entity_data.get("end", 0),
-                        confidence=entity_data.get("confidence", 0.7),
-                        extraction_method="llm",
-                        attributes={
-                            "llm_reason": entity_data.get("reason", ""),
-                            "collective_intelligence_used": len(similar_extractions)
-                            > 0,
-                        },
-                    )
-
-                    entities.append(entity)
-
-            except json.JSONDecodeError:
-                logger.warning("Failed to parse LLM entity extraction response")
+                raw_json = str(response).strip()
+                if "```" in raw_json: raw_json = raw_json.split("```")[1].replace("json", "").strip()
+                data = json.loads(raw_json)
+                for ent in data.get("entities", []):
+                    ctype = self._canonical_entity_type(ent.get("type"))
+                    if ctype:
+                        entities.append(ExtractedEntity(
+                            entity_id=str(uuid.uuid4()),
+                            entity_type=ctype,
+                            text=ent["text"],
+                            start_pos=int(ent.get("start_char", ent.get("start", 0))),
+                            end_pos=int(ent.get("end_char", ent.get("end", 0))),
+                            confidence=float(ent.get("confidence", 0.7)),
+                            extraction_method="llm",
+                            attributes={
+                                "llm_reason": ent.get("reason", ""), 
+                                "ontology_aligned": True,
+                                "collective_intelligence_used": bool(similar_extractions),
+                                "guided_by_expert_truth": bool(verified_context)
+                            }
+                        ))
+            except Exception as e:
+                logger.warning(f"LLM Parse Error: {e}")
 
         except Exception as e:
-            logger.error(f"LLM entity extraction failed: {e}")
-
+            logger.error(f"LLM Extraction logic failure: {e}")
         return entities
 
     async def _deduplicate_entities(
@@ -892,7 +1159,7 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
             return []
 
         # Priority order for extraction methods
-        method_priority = {"llm": 4, "gliner": 3, "spacy": 2, "patterns": 1}
+        method_priority = {"llm": 4, "gliner": 3, "spacy": 2, "hf_ner": 1.5, "patterns": 1}
 
         # Sort by confidence and method priority
         overlapping.sort(
@@ -995,37 +1262,87 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
     async def _extract_relationships(
         self, entities: List[ExtractedEntity], text: str
     ) -> List[Dict[str, Any]]:
-        """Extract relationships between entities"""
-
+        """Extract relationships between entities using REBEL and co-occurrence."""
         relationships = []
+        
+        # 1. High-Fidelity REBEL Extraction
+        if hasattr(self, "rebel_pipeline") and self.rebel_pipeline:
+            try:
+                # REBEL works best on smaller chunks
+                max_chunk = 512
+                chunks = [text[i : i + max_chunk] for i in range(0, len(text), max_chunk)]
+                
+                for chunk in chunks:
+                    # REBEL outputs triplets in a special string format
+                    gen_kwargs = {"max_length": 128, "length_penalty": 0, "num_beams": 3, "early_stopping": True}
+                    out = self.rebel_pipeline(chunk, **gen_kwargs)
+                    extracted_text = out[0]["generated_text"]
+                    
+                    # Parse REBEL triplets: <obj> subject <rel> relation <subj> object
+                    triplets = self._parse_rebel_output(extracted_text)
+                    for subj, rel, obj in triplets:
+                        # Match REBEL text to our extracted entities
+                        s_ent = next((e for e in entities if subj.lower() in e.text.lower()), None)
+                        o_ent = next((e for e in entities if obj.lower() in e.text.lower()), None)
+                        
+                        if s_ent and o_ent:
+                            relationships.append({
+                                "source_id": s_ent.entity_id,
+                                "target_id": o_ent.entity_id,
+                                "relationship_type": rel.upper().replace(" ", "_"),
+                                "confidence": 0.9,
+                                "properties": {"extraction_method": "rebel", "raw_relation": rel}
+                            })
+            except Exception as e:
+                logger.warning(f"REBEL extraction failed: {e}")
 
-        # Simple co-occurrence based relationships
-        for i, entity1 in enumerate(entities):
-            for entity2 in entities[i + 1 :]:
-                # Check if entities are close to each other in text
-                distance = abs(entity1.start_pos - entity2.start_pos)
-                if distance < 200:  # Entities within 200 characters
-
-                    # Determine relationship type based on entity types
-                    rel_type = self._infer_relationship_type(
-                        entity1.entity_type, entity2.entity_type
-                    )
-
-                    if rel_type:
-                        relationship = {
-                            "source_id": entity1.entity_id,
-                            "target_id": entity2.entity_id,
-                            "relationship_type": rel_type,
-                            "confidence": min(entity1.confidence, entity2.confidence)
-                            * 0.8,
-                            "properties": {
-                                "distance": distance,
-                                "extraction_method": "co_occurrence",
-                            },
-                        }
-                        relationships.append(relationship)
+        # 2. Fallback to co-occurrence if list is still small
+        if len(relationships) < 5:
+            for i, entity1 in enumerate(entities):
+                for entity2 in entities[i + 1 :]:
+                    distance = abs(entity1.start_pos - entity2.start_pos)
+                    if distance < 150: 
+                        rel_type = self._infer_relationship_type(entity1.entity_type, entity2.entity_type)
+                        if rel_type:
+                            relationships.append({
+                                "source_id": entity1.entity_id,
+                                "target_id": entity2.entity_id,
+                                "relationship_type": rel_type,
+                                "confidence": min(entity1.confidence, entity2.confidence) * 0.7,
+                                "properties": {"distance": distance, "extraction_method": "co_occurrence"}
+                            })
 
         return relationships
+
+    def _parse_rebel_output(self, text: str) -> List[Tuple[str, str, str]]:
+        """Parse the special tokenized output of REBEL into (subj, rel, obj) triplets."""
+        triplets = []
+        relation, subject, object_ = '', '', ''
+        text = text.strip()
+        current = 'x'
+        for token in text.replace("<s>", "").replace("</s>", "").split():
+            if token == "<triplet>":
+                current = 't'
+                if relation:
+                    triplets.append((subject.strip(), relation.strip(), object_.strip()))
+                    relation, subject, object_ = '', '', ''
+                subject = ''
+            elif token == "<subj>":
+                current = 's'
+                if relation:
+                    triplets.append((subject.strip(), relation.strip(), object_.strip()))
+                    relation, subject, object_ = '', '', ''
+                object_ = ''
+            elif token == "<obj>":
+                current = 'o'
+                object_ = ''
+            else:
+                if current == 't': subject += ' ' + token
+                elif current == 's': object_ += ' ' + token
+                elif current == 'o': relation += ' ' + token
+        if relation:
+            triplets.append((subject.strip(), relation.strip(), object_.strip()))
+        return triplets
 
     def _infer_relationship_type(self, type1: str, type2: str) -> Optional[str]:
         """Infer relationship type based on entity types"""
@@ -1090,6 +1407,8 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                 "spacy_enabled": self.config.use_spacy and self.spacy_nlp is not None,
                 "gliner_enabled": self.config.use_gliner
                 and self.gliner_model is not None,
+                "hf_ner_enabled": self.config.use_hf_ner
+                and self.hf_ner_pipeline is not None,
                 "patterns_enabled": self.config.use_patterns,
                 "llm_enhancement_enabled": self.config.use_llm_enhancement,
             },
@@ -1101,6 +1420,7 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
             "models_loaded": {
                 "spacy_model": str(self.spacy_nlp) if self.spacy_nlp else None,
                 "gliner_model": bool(self.gliner_model),
+                "hf_ner_model": bool(self.hf_ner_pipeline),
             },
             "pattern_count": sum(
                 len(patterns) for patterns in self.legal_patterns.values()

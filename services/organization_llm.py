@@ -31,8 +31,10 @@ class OrganizationPromptAdapter:
             )
         return (
             "You are a file organization assistant. Return ONLY valid JSON with keys: "
-            "proposed_folder, proposed_filename, confidence, rationale, alternatives. "
-            "Use concise rationale.\n"
+            "proposed_folder, proposed_filename, confidence, rationale, alternatives, "
+            "evidence_spans (list of objects with keys: start_char, end_char, quote). "
+            "Use concise rationale. Evidence spans should point to the exact character "
+            "offsets in the preview that justify the folder choice.\n"
             f"file_name: {file_name}\n"
             f"current_path: {current_path}\n"
             f"preview: {preview[:1200]}\n"

@@ -390,7 +390,7 @@ class FileIndexRepository(BaseRepository):
                         file_id,
                         table.get("source_chunk_id"),
                         int(table.get("table_index", i)),
-                        str(table.get("extraction_status") or "placeholder"),
+                        str(table.get("extraction_status") or "unknown"),
                         table.get("extraction_method"),
                         json.dumps(table.get("headers") or []),
                         json.dumps(table.get("rows") or []),

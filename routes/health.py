@@ -25,11 +25,19 @@ async def health(request: Request) -> Dict[str, Any]:
     """Canonical lightweight health endpoint."""
     startup = getattr(request.app.state, "agent_startup", None) or {}
     memory_ready = bool(startup.get("memory_ready", False))
-    status = "healthy" if memory_ready else "degraded"
+    missing_required = startup.get("missing") or []
+    deferred_required = startup.get("deferred_required") or []
+    agents_ready = memory_ready and not missing_required and not deferred_required
+    status = "healthy" if agents_ready else "degraded"
     return {
         "status": status,
         "message": "Smart Document Organizer API is running",
         "memory": {"required": True, "ready": memory_ready},
+        "agents": {
+            "ready": agents_ready,
+            "missing_required": missing_required,
+            "deferred_required": deferred_required,
+        },
         "agent_startup": startup,
     }
 
@@ -177,12 +185,16 @@ async def health_details(
     except Exception:
         pass
 
-    overall = "healthy" if components.get("memory", {}).get("ready") else "degraded"
+    startup = getattr(request.app.state, "agent_startup", None) or {}
+    has_missing = bool(startup.get("missing"))
+    has_deferred = bool(startup.get("deferred_required"))
+    memory_ready = bool(components.get("memory", {}).get("ready"))
+    overall = "healthy" if (memory_ready and not has_missing and not has_deferred) else "degraded"
     return {
         "status": overall,
         "components": components,
         "uptime_ms": uptime_ms,
-        "agent_startup": getattr(request.app.state, "agent_startup", None),
+        "agent_startup": startup,
     }
 
 

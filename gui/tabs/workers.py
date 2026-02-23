@@ -5,6 +5,7 @@ This module contains worker threads and dialog classes used by the GUI tabs.
 """
 
 import os
+import time
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -37,6 +38,18 @@ def extract_content_from_response(resp):
             data = data["value"]
         return data.get("content") or data.get("text") or ""
     return ""
+
+
+def _read_text_file_if_supported(file_path: str) -> str:
+    """Read raw text for plaintext-like files to avoid summary/transformation paths."""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in {".txt", ".md", ".markdown", ".csv", ".json", ".log"}:
+        return ""
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.read()
+    except Exception:
+        return ""
 
 
 class UploadFileWorker(QThread):
@@ -127,21 +140,31 @@ class UploadFolderWorker(QThread):
 class UploadManyFilesWorker(QThread):
     finished_ok = Signal(dict)
     finished_err = Signal(str)
+    progress_update = Signal(int, str) # progress_pct, status_msg
 
-    def __init__(self, paths: list[str], options: Optional[dict] = None):
+    def __init__(self, paths: list[str], options: Optional[dict] = None, job_id: Optional[str] = None):
         super().__init__()
         self.paths = paths
         self.options = options or {}
+        self.job_id = job_id
 
     def run(self):  # noqa: C901
         try:
             if self.isInterruptionRequested():
                 return
-            if not requests:
-                raise RuntimeError("requests not available")
+            
             if not self.paths:
                 raise RuntimeError("No files provided")
+            
+            # Emit progress update signal instead of direct service update
+            self.progress_update.emit(10, "Starting batch upload...")
+                
             result = api_client.process_documents_batch(self.paths, self.options)
+            
+            if self.isInterruptionRequested():
+                return
+
+            self.progress_update.emit(100, "Processing complete")
             self.finished_ok.emit(result)
         except Exception as e:
             self.finished_err.emit(str(e))
@@ -265,56 +288,119 @@ class SemanticAnalysisWorker(QThread):
         file_path,
         text_input,
         analysis_type,
-        include_metadata,
-        deep_analysis,
+        options: Optional[dict] = None,
     ):
         super().__init__()
         self.asyncio_thread = asyncio_thread
         self.file_path = file_path
         self.text_input = text_input
         self.analysis_type = analysis_type
-        self.include_metadata = include_metadata
-        self.deep_analysis = deep_analysis
+        self.options = options or {}
 
     def run(self):  # noqa: C901
-        """Execute semantic analysis via API (and document processor when needed)."""
+        """Execute semantic analysis via API or local clustering engine."""
         try:
-            print(f"[SemanticInfoWorker] Starting '{self.analysis_type}' analysis on '{self.file_path}'...")
+            print(f"[SemanticInfoWorker] Starting '{self.analysis_type}' analysis...")
             if self.isInterruptionRequested():
                 return
-            if not requests:
-                raise RuntimeError("requests not available")
+            
             # Determine text to analyze
             content = self.text_input.strip()
             if not content and self.file_path:
-                # Upload the file to get content
                 print(f"[SemanticInfoWorker] Reading content from {self.file_path}...")
                 resp = api_client.process_document(self.file_path)
                 content = extract_content_from_response(resp)
             
             if not content:
-                print("[SemanticInfoWorker] Error: No content found via file or text input.")
-                raise RuntimeError("No content to analyze. If providing a file, ensure it has readable text.")
-            
-            print(f"[SemanticInfoWorker] Analyzing {len(content)} chars via API...")
+                raise RuntimeError("No content to analyze.")
+
             if self.isInterruptionRequested():
                 return
-            # Call semantic endpoint
+
+            # OPTION 1: High-Resolution Strategic Clustering (Formal Service)
+            if self.analysis_type == "Strategic Clustering":
+                print("[SemanticInfoWorker] Launching formal ThematicDiscoveryService...")
+                try:
+                    from services.thematic_discovery_service import ThematicDiscoveryService
+                    import asyncio
+                    
+                    # Resolve manager and loop
+                    manager = getattr(self.asyncio_thread, "agent_manager", None)
+                    loop = getattr(self.asyncio_thread, "loop", None)
+                    
+                    if not loop:
+                        raise RuntimeError("Asyncio loop not available in worker")
+                        
+                    service = ThematicDiscoveryService(manager)
+                    
+                    # Run end-to-end audit via the asyncio loop
+                    doc_id = os.path.basename(self.file_path) if self.file_path else "manual_input"
+                    
+                    # Bridge synchronous thread to async coroutine
+                    future = asyncio.run_coroutine_threadsafe(
+                        service.discover_strategic_themes(content, doc_id), 
+                        loop
+                    )
+                    results = future.result(timeout=300) # 5 minute timeout for large files
+                    
+                    self.result_ready.emit({"type": "strategic_discovery", "data": results})
+                    return
+                except Exception as e:
+                    print(f"[SemanticInfoWorker] Discovery Service failed: {e}")
+                    raise
+
+            # OPTION 2: Standard Semantic Analysis (API or Local Long-Summarizer)
+            if self.analysis_type == "Summarization" and len(content) > 5000:
+                print(f"[SemanticInfoWorker] Document length {len(content)} exceeds 5k chars. Using local LED-LongSummarizer...")
+                try:
+                    from transformers import pipeline as transformers_pipeline
+                    led_ref = r"E:\Project\smart_document_organizer-main\models\led-base-16384"
+                    summarizer = transformers_pipeline("summarization", model=led_ref, tokenizer=led_ref)
+                    # Process in a single large window (LED specialty)
+                    summary = summarizer(content[:16000], max_length=500, min_length=100, do_sample=False)[0]["summary_text"]
+                    self.result_ready.emit({"summary": summary, "engine": "local_led_longformer"})
+                    return
+                except Exception as e:
+                    print(f"[SemanticInfoWorker] Local LED failed, falling back to API: {e}")
+
+            if not requests:
+                raise RuntimeError("requests not available for API analysis")
+            
+            print(f"[SemanticInfoWorker] Analyzing {len(content)} chars via API...")
             body = api_client.analyze_semantic(content, {
                 "analysis_type": self.analysis_type,
-                "include_metadata": self.include_metadata,
-                "deep_analysis": self.deep_analysis,
+                "options": self.options,
             })
-            print("[SemanticInfoWorker] Analysis complete.")
-            print("[SemanticInfoWorker] Analysis complete.")
-            data = body.get("data")
-            if not data:
-                # Fallback: check for direct 'details' or use body itself
-                data = body.get("details") or body
+            data = body.get("data") or body.get("details") or body
             self.result_ready.emit(data)
+            
         except Exception as e:
             print(f"[SemanticInfoWorker] Error: {e}")
             self.error_occurred.emit(str(e))
+
+    def _label_clusters_with_llm(self, clusters: dict) -> dict:
+        """Use LLM to identify high-level themes for each cluster."""
+        labeled_clusters = {}
+        
+        # We'll use the sync-wrapped API client for rapid labeling
+        for cid, items in clusters.items():
+            if not items: continue
+            
+            # Take representative sample (first 3 sentences)
+            sample = "\n".join(items[:3])
+            prompt = f"Identify a 3-5 word legal theme for these sentences:\n\n{sample}\n\nTheme:"
+            
+            try:
+                # Targeted low-token call
+                res = api_client.analyze_semantic(sample, {"analysis_type": "Key Phrases"})
+                # Fallback heuristic if API is slow: use first few words
+                theme = res.get("summary") or res.get("data", {}).get("summary") or f"Theme {int(cid)+1}"
+                if len(theme) > 50: theme = theme[:47] + "..."
+                labeled_clusters[theme] = items
+            except Exception:
+                labeled_clusters[f"Cluster {int(cid)+1}"] = items
+                
+        return labeled_clusters
 
 
 class EntityExtractionWorker(QThread):
@@ -323,7 +409,14 @@ class EntityExtractionWorker(QThread):
     result_ready = Signal(dict)
     error_occurred = Signal(str)
 
-    def __init__(self, asyncio_thread, file_path, text_input, extraction_type, options: Optional[dict] = None):
+    def __init__(
+        self,
+        asyncio_thread,
+        file_path,
+        text_input,
+        extraction_type,
+        options: Optional[dict] = None,
+    ):
         super().__init__()
         self.asyncio_thread = asyncio_thread
         self.file_path = file_path
@@ -343,9 +436,12 @@ class EntityExtractionWorker(QThread):
             content = self.text_input.strip()
             if not content and self.file_path:
                 print(f"[EntityExtractionWorker] Reading content from file: {self.file_path}")
-                # Upload the file to get content
-                resp = api_client.process_document(self.file_path)
-                content = extract_content_from_response(resp)
+                # Prefer direct raw-text read for plaintext-like formats.
+                content = _read_text_file_if_supported(self.file_path)
+                if not content:
+                    # Use document processor for binary formats (pdf/docx/etc.).
+                    resp = api_client.process_document(self.file_path)
+                    content = extract_content_from_response(resp)
 
             if not content:
                 print("[EntityExtractionWorker] No content found.")
@@ -358,8 +454,314 @@ class EntityExtractionWorker(QThread):
             if not entity_types and self.extraction_type and self.extraction_type != "All":
                 entity_types = [self.extraction_type]
 
-            body = api_client.extract_entities(content, entity_types=entity_types, extraction_type=self.extraction_type)
-            self.result_ready.emit(body.get("data") or {})
+            requested_model = str(
+                self.options.get("extraction_model", "auto") or "auto"
+            ).strip().lower()
+            model_plan = (
+                [requested_model]
+                if requested_model in {"auto", "gliner", "llm", "hf_ner", "spacy", "patterns"}
+                else ["auto"]
+            )
+            if requested_model != "auto":
+                # Usability hardening: never dead-end on one broken model path.
+                model_plan.extend(["auto", "gliner", "patterns"])
+
+            warnings: list[str] = []
+            final_body: dict = {}
+            final_entities: list = []
+            final_relationships: list = []
+            final_extraction_stats: dict = {}
+            attempts: list[dict] = []
+
+            for model_name in model_plan:
+                if model_name in {a.get("model") for a in attempts}:
+                    continue
+                body = api_client.extract_entities(
+                    content,
+                    entity_types=entity_types,
+                    extraction_type="ner",
+                    extra_options={
+                        "extraction_model": model_name,
+                        "provenance_requested": True,
+                    },
+                )
+                data = body.get("data") if isinstance(body.get("data"), dict) else {}
+                entities = (
+                    body.get("entities")
+                    if isinstance(body.get("entities"), list)
+                    else data.get("entities")
+                )
+                relationships = (
+                    body.get("relationships")
+                    if isinstance(body.get("relationships"), list)
+                    else data.get("relationships")
+                )
+                extraction_stats = (
+                    body.get("extraction_stats")
+                    if isinstance(body.get("extraction_stats"), dict)
+                    else data.get("extraction_stats")
+                    if isinstance(data.get("extraction_stats"), dict)
+                    else {}
+                )
+                methods_used = extraction_stats.get("extraction_methods_used", [])
+                methods_set = (
+                    {str(m).strip().lower() for m in methods_used}
+                    if isinstance(methods_used, list)
+                    else set()
+                )
+                attempts.append(
+                    {
+                        "model": model_name,
+                        "success": bool(body.get("success", True)),
+                        "entities": len(entities) if isinstance(entities, list) else 0,
+                        "methods_used": sorted(methods_set),
+                        "error": body.get("error"),
+                    }
+                )
+
+                if not bool(body.get("success", True)):
+                    warnings.append(
+                        f"Model {model_name} failed: {body.get('error') or 'unknown'}"
+                    )
+                    continue
+
+                if isinstance(entities, list) and entities:
+                    final_body = body
+                    final_entities = entities
+                    final_relationships = (
+                        relationships if isinstance(relationships, list) else []
+                    )
+                    final_extraction_stats = (
+                        extraction_stats if isinstance(extraction_stats, dict) else {}
+                    )
+                    if model_name != requested_model:
+                        warnings.append(
+                            f"Fallback used: requested={requested_model}, used={model_name}"
+                        )
+                    break
+
+                warnings.append(f"Model {model_name} returned zero entities.")
+
+            if not final_body:
+                # keep last attempt payload for diagnostics
+                final_body = body if "body" in locals() else {}
+                final_extraction_stats = (
+                    extraction_stats if "extraction_stats" in locals() and isinstance(extraction_stats, dict) else {}
+                )
+                final_entities = []
+                final_relationships = []
+
+            if warnings or attempts:
+                final_extraction_stats = dict(final_extraction_stats or {})
+                final_extraction_stats["warnings"] = warnings
+                final_extraction_stats["model_attempts"] = attempts
+
+            self.result_ready.emit(
+                {
+                    "success": bool(final_body.get("success", True)),
+                    "error": final_body.get("error"),
+                    "source_text": content,
+                    "entities": final_entities,
+                    "relationships": final_relationships,
+                    "extraction_stats": final_extraction_stats,
+                    "raw_response": final_body,
+                }
+            )
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
+class EntityExtractionFolderWorker(QThread):
+    """Worker thread for folder-based entity extraction operations."""
+
+    result_ready = Signal(dict)
+    error_occurred = Signal(str)
+
+    def __init__(self, folder_path: str, extraction_type: str, options: Optional[dict] = None):
+        super().__init__()
+        self.folder_path = folder_path
+        self.extraction_type = extraction_type
+        self.options = options or {}
+
+    def run(self):  # noqa: C901
+        try:
+            if self.isInterruptionRequested():
+                return
+            if not requests:
+                raise RuntimeError("requests not available")
+            if not self.folder_path or not os.path.isdir(self.folder_path):
+                raise RuntimeError("Invalid folder path")
+
+            supported_exts = {
+                ".txt",
+                ".md",
+                ".markdown",
+                ".pdf",
+                ".docx",
+                ".doc",
+                ".rtf",
+                ".json",
+                ".csv",
+                ".html",
+                ".htm",
+            }
+
+            paths: list[str] = []
+            for root, _, files in os.walk(self.folder_path):
+                for name in sorted(files):
+                    _, ext = os.path.splitext(name)
+                    if ext.lower() in supported_exts:
+                        paths.append(os.path.join(root, name))
+
+            if not paths:
+                raise RuntimeError("No supported files found in folder")
+
+            entity_types = self.options.get("entity_types")
+            if not entity_types and self.extraction_type and self.extraction_type != "All":
+                entity_types = [self.extraction_type]
+
+            all_entities: list[dict] = []
+            all_relationships: list[dict] = []
+            total_processed = 0
+            file_chunks: list[str] = []
+            file_errors: list[dict] = []
+            methods_used: set[str] = set()
+            requested_model = str(
+                self.options.get("extraction_model", "auto") or "auto"
+            ).strip().lower()
+            # Rate limiting: throttle backend extraction calls for folder runs.
+            # Default is conservative to avoid API saturation on large folders.
+            requests_per_second = float(
+                self.options.get("rate_limit_rps", 1.5)
+            )
+            if requests_per_second <= 0:
+                requests_per_second = 1.5
+            min_interval = 1.0 / requests_per_second
+            last_request_ts = 0.0
+
+            for path in paths:
+                if self.isInterruptionRequested():
+                    return
+                content = _read_text_file_if_supported(path)
+                if not content:
+                    try:
+                        resp = api_client.process_document(path)
+                        content = extract_content_from_response(resp)
+                    except Exception as exc:
+                        file_errors.append({"file": path, "error": str(exc)})
+                        continue
+
+                if not content.strip():
+                    file_errors.append({"file": path, "error": "no_readable_text"})
+                    continue
+
+                now = time.monotonic()
+                elapsed = now - last_request_ts
+                if elapsed < min_interval:
+                    time.sleep(min_interval - elapsed)
+
+                model_plan = (
+                    [requested_model]
+                    if requested_model in {"auto", "gliner", "llm", "hf_ner", "spacy", "patterns"}
+                    else ["auto"]
+                )
+                if requested_model != "auto":
+                    model_plan.extend(["auto", "gliner", "patterns"])
+
+                file_entities: list[dict] = []
+                file_relationships: list[dict] = []
+                for model_name in model_plan:
+                    body = api_client.extract_entities(
+                        content,
+                        entity_types=entity_types,
+                        extraction_type="ner",
+                        extra_options={
+                            "extraction_model": model_name,
+                            "provenance_requested": True,
+                        },
+                    )
+                    last_request_ts = time.monotonic()
+                    data = body.get("data") if isinstance(body.get("data"), dict) else {}
+                    per_stats = (
+                        body.get("extraction_stats")
+                        if isinstance(body.get("extraction_stats"), dict)
+                        else data.get("extraction_stats")
+                        if isinstance(data.get("extraction_stats"), dict)
+                        else {}
+                    )
+                    if isinstance(per_stats.get("extraction_methods_used"), list):
+                        methods_used.update(
+                            str(m) for m in per_stats.get("extraction_methods_used", [])
+                        )
+                    entities = (
+                        body.get("entities")
+                        if isinstance(body.get("entities"), list)
+                        else data.get("entities")
+                    )
+                    relationships = (
+                        body.get("relationships")
+                        if isinstance(body.get("relationships"), list)
+                        else data.get("relationships")
+                    )
+                    if bool(body.get("success", True)) and isinstance(entities, list) and entities:
+                        file_entities = entities
+                        file_relationships = (
+                            relationships if isinstance(relationships, list) else []
+                        )
+                        if model_name != requested_model:
+                            file_errors.append(
+                                {
+                                    "file": path,
+                                    "error": (
+                                        f"fallback_used requested={requested_model} "
+                                        f"used={model_name}"
+                                    ),
+                                }
+                            )
+                        break
+                all_entities.extend(file_entities)
+                all_relationships.extend(file_relationships)
+
+                file_chunks.append(f"--- FILE: {path} ---\n{content}")
+                total_processed += 1
+
+            if total_processed == 0:
+                raise RuntimeError(
+                    "Folder extraction found no readable text in supported files."
+                )
+            warnings: list[str] = []
+            if file_errors:
+                warnings.append(f"{len(file_errors)} file(s) failed to process.")
+            if requested_model == "gliner" and "gliner" not in methods_used:
+                warnings.append(
+                    "GLiNER requested but backend did not report GLiNER usage."
+                )
+            if requested_model == "llm" and "llm" not in methods_used:
+                warnings.append(
+                    "LLM requested but backend did not report LLM usage."
+                )
+            if len(all_entities) == 0:
+                warnings.append("Folder extraction returned zero entities.")
+
+            self.result_ready.emit(
+                {
+                    "success": True,
+                    "error": None,
+                    "source_text": "\n\n".join(file_chunks),
+                    "entities": all_entities,
+                    "relationships": all_relationships,
+                    "extraction_stats": {
+                        "files_total": len(paths),
+                        "files_processed": total_processed,
+                        "files_failed": len(file_errors),
+                        "file_errors": file_errors[:50],
+                        "extraction_methods_used": sorted(methods_used),
+                        "warnings": warnings,
+                        "total_entities": len(all_entities),
+                        "total_relationships": len(all_relationships),
+                    },
+                }
+            )
         except Exception as e:
             self.error_occurred.emit(str(e))
 
@@ -370,13 +772,67 @@ class LegalReasoningWorker(QThread):
     result_ready = Signal(dict)
     error_occurred = Signal(str)
 
-    def __init__(self, asyncio_thread, file_path, text_input, reasoning_type, options: Optional[dict] = None):
+    def __init__(
+        self,
+        asyncio_thread,
+        file_path,
+        text_input,
+        reasoning_type,
+        folder_path: str = "",
+        options: Optional[dict] = None,
+    ):
         super().__init__()
         self.asyncio_thread = asyncio_thread
         self.file_path = file_path
         self.text_input = text_input
         self.reasoning_type = reasoning_type
+        self.folder_path = folder_path
         self.options = options or {}
+
+    @staticmethod
+    def _map_reasoning_type(reasoning_type: str) -> str:
+        mapping = {
+            "General Analysis": "comprehensive",
+            "Case Law Analysis": "case_law",
+            "Statutory Interpretation": "statutory_interpretation",
+            "Contract Analysis": "contract",
+            "Precedent Analysis": "precedent",
+            "Legal Risk Assessment": "risk_assessment",
+        }
+        return mapping.get(str(reasoning_type or "").strip(), "comprehensive")
+
+    def _collect_folder_content(self, folder_path: str) -> str:
+        if not folder_path or not os.path.isdir(folder_path):
+            return ""
+        supported_exts = {
+            ".txt",
+            ".md",
+            ".pdf",
+            ".docx",
+            ".doc",
+            ".rtf",
+            ".json",
+            ".csv",
+            ".html",
+            ".htm",
+        }
+        chunks: list[str] = []
+        for root, _, files in os.walk(folder_path):
+            for name in sorted(files):
+                if self.isInterruptionRequested():
+                    return ""
+                _, ext = os.path.splitext(name)
+                if ext.lower() not in supported_exts:
+                    continue
+                path = os.path.join(root, name)
+                try:
+                    resp = api_client.process_document(path)
+                    content = extract_content_from_response(resp).strip()
+                    if content:
+                        chunks.append(f"--- FILE: {path} ---\n{content}")
+                except Exception:
+                    continue
+        return "\n\n".join(chunks)
 
     def run(self):  # noqa: C901
         """Execute legal reasoning via API."""
@@ -391,20 +847,28 @@ class LegalReasoningWorker(QThread):
                 # Upload the file to get content
                 resp = api_client.process_document(self.file_path)
                 content = extract_content_from_response(resp)
+            if not content and self.folder_path:
+                content = self._collect_folder_content(self.folder_path)
 
             if not content:
                 raise RuntimeError("No content to analyze")
             if self.isInterruptionRequested():
                 return
+            payload_options = dict(self.options)
+            payload_options.pop("reasoning_type", None)
+            payload_options["analysis_type"] = self._map_reasoning_type(
+                self.reasoning_type
+            )
             # Call legal reasoning endpoint
-            body = api_client.analyze_legal_reasoning(content, {
-                "reasoning_type": self.reasoning_type,
-                **self.options,
-            })
-            data = body.get("data")
+            body = api_client.analyze_legal_reasoning(content, payload_options)
+            if not body.get("success", True):
+                err = body.get("error") or "Legal reasoning failed"
+                self.error_occurred.emit(str(err))
+                return
+            data = body.get("data") if isinstance(body.get("data"), dict) else {}
             if not data:
-                # Fallback: check for direct 'details' or use body itself
-                data = body.get("details") or body
+                details = body.get("details")
+                data = details if isinstance(details, dict) else {}
             self.result_ready.emit(data)
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -416,22 +880,45 @@ class EmbeddingWorker(QThread):
     result_ready = Signal(dict)
     error_occurred = Signal(str)
 
-    def __init__(self, asyncio_thread, text, model_name, operation):
+    def __init__(
+        self,
+        asyncio_thread,
+        text,
+        model_name,
+        operation,
+        options: Optional[dict] = None,
+    ):
         super().__init__()
         self.asyncio_thread = asyncio_thread
         self.text = text
         self.model_name = model_name
         self.operation = operation
+        self.options = options or {}
 
     def run(self):  # noqa: C901
-        """Execute embedding generation via API."""
+        """Execute embedding generation via API with local model mapping."""
         try:
             if self.isInterruptionRequested():
                 return
             if not requests:
                 raise RuntimeError("requests not available")
+            
+            # Map UI labels to backend EmbeddingModel values
+            mapping = {
+                "Nomic v1.5 (High-Fidelity)": "nomic-ai/nomic-embed-text-v1.5",
+                "MiniLM-L6 (Local-Fast)": "all-MiniLM-L6-v2",
+                "Legal-BERT": "nlpaueb/legal-bert-base-uncased",
+                "OpenAI": "text-embedding-3-small"
+            }
+            backend_model = mapping.get(self.model_name, self.model_name)
+            
             # Call embedding endpoint
-            body = api_client.run_embedding_operation(self.text, self.model_name, self.operation)
+            body = api_client.run_embedding_operation(
+                self.text,
+                backend_model,
+                self.operation,
+                options=self.options,
+            )
             self.result_ready.emit(body.get("data") or {})
         except Exception as e:
             self.error_occurred.emit(str(e))

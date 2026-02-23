@@ -3,6 +3,7 @@
 import asyncio
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agents.core.models import AgentResult, AgentType
@@ -14,6 +15,8 @@ class OperationsMixin:
         start_time = datetime.now()
 
         try:
+            if not self.is_initialized and hasattr(self, "initialize"):
+                await self.initialize()
             if not self.is_initialized:
                 return AgentResult(
                     success=False,
@@ -25,20 +28,44 @@ class OperationsMixin:
             agent = self.agents.get(AgentType.DOCUMENT_PROCESSOR)
             if not agent:
                 try:
-                    from .runtime import create_document_processor  # noqa: E402
+                    from .runtime import create_document_processor as runtime_factory  # noqa: E402
 
-                    if create_document_processor and getattr(self, "service_container", None):
-                        agent = await create_document_processor(self.service_container)
+                    if runtime_factory and getattr(self, "service_container", None):
+                        agent = await runtime_factory(self.service_container)
                         if agent:
                             self.agents[AgentType.DOCUMENT_PROCESSOR] = agent
                 except Exception as lazy_err:
                     self.logger.warning(f"Lazy document processor init failed: {lazy_err}")
 
             if not agent:
+                try:
+                    from agents.processors.document_processor import (  # noqa: E402
+                        create_document_processor as direct_factory,
+                    )
+
+                    if getattr(self, "service_container", None):
+                        agent = await direct_factory(self.service_container)
+                        if agent:
+                            self.agents[AgentType.DOCUMENT_PROCESSOR] = agent
+                except Exception as direct_err:
+                    self.logger.warning(
+                        f"Direct document processor init failed: {direct_err}"
+                    )
+
+            if not agent:
+                fallback = await self._process_document_simple_fallback(file_path)
+                if fallback.get("success"):
+                    return AgentResult(
+                        success=True,
+                        data=fallback,
+                        processing_time=(datetime.now() - start_time).total_seconds(),
+                        agent_type="document_processor",
+                    )
                 return AgentResult(
                     success=False,
                     data={},
-                    error="Document processor not available",
+                    error=fallback.get("error", "Document processor not available"),
+                    processing_time=(datetime.now() - start_time).total_seconds(),
                     agent_type="document_processor",
                 )
             result = await agent._process_task(task_data=file_path, metadata=kwargs)
@@ -77,6 +104,51 @@ class OperationsMixin:
                 processing_time=processing_time,
                 agent_type="document_processor",
             )
+
+    async def _process_document_simple_fallback(self, file_path: str) -> Dict[str, Any]:
+        """Fallback extraction path when advanced processor is unavailable."""
+        try:
+            from agents.processors.simple_document_processor import (  # noqa: E402
+                SimpleDocumentProcessor,
+            )
+
+            processor = SimpleDocumentProcessor()
+            path = Path(file_path)
+            extension = path.suffix.lower()
+            if extension not in processor.supported_extensions:
+                return {
+                    "success": False,
+                    "error": (
+                        "Document processor not available and file type is unsupported "
+                        f"for fallback: {extension or 'unknown'}"
+                    ),
+                }
+
+            content_bytes = path.read_bytes()
+            content = await processor._extract_content(
+                str(path), extension, content_bytes
+            )
+            category = processor._determine_category(extension, content or "")
+            return {
+                "success": True,
+                "content": content,
+                "text": content,
+                "metadata": {
+                    "filename": path.name,
+                    "file_type": extension,
+                    "file_size": path.stat().st_size,
+                    "category": category,
+                },
+                "document_format": extension.lstrip("."),
+                "processing_method": "simple_extraction_fallback",
+                "confidence": 0.6,
+            }
+        except Exception as e:
+            self.logger.error(f"Simple fallback processing failed: {e}")
+            return {
+                "success": False,
+                "error": f"Document processor not available: {e}",
+            }
 
     async def extract_entities(self, text: str, **kwargs) -> AgentResult:
         """Extract entities using the Legal Entity Extractor agent."""

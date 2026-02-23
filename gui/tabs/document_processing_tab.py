@@ -75,24 +75,18 @@ from .status_presenter import TabStatusPresenter  # noqa: E402
 if PYSIDE6_AVAILABLE:
     from ..ui import JobStatusWidget, ResultsSummaryBox, DocumentPreviewWidget  # noqa: E402
 from .workers import UploadManyFilesWorker  # noqa: E402
+from ..services.processing_service import processing_service, JobStatus, ProcessingJob
+from ..services import api_client
 
 
 class DocumentProcessingTab(QWidget):  # type: ignore[misc]
     """
     Tab for document content extraction and processing.
     
-    This tab handles the document processing pipeline:
-    1. Upload/select files for processing
-    2. Extract text content from various formats
-    3. Extract metadata (author, date, etc.)
-    4. Analyze content structure
-    5. Generate summaries
-    6. Index to vector store for search
-    7. Export processed results
-    
-    Processed documents are stored in the shared knowledge base
-    for consumption by all other tabs (Semantic Analysis, Entity
-    Extraction, Legal Reasoning, etc.)
+    Refactored to follow best practices:
+    - Observes ProcessingService for state
+    - Uses canonical ApiClient normalization
+    - Fixes selection and removal bugs
     """
 
     # Signals
@@ -103,10 +97,41 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         super().__init__(parent)
         self.worker = None
         self.current_results = None
-        self.selected_files = []
+        self.current_job_id = None
+        self.selected_files = [] # List of absolute paths
         self.setup_ui()
         self.connect_signals()
+        
+        # Subscribe to processing service updates
+        processing_service.subscribe(self._on_job_update)
 
+    def _on_job_update(self, job):
+        """Handle updates from the processing service."""
+        # Check if this job belongs to our current active job
+        if self.current_job_id == job.id:
+            if job.status == JobStatus.RUNNING:
+                self.status.info(f"Processing... {job.progress}%")
+                if hasattr(self, 'job_status'):
+                    self.job_status.set_status("running", f"{job.progress}%")
+            elif job.status == JobStatus.SUCCESS:
+                # Results are handled by the _on_worker_finished method
+                pass
+            elif job.status == JobStatus.FAILED:
+                # Errors are handled by the _on_worker_error method
+                pass
+            elif job.status == JobStatus.CANCELLED:
+                self.status.warn("Processing job was cancelled")
+                self._reset_ui_after_job()
+
+    def _reset_ui_after_job(self):
+        """Re-enable UI components after a job ends."""
+        self.process_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.add_files_button.setEnabled(True)
+        self.remove_files_button.setEnabled(True)
+        self.clear_files_button.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        
     def setup_ui(self):
         """Setup the user interface."""
         layout = QVBoxLayout(self)
@@ -219,6 +244,11 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         self.index_vector_checkbox.setToolTip("Enable semantic search across tabs")
         options_layout.addWidget(self.index_vector_checkbox)
 
+        self.enable_ocr_checkbox = QCheckBox("Enable OCR")
+        self.enable_ocr_checkbox.setChecked(True)
+        self.enable_ocr_checkbox.setToolTip("Enable Optical Character Recognition for scanned documents and images")
+        options_layout.addWidget(self.enable_ocr_checkbox)
+
         left_layout.addWidget(options_group)
 
         # Control buttons
@@ -247,6 +277,28 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
             }
         """)
         button_layout.addWidget(self.process_button)
+
+        self.stop_button = QPushButton("🛑 Stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+            QPushButton:disabled {
+                background-color: #CCCCCC;
+                color: #666666;
+            }
+        """)
+        button_layout.addWidget(self.stop_button)
 
         button_layout.addStretch()
         left_layout.addLayout(button_layout)
@@ -347,6 +399,7 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         self.remove_files_button.clicked.connect(self.remove_selected_files)
         self.clear_files_button.clicked.connect(self.clear_files)
         self.process_button.clicked.connect(self.start_processing)
+        self.stop_button.clicked.connect(self.stop_processing)
         self.export_json_button.clicked.connect(self.export_json)
         self.export_text_button.clicked.connect(self.export_text)
 
@@ -429,7 +482,7 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
             self.status.info("No supported files found in folder")
 
     def add_file_to_list(self, file_path: str):
-        """Add a file to the list widget."""
+        """Add a file to the list widget with duplicate protection."""
         if file_path not in self.selected_files:
             self.selected_files.append(file_path)
             file_name = os.path.basename(file_path)
@@ -437,6 +490,8 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
             item.setToolTip(file_path)
             self.file_list.addItem(item)
             self.status.info(f"Added: {file_name}")
+        else:
+            self.status.info(f"Skipped duplicate: {os.path.basename(file_path)}")
 
     def remove_selected_files(self):
         """Remove selected files from the list."""
@@ -445,8 +500,10 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
             self.status.info("No files selected to remove")
             return
         
-        for item in selected_items:
-            row = self.file_list.row(item)
+        # Sort indices in reverse to avoid index shift issues during deletion
+        rows = sorted([self.file_list.row(item) for item in selected_items], reverse=True)
+        
+        for row in rows:
             if row < len(self.selected_files):
                 removed_file = self.selected_files[row]
                 del self.selected_files[row]
@@ -494,7 +551,7 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
     # -------------------------------------------------------------------------
 
     def start_processing(self):
-        """Start document processing."""
+        """Start document processing using ProcessingService."""
         if not self.selected_files:
             self.status.error("No files selected. Please add documents first.")
             QMessageBox.warning(
@@ -508,39 +565,99 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
             self.status.error("Processing already in progress")
             return
 
-        # Disable buttons during processing
-        self.process_button.setEnabled(False)
-        self.add_files_button.setEnabled(False)
-        self.remove_files_button.setEnabled(False)
-        self.clear_files_button.setEnabled(False)
-
-        # Show progress bar
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # Indeterminate
-
-        # Update status
-        file_count = len(self.selected_files)
-        self.status.info(f"Processing {file_count} document(s)...")
-
-        # Create and configure worker
+        # Create job options
         options = {
             "extract_text": self.extract_text_checkbox.isChecked(),
             "extract_metadata": self.extract_metadata_checkbox.isChecked(),
             "analyze_content": self.analyze_content_checkbox.isChecked(),
             "generate_summary": self.generate_summary_checkbox.isChecked(),
             "index_vector": self.index_vector_checkbox.isChecked(),
+            "enable_ocr": self.enable_ocr_checkbox.isChecked(),
         }
+
+        # Initialize job via service
+        import uuid
+        from datetime import datetime
+        
+        self.current_job_id = str(uuid.uuid4())
+        job = ProcessingJob(
+            id=self.current_job_id,
+            files=list(self.selected_files),
+            options=options,
+            status=JobStatus.PENDING,
+            total_files=len(self.selected_files),
+            started_at=datetime.now()
+        )
+        
+        # Register job in service
+        processing_service._active_jobs[self.current_job_id] = job
+        processing_service._notify(job)
+
+        # Disable buttons during processing
+        self.process_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
+        self.add_files_button.setEnabled(False)
+        self.remove_files_button.setEnabled(False)
+        self.clear_files_button.setEnabled(False)
+
+        # Show progress bar
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+
+        self.status.info(f"Processing {len(self.selected_files)} document(s)...")
+
+        # Create worker with job context
         self.worker = UploadManyFilesWorker(
             paths=self.selected_files,
-            options=options
+            options=options,
+            job_id=self.current_job_id,
         )
 
-        # Connect signals
-        self.worker.finished_ok.connect(self.on_processing_finished)
-        self.worker.finished_err.connect(self.on_processing_error)
+        # Connect signals to explicit methods to ensure thread safety
+        self.worker.progress_update.connect(self._on_worker_progress)
+        self.worker.finished_ok.connect(self._on_worker_finished)
+        self.worker.finished_err.connect(self._on_worker_error)
+        self.worker.finished.connect(self.cleanup_worker)
 
         # Start processing
         self.worker.start()
+
+    def _on_worker_progress(self, pct, msg):
+        """Handle progress updates from worker on the UI thread."""
+        if self.current_job_id:
+            processing_service.update_job_progress(self.current_job_id, pct, JobStatus.RUNNING)
+            self.status.info(f"{msg} ({pct}%)")
+
+    def _on_worker_finished(self, results):
+        """Handle successful completion on the UI thread."""
+        if self.current_job_id:
+            processing_service.update_job_progress(self.current_job_id, 100, JobStatus.SUCCESS)
+            job = processing_service.get_job(self.current_job_id)
+            if job:
+                job.results = results
+        self.on_processing_finished(results)
+
+    def _on_worker_error(self, err):
+        """Handle worker error on the UI thread."""
+        if self.current_job_id:
+            job = processing_service.get_job(self.current_job_id)
+            if job:
+                job.error = err
+            processing_service.update_job_progress(self.current_job_id, 0, JobStatus.FAILED)
+        self.on_processing_error(err)
+
+    def stop_processing(self):
+        """Request cancellation of the current processing job."""
+        if self.worker and self.worker.isRunning():
+            self.status.info("Stopping processing...")
+            if self.current_job_id:
+                # Signal the worker to stop
+                self.worker.requestInterruption()
+                # Update service state
+                processing_service.update_job_progress(self.current_job_id, 0, JobStatus.CANCELLED)
+            
+            self.stop_button.setEnabled(False)
+            self.status.warn("Stop requested. Waiting for worker to finish...")
 
     def on_progress_update(self, message: str):
         """Handle progress updates from worker."""
@@ -548,20 +665,14 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
 
     def on_processing_finished(self, results):
         """Handle processing completion."""
-        # Fix for API mismatch: Backend returns 'results', GUI expects 'files'
-        if 'results' in results and 'files' not in results:
-            results['files'] = results['results']
-
+        # Results are already normalized by ApiClient
         self.current_results = results
         
         # Hide progress bar
         self.progress_bar.setVisible(False)
 
         # Re-enable buttons
-        self.process_button.setEnabled(True)
-        self.add_files_button.setEnabled(True)
-        self.remove_files_button.setEnabled(True)
-        self.clear_files_button.setEnabled(True)
+        self._reset_ui_after_job()
 
         # Enable export buttons
         self.export_json_button.setEnabled(True)
@@ -574,8 +685,16 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         self.processing_completed.emit(results)
 
         # Update status
-        files_count = len(results.get('files', []))
-        self.status.success(f"✓ Successfully processed {files_count} document(s)")
+        files_count = len(results.get("items", []))
+        success_count = int(results.get("processed_count", 0))
+        failed_count = int(results.get("failed_count", 0))
+        if failed_count > 0:
+            self.status.warn(
+                f"Processed {success_count}/{files_count} document(s) "
+                f"({failed_count} failed)"
+            )
+        else:
+            self.status.success(f"✓ Successfully processed {files_count} document(s)")
 
     def on_processing_error(self, error_msg):
         """Handle processing errors."""
@@ -619,15 +738,20 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
 
         # Update summary box if available
         if PYSIDE6_AVAILABLE and hasattr(self, 'results_summary'):
-            files_count = len(results.get('files', []))
-            success_count = sum(1 for f in results.get('files', []) if 'error' not in f)
-            error_count = files_count - success_count
+            items = results.get('items', [])
+            files_count = len(items)
+            success_count = int(results.get("processed_count", 0))
+            error_count = int(results.get("failed_count", 0))
             
             summary_text = f"Processed: {success_count}/{files_count}"
             if error_count > 0:
                 summary_text += f" ({error_count} errors)"
-            
-            self.results_summary.set_summary(summary_text)
+
+            self.results_summary.set_summary(
+                summary_text,
+                "Displayed in Processing Results (export JSON/Text optional)",
+                "Run Console",
+            )
 
     def format_results_html(self, results):
         """Format results as HTML for display."""
@@ -665,19 +789,19 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
             <h2>📊 Processing Results</h2>
         """
 
-        files = results.get('files', [])
-        if not files:
+        items = results.get('items', [])
+        if not items:
             html += "<p>No files were processed.</p>"
         else:
-            for file_result in files:
-                file_name = file_result.get('filename', 'Unknown')
-                
-                if 'error' in file_result:
+            for item in items:
+                file_name = item.get('filename', 'Unknown')
+
+                if item.get("error") or not bool(item.get("success", True)):
                     html += f"""
                     <div class='file error'>
                         <h3>❌ {file_name}</h3>
                         <p class='metadata'>Status: <strong>Error</strong></p>
-                        <p style='color: #f44336;'>{file_result['error']}</p>
+                        <p style='color: #f44336;'>{item.get('error') or 'Unknown error'}</p>
                     </div>
                     """
                 else:
@@ -688,8 +812,8 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
                     """
                     
                     # Metadata
-                    if 'metadata' in file_result:
-                        metadata = file_result['metadata']
+                    if 'metadata' in item:
+                        metadata = item['metadata']
                         if metadata:
                             html += "<p class='metadata'><strong>Metadata:</strong> "
                             meta_items = [f"{k}: {v}" for k, v in metadata.items() if v]
@@ -697,17 +821,17 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
                             html += "</p>"
                     
                     # Summary
-                    if 'summary' in file_result and file_result['summary']:
+                    if 'summary' in item and item['summary']:
                         html += f"""
                         <div class='summary'>
                             <strong>Summary:</strong><br>
-                            {file_result['summary']}
+                            {item['summary']}
                         </div>
                         """
                     
                     # Content preview
-                    if 'content' in file_result and file_result['content']:
-                        content = file_result['content']
+                    if 'content' in item and item['content']:
+                        content = item['content']
                         preview = content[:500] + "..." if len(content) > 500 else content
                         # Escape HTML
                         preview = preview.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -774,31 +898,31 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
                     f.write("DOCUMENT PROCESSING RESULTS\n")
                     f.write("=" * 70 + "\n\n")
 
-                    for file_result in self.current_results.get('files', []):
-                        file_name = file_result.get('filename', 'Unknown')
+                    for item in self.current_results.get('items', []):
+                        file_name = item.get('filename', 'Unknown')
                         f.write(f"\nFile: {file_name}\n")
                         f.write("-" * 70 + "\n")
 
-                        if 'error' in file_result:
+                        if item.get('error'):
                             f.write("Status: ERROR\n")
-                            f.write(f"Error: {file_result['error']}\n\n")
+                            f.write(f"Error: {item['error']}\n\n")
                             continue
 
                         f.write("Status: SUCCESS\n\n")
 
-                        if 'metadata' in file_result and file_result['metadata']:
+                        if item.get('metadata'):
                             f.write("Metadata:\n")
-                            for key, value in file_result['metadata'].items():
+                            for key, value in item['metadata'].items():
                                 if value:
                                     f.write(f"  {key}: {value}\n")
                             f.write("\n")
 
-                        if 'summary' in file_result and file_result['summary']:
-                            f.write(f"Summary:\n{file_result['summary']}\n\n")
+                        if item.get('summary'):
+                            f.write(f"Summary:\n{item['summary']}\n\n")
 
-                        if 'content' in file_result and file_result['content']:
+                        if item.get('content'):
                             f.write("Content:\n")
-                            content = file_result['content']
+                            content = item['content']
                             preview = content[:2000] + "\n[... truncated ...]" if len(content) > 2000 else content
                             f.write(f"{preview}\n\n")
 
@@ -817,6 +941,13 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
                 "Export Error",
                 f"Failed to export text:\n{e}"
             )
+
+    def closeEvent(self, event):
+        """Cleanup on close."""
+        if self.worker:
+            self.worker.requestInterruption()
+            self.worker.wait(1000)
+        super().closeEvent(event)
 
 
 # Legacy alias for backward compatibility

@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, Path
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from services.agent_service import AgentService
 from services.dependencies import get_agent_manager_strict_dep
@@ -13,7 +13,7 @@ router = APIRouter()
 class ExtractionRequest(BaseModel):
     text: str
     extraction_type: str = "ner"
-    options: Dict[str, Any] = {}
+    options: Dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/run")
@@ -29,23 +29,60 @@ async def run_entity_extraction(
     result = await service.dispatch_task("extract_entities", payload)
 
     if isinstance(result, dict):
-        out = {
-            "success": bool(result.get("success", False)),
-            "data": result.get("data", {}),
-            "error": result.get("error"),
-            "processing_time": result.get("processing_time", 0.0),
-            "agent_type": result.get("agent_type", "entity_extractor"),
-            "metadata": result.get("metadata", {}),
-        }
+        raw_data = result.get("data", {})
+        success = bool(result.get("success", False))
+        error = result.get("error")
+        processing_time = result.get("processing_time", 0.0)
+        agent_type = result.get("agent_type", "entity_extractor")
+        metadata = result.get("metadata", {})
     else:
-        out = {
-            "success": result.success,
-            "data": result.data,
-            "error": result.error,
-            "processing_time": result.processing_time,
-            "agent_type": result.agent_type,
-            "metadata": result.metadata,
-        }
+        raw_data = result.data
+        success = bool(result.success)
+        error = result.error
+        processing_time = result.processing_time
+        agent_type = result.agent_type
+        metadata = result.metadata
+
+    if not isinstance(raw_data, dict):
+        raw_data = {}
+
+    extraction_result = (
+        raw_data.get("extraction_result")
+        if isinstance(raw_data.get("extraction_result"), dict)
+        else raw_data
+    )
+    if not isinstance(extraction_result, dict):
+        extraction_result = {}
+
+    entities = (
+        extraction_result.get("entities")
+        if isinstance(extraction_result.get("entities"), list)
+        else []
+    )
+    relationships = (
+        extraction_result.get("relationships")
+        if isinstance(extraction_result.get("relationships"), list)
+        else []
+    )
+    extraction_stats = (
+        extraction_result.get("extraction_stats")
+        if isinstance(extraction_result.get("extraction_stats"), dict)
+        else {}
+    )
+
+    out = {
+        "success": success,
+        "data": {
+            **raw_data,
+            "entities": entities,
+            "relationships": relationships,
+            "extraction_stats": extraction_stats,
+        },
+        "error": error,
+        "processing_time": processing_time,
+        "agent_type": agent_type,
+        "metadata": metadata,
+    }
 
     return enforce_agent_response("entity_extractor", out)
 

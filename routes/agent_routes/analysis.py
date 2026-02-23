@@ -25,6 +25,75 @@ def _v(agent_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     return enforce_agent_response(agent_type, payload)
 
 
+def _parse_processing_options(raw: Optional[str]) -> Dict[str, Any]:
+    """Parse multipart form options JSON for processing endpoints."""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _apply_processing_options(
+    payload: Dict[str, Any], options: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Apply processing options to normalized document payload content/metadata."""
+    if not isinstance(payload, dict) or not options:
+        return payload
+
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    processed_document = (
+        data.get("processed_document")
+        if isinstance(data.get("processed_document"), dict)
+        else None
+    )
+    if not isinstance(processed_document, dict):
+        return payload
+
+    content = str(processed_document.get("content") or "")
+    metadata = (
+        processed_document.get("metadata")
+        if isinstance(processed_document.get("metadata"), dict)
+        else {}
+    )
+
+    if options.get("extract_text") is False:
+        processed_document["content"] = ""
+
+    if options.get("extract_metadata") is False:
+        processed_document["metadata"] = {}
+        metadata = {}
+
+    if options.get("analyze_content") is True:
+        target = str(processed_document.get("content") or content)
+        analysis = {
+            "char_count": len(target),
+            "word_count": len(target.split()),
+            "line_count": len(target.splitlines()),
+        }
+        metadata["content_analysis"] = analysis
+        processed_document["metadata"] = metadata
+
+    if options.get("generate_summary") is True:
+        summary = str(processed_document.get("summary") or "").strip()
+        if not summary:
+            source = str(processed_document.get("content") or content).strip()
+            if source:
+                processed_document["summary"] = source[:400]
+    elif options.get("generate_summary") is False:
+        processed_document.pop("summary", None)
+
+    if options.get("index_vector") is not None:
+        metadata["index_vector_requested"] = bool(options.get("index_vector"))
+        processed_document["metadata"] = metadata
+
+    data["processed_document"] = processed_document
+    payload["data"] = data
+    return payload
+
+
 class TextPayload(BaseModel):
     text: str
     options: Optional[Dict[str, Any]] = None
@@ -642,10 +711,12 @@ async def classify(
 async def process_document(
     file: UploadFile | None = File(default=None),
     file_id: int | None = Form(default=None),
+    options: str | None = Form(default=None),
     service: AgentService = Depends(get_agent_service),
     db=Depends(get_database_manager_strict_dep),
 ) -> Dict[str, Any]:
     try:
+        parsed_options = _parse_processing_options(options)
         if file_id is not None:
             rec = db.get_indexed_file(file_id)
             if not rec:
@@ -662,7 +733,11 @@ async def process_document(
                     },
                 )
             result = await service.dispatch_task(
-                "process_document", {"file_path": rec.get("normalized_path")}
+                "process_document",
+                {
+                    "file_path": rec.get("normalized_path"),
+                    "options": parsed_options,
+                },
             )
         else:
             if file is None:
@@ -676,7 +751,8 @@ async def process_document(
                 tmp_path = tmp.name
             try:
                 result = await service.dispatch_task(
-                    "process_document", {"file_path": tmp_path}
+                    "process_document",
+                    {"file_path": tmp_path, "options": parsed_options},
                 )
             finally:
                 try:
@@ -703,6 +779,7 @@ async def process_document(
                 result.setdefault("data", {})
                 result.setdefault("agent_type", "document_processor")
                 result.setdefault("metadata", {"recoverable": True})
+            result = _apply_processing_options(result, parsed_options)
             return _v("document_processor", result)
 
         if not hasattr(result, "success"):
@@ -717,8 +794,7 @@ async def process_document(
                 },
             )
 
-        return _v(
-            "document_processor",
+        normalized = _apply_processing_options(
             {
                 "success": bool(result.success),
                 "data": result.data,
@@ -727,6 +803,11 @@ async def process_document(
                 "agent_type": result.agent_type,
                 "metadata": result.metadata,
             },
+            parsed_options,
+        )
+        return _v(
+            "document_processor",
+            normalized,
         )
     except HTTPException:
         raise
@@ -738,10 +819,12 @@ async def process_document(
 @router.post("/agents/process-documents")
 async def process_documents(
     files: List[UploadFile] = File(default_factory=list),
+    options: str | None = Form(default=None),
     service: AgentService = Depends(get_agent_service),
 ) -> Dict[str, Any]:
     """Batch document processing endpoint used by GUI folder/multi-file workers."""
     logger.info("process-documents called with %d files", len(files))
+    parsed_options = _parse_processing_options(options)
     if not files:
         logger.warning("No files provided in process-documents")
         raise HTTPException(status_code=400, detail="No files provided")
@@ -760,7 +843,8 @@ async def process_documents(
         try:
             logger.info("Dispatching process_document for %s", tmp_path)
             result = await service.dispatch_task(
-                "process_document", {"file_path": tmp_path}
+                "process_document",
+                {"file_path": tmp_path, "options": parsed_options},
             )
             logger.info(
                 "Dispatch result: success=%s, error=%s",
@@ -789,6 +873,15 @@ async def process_documents(
                     "agent_type": getattr(result, "agent_type", "document_processor"),
                     "metadata": getattr(result, "metadata", {}),
                 }
+            elif not result.get("success", True):
+                if not result.get("error"):
+                    nested_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+                    nested_err = nested_data.get("error")
+                    result["error"] = (
+                        str(nested_err) if nested_err else "Document processing failed"
+                    )
+            if isinstance(result, dict):
+                result = _apply_processing_options(result, parsed_options)
 
             validated = _v("document_processor", result)
             results.append({"filename": up.filename, **validated})
@@ -810,7 +903,11 @@ async def process_documents(
     success_count = sum(1 for r in results if r.get("success"))
     return {
         "success": success_count == len(results),
+        "processed_count": success_count,
+        "failed_count": len(results) - success_count,
         "processed": success_count,
         "failed": len(results) - success_count,
+        "items": results,
+        "files": results,
         "results": results,
     }

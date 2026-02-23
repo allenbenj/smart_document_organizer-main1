@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from services.agent_service import AgentService
 from services.dependencies import get_agent_manager_strict_dep
@@ -12,7 +12,7 @@ router = APIRouter()
 
 class ReasoningRequest(BaseModel):
     text: str
-    options: Dict[str, Any] = {}
+    options: Dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/legal")

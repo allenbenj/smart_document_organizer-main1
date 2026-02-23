@@ -33,7 +33,13 @@ try:
         QLineEdit,
     )
     from PySide6.QtCore import Qt, Signal, QThread  # noqa: E402
-    from PySide6.QtGui import QFont, QPalette, QColor  # noqa: E402
+    from PySide6.QtGui import (  # noqa: E402
+        QFont,
+        QPalette,
+        QColor,
+        QTextCharFormat,
+        QTextCursor,
+    )
 except ImportError:
     # Fallback for systems without PySide6
     QWidget = object
@@ -41,12 +47,17 @@ except ImportError:
     QComboBox = QCheckBox = QGroupBox = QProgressBar = QSplitter = object
     QListWidget = QListWidgetItem = QMessageBox = QFileDialog = QLineEdit = object
     Qt = QThread = Signal = object
-    QFont = QPalette = QColor = object
+    QFont = QPalette = QColor = QTextCharFormat = QTextCursor = object
 
 from .status_presenter import TabStatusPresenter  # noqa: E402
 from ..ui import JobStatusWidget, ResultsSummaryBox  # noqa: E402
 from .default_paths import get_default_dialog_dir  # noqa: E402
-from .workers import EntityExtractionWorker, FetchOntologyWorker  # noqa: E402
+from ..services import api_client  # noqa: E402
+from .workers import (  # noqa: E402
+    EntityExtractionFolderWorker,
+    EntityExtractionWorker,
+    FetchOntologyWorker,
+)
 
 
 class EntityExtractionTab(QWidget):
@@ -71,6 +82,13 @@ class EntityExtractionTab(QWidget):
         self.ontology_worker.finished_ok.connect(self.populate_entity_types)
         self.ontology_worker.finished_err.connect(lambda e: print(f"Ontology fetch error: {e}"))
         self.ontology_worker.start()
+
+    def on_backend_ready(self):
+        """Load ontology labels when backend is confirmed online."""
+        try:
+            self.fetch_ontology()
+        except Exception as e:
+            print(f"[EntityExtractionTab] on_backend_ready error: {e}")
 
     def populate_entity_types(self, items: list):
         """Populate combo box with fetched ontology entities."""
@@ -132,6 +150,7 @@ class EntityExtractionTab(QWidget):
         self.browse_folder_btn.clicked.connect(self.browse_folder)
         folder_row.addWidget(self.browse_folder_btn)
         file_layout.addLayout(folder_row)
+        self.folder_path.setToolTip("Select a folder to process supported files.")
         
         left_layout.addWidget(file_group)
 
@@ -155,9 +174,29 @@ class EntityExtractionTab(QWidget):
 
         self.custom_types_checkbox = QCheckBox("Custom Types")
         types_layout.addWidget(self.custom_types_checkbox)
+        self.custom_types_checkbox.setEnabled(False)
+        self.custom_types_checkbox.setChecked(False)
+        self.custom_types_checkbox.setVisible(False)
+        self.custom_types_checkbox.setToolTip(
+            "Custom types are disabled in this phase. Use ontology entity labels."
+        )
         types_layout.addStretch()
 
         input_layout.addLayout(types_layout)
+
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(QLabel("Model:"))
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(
+            ["Auto", "GLiNER", "Patterns"]
+        )
+        self.model_combo.setCurrentText("Auto")
+        self.model_combo.setToolTip(
+            "Choose a verified extraction engine. Unverified model options are hidden."
+        )
+        model_layout.addWidget(self.model_combo)
+        model_layout.addStretch()
+        input_layout.addLayout(model_layout)
         left_layout.addWidget(input_group)
 
         # Control buttons
@@ -247,7 +286,7 @@ class EntityExtractionTab(QWidget):
         self.clear_button.clicked.connect(self.clear_results)
         self.export_json_button.clicked.connect(self.export_json)
         self.export_csv_button.clicked.connect(self.export_csv)
-        self.custom_types_checkbox.toggled.connect(self.toggle_custom_types)
+        self.results_list.itemSelectionChanged.connect(self.highlight_selected_entity)
 
     def browse_file(self):
         """Browse for a single file."""
@@ -274,11 +313,6 @@ class EntityExtractionTab(QWidget):
             self.file_path.clear()
             self.input_text.clear()
 
-    def toggle_custom_types(self, checked):
-        """Handle custom types checkbox toggle."""
-        # For now, just enable/disable the combo box
-        self.entity_types_combo.setEnabled(not checked)
-
     def start_extraction(self):
         """Start entity extraction process."""
         text = self.input_text.toPlainText().strip()
@@ -288,7 +322,6 @@ class EntityExtractionTab(QWidget):
         if not text and not file_path and not folder_path:
             self.status.warn("Please enter text, select a file, or select a folder.")
             return
-
         # Get entity types
         entity_types = None
         if not self.custom_types_checkbox.isChecked():
@@ -310,36 +343,124 @@ class EntityExtractionTab(QWidget):
         extraction_type = entity_types[0] if entity_types else "All"
         self.job_status.set_status("running", "Extraction in progress")
         self.status.loading("Extracting entities...")
-        self.worker = EntityExtractionWorker(
-            asyncio_thread=None,
-            file_path=file_path,
-            text_input=text,
-            extraction_type=extraction_type,
-            options={
-                "entity_types": entity_types or [],
-                "custom_types": self.custom_types_checkbox.isChecked(),
-            },
-        )
+        options = {
+            "entity_types": entity_types or [],
+            "custom_types": False,
+            "extraction_model": self.model_combo.currentText().strip().lower(),
+        }
+        if folder_path:
+            self.worker = EntityExtractionFolderWorker(
+                folder_path=folder_path,
+                extraction_type=extraction_type,
+                options=options,
+            )
+        else:
+            self.worker = EntityExtractionWorker(
+                asyncio_thread=None,
+                file_path=file_path,
+                text_input=text,
+                extraction_type=extraction_type,
+                options=options,
+            )
         self.worker.result_ready.connect(self.on_extraction_finished)
         self.worker.error_occurred.connect(self.on_extraction_error)
         self.worker.start()
 
     def on_extraction_finished(self, results):
         """Handle successful extraction completion."""
+        synced_count, sync_errors = self._sync_entities_to_manager_memory(results)
         self.current_results = results
         self.display_results(results)
         self.cleanup_worker()
+        stats = (
+            results.get("extraction_stats", {})
+            if isinstance(results.get("extraction_stats"), dict)
+            else {}
+        )
+        files_failed = int(stats.get("files_failed", 0) or 0)
+        if files_failed > 0:
+            self.status.warn(
+                f"Extraction completed with {files_failed} file failures. Check results JSON for file_errors."
+            )
+            QMessageBox.warning(
+                self,
+                "Partial Failure",
+                f"Extraction completed with {files_failed} failed files.\n"
+                "Open exported JSON to inspect extraction_stats.file_errors.",
+            )
 
         self.job_status.set_status("success", "Completed")
         self.results_summary.set_summary(
             "Entity extraction completed successfully",
-            "Displayed in Extracted Entities (export JSON/CSV optional)",
+            (
+                f"Displayed in Extracted Entities; synced {synced_count} to Agent Memory"
+                if synced_count > 0
+                else "Displayed in Extracted Entities (export JSON/CSV optional)"
+            ),
             "Run Console",
         )
+        if sync_errors:
+            self.status.warn(
+                f"Entity extraction complete with {sync_errors} memory sync failures."
+            )
+            QMessageBox.warning(
+                self,
+                "Memory Sync Partial Failure",
+                f"Extraction finished, but {sync_errors} entities failed to sync into Agent Memory.",
+            )
+        elif synced_count > 0:
+            self.status.info(f"Synced {synced_count} entities into Agent Memory.")
         self.status.success("Entity extraction complete")
 
         # Emit signal
         self.extraction_completed.emit(results)
+
+    def _sync_entities_to_manager_memory(self, results: dict) -> tuple[int, int]:
+        """Mirror extracted entities into manager_knowledge for Knowledge Graph edits."""
+        entities = results.get("entities")
+        if not isinstance(entities, list) or not entities:
+            return 0, 0
+
+        synced = 0
+        failed = 0
+        for entity in entities:
+            if not isinstance(entity, dict):
+                failed += 1
+                continue
+            term = str(entity.get("text") or "").strip()
+            if not term:
+                failed += 1
+                continue
+
+            label = str(entity.get("label") or entity.get("entity_type") or "").strip()
+            confidence_raw = entity.get("confidence", entity.get("confidence_score", 0.5))
+            try:
+                confidence = float(confidence_raw)
+            except Exception:
+                confidence = 0.5
+
+            payload = {
+                "term": term,
+                "category": label.lower() if label else "entity",
+                "canonical_value": term,
+                "ontology_entity_id": label or None,
+                "attributes": {
+                    "start_pos": entity.get("start_pos", entity.get("start")),
+                    "end_pos": entity.get("end_pos", entity.get("end")),
+                    "extraction_method": entity.get("extraction_method"),
+                },
+                "source": "entity_extraction_tab",
+                "confidence": confidence,
+                "status": "proposed",
+                "verified": False,
+            }
+            try:
+                api_client.upsert_manager_knowledge_item(payload)
+                synced += 1
+            except Exception:
+                failed += 1
+
+        return synced, failed
 
     def on_extraction_error(self, error_msg):
         """Handle extraction error."""
@@ -350,6 +471,12 @@ class EntityExtractionTab(QWidget):
             "Run Console",
         )
         self.status.error(f"Failed to extract entities: {error_msg}")
+        self.results_info.setText(f"Extraction failed: {error_msg}")
+        QMessageBox.critical(
+            self,
+            "Entity Extraction Failed",
+            str(error_msg),
+        )
         self.cleanup_worker()
 
         # Emit signal
@@ -368,26 +495,82 @@ class EntityExtractionTab(QWidget):
     def display_results(self, results):
         """Display extraction results."""
         self.results_list.clear()
+        if isinstance(results.get("source_text"), str):
+            self.input_text.setPlainText(results.get("source_text", ""))
+        if results.get("error"):
+            self.results_info.setText(f"Extraction failed: {results.get('error')}")
+            self.export_json_button.setEnabled(False)
+            self.export_csv_button.setEnabled(False)
+            return
 
         entities = results.get("entities", [])
         if not entities:
-            self.results_info.setText("No entities found.")
+            stats = (
+                results.get("extraction_stats", {})
+                if isinstance(results.get("extraction_stats"), dict)
+                else {}
+            )
+            methods = stats.get("extraction_methods_used", [])
+            files_total = stats.get("files_total")
+            files_processed = stats.get("files_processed")
+            files_failed = stats.get("files_failed")
+            file_errors = stats.get("file_errors", [])
+            diagnostic_parts = []
+            if files_total is not None:
+                diagnostic_parts.append(
+                    f"files={files_processed or 0}/{files_total}, failed={files_failed or 0}"
+                )
+            if isinstance(methods, list):
+                diagnostic_parts.append(
+                    f"methods={','.join(str(m) for m in methods) if methods else 'none'}"
+                )
+            if isinstance(file_errors, list) and file_errors:
+                first = file_errors[0]
+                if isinstance(first, dict):
+                    diagnostic_parts.append(
+                        f"first_error={first.get('error', 'unknown')}"
+                    )
+            diag = " | ".join(diagnostic_parts) if diagnostic_parts else "no diagnostics"
+            self.results_info.setText(f"No entities found ({diag}).")
             self.export_json_button.setEnabled(False)
             self.export_csv_button.setEnabled(False)
             return
 
         # Display entities
         for entity in entities:
-            item_text = f"{entity.get('text', '')} ({entity.get('label', '')})"
-            confidence = entity.get('confidence', 0)
+            label = entity.get("label") or entity.get("entity_type", "")
+            item_text = f"{entity.get('text', '')} ({label})"
+            confidence = entity.get("confidence")
+            if confidence is None:
+                confidence = entity.get("confidence_score", 0)
             if confidence > 0:
                 item_text += f" - {confidence:.2f}"
 
             item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, entity)
             self.results_list.addItem(item)
 
         # Update info
         self.results_info.setText(f"Found {len(entities)} entities.")
+        stats = results.get("extraction_stats", {})
+        if isinstance(stats, dict):
+            methods = stats.get("extraction_methods_used")
+            files_total = stats.get("files_total")
+            files_processed = stats.get("files_processed")
+            files_failed = stats.get("files_failed")
+            suffix_parts = []
+            if files_total is not None:
+                suffix_parts.append(
+                    f"files {files_processed or 0}/{files_total} processed"
+                )
+            if files_failed is not None:
+                suffix_parts.append(f"{files_failed} failed")
+            if isinstance(methods, list) and methods:
+                suffix_parts.append(f"methods: {', '.join(methods)}")
+            if suffix_parts:
+                self.results_info.setText(
+                    f"Found {len(entities)} entities ({'; '.join(suffix_parts)})."
+                )
         self.export_json_button.setEnabled(True)
         self.export_csv_button.setEnabled(True)
 
@@ -403,6 +586,55 @@ class EntityExtractionTab(QWidget):
         self.current_results = None
         self.job_status.reset()
         self.results_summary.set_summary("No run yet", "N/A", "Run Console")
+
+    def _entity_span(self, entity: dict) -> tuple[int | None, int | None]:
+        """Resolve character offsets from extractor payload."""
+        start = entity.get("start_pos")
+        end = entity.get("end_pos")
+        if start is None:
+            start = entity.get("start")
+        if end is None:
+            end = entity.get("end")
+        try:
+            s = int(start)
+            e = int(end)
+        except Exception:
+            return None, None
+        if s < 0 or e <= s:
+            return None, None
+        return s, e
+
+    def highlight_selected_entity(self):
+        """Highlight selected entity span in source text."""
+        selected = self.results_list.selectedItems()
+        if not selected:
+            return
+        entity = selected[0].data(Qt.UserRole)
+        if not isinstance(entity, dict):
+            return
+        span = self._entity_span(entity)
+        if not span[0] and span[0] != 0:
+            self.status.warn("No provenance span available for selected entity.")
+            return
+        start, end = span
+        text = self.input_text.toPlainText()
+        if end > len(text):
+            end = len(text)
+        if start >= end:
+            self.status.warn("Invalid span for selected entity.")
+            return
+
+        cursor = self.input_text.textCursor()
+        cursor.select(QTextCursor.Document)
+        cursor.setCharFormat(QTextCharFormat())
+
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor("#fff176"))
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        cursor.setCharFormat(fmt)
+        self.input_text.setTextCursor(cursor)
+        self.status.info(f"Highlighted chars {start}-{end} for selected entity.")
 
     def export_json(self):
         """Export results to JSON file."""
@@ -439,12 +671,13 @@ class EntityExtractionTab(QWidget):
                     writer = csv.writer(f)
                     writer.writerow(["Text", "Label", "Confidence", "Start", "End"])
                     for entity in entities:
+                        start, end = self._entity_span(entity)
                         writer.writerow([
                             entity.get("text", ""),
-                            entity.get("label", ""),
-                            entity.get("confidence", 0),
-                            entity.get("start", ""),
-                            entity.get("end", "")
+                            entity.get("label") or entity.get("entity_type", ""),
+                            entity.get("confidence", entity.get("confidence_score", 0)),
+                            start if start is not None else "",
+                            end if end is not None else "",
                         ])
                 QMessageBox.information(self, "Export Successful", "Results exported to CSV.")
         except Exception as e:

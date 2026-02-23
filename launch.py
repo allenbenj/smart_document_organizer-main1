@@ -10,7 +10,10 @@ import time
 import urllib.request
 from pathlib import Path
 
-BACKEND_URL = "http://127.0.0.1:8000/api/health"
+from utils.backend_runtime import backend_base_url, backend_health_url, launch_health_timeout_seconds
+
+BACKEND_URL = backend_health_url()
+DEFAULT_HEALTH_TIMEOUT_S = launch_health_timeout_seconds(120)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -62,7 +65,7 @@ def _is_healthy(url: str = BACKEND_URL, timeout_s: float = 1.5) -> bool:
         return False
 
 
-def _wait_for_health(url: str = BACKEND_URL, timeout_s: int = 75) -> bool:
+def _wait_for_health(url: str = BACKEND_URL, timeout_s: int = DEFAULT_HEALTH_TIMEOUT_S) -> bool:
     deadline = time.monotonic() + max(1, int(timeout_s))
     sleep_s = 0.25
     while time.monotonic() < deadline:
@@ -158,12 +161,10 @@ def main() -> int:
         backend_proc = start_launcher_backend(repo_root)
         if not _wait_for_health():
             print(
-                "Backend failed to become healthy on 127.0.0.1:8000. "
+                f"Backend failed to become healthy on 127.0.0.1:8000 within {DEFAULT_HEALTH_TIMEOUT_S}s. "
                 f"Check logs: {_log_file(repo_root)}",
                 file=sys.stderr,
             )
-            if backend_proc.poll() is None:
-                backend_proc.terminate()
             stop_launcher_backend(repo_root)
             return 1
 
@@ -172,6 +173,7 @@ def main() -> int:
         target = repo_root / "gui" / "professional_manager.py"
 
     env = os.environ.copy()
+    env.setdefault("SMART_DOC_API_BASE_URL", backend_base_url())
     if args.backend_mode == "sync":
         env["GUI_SKIP_WSL_BACKEND_START"] = "1"
 
@@ -180,12 +182,6 @@ def main() -> int:
         return subprocess.call(cmd, cwd=str(repo_root), env=env)
     finally:
         if args.backend_mode == "sync":
-            if backend_proc is not None and backend_proc.poll() is None:
-                try:
-                    backend_proc.terminate()
-                    backend_proc.wait(timeout=5)
-                except Exception:
-                    pass
             stop_launcher_backend(repo_root)
 
 

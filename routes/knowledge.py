@@ -34,12 +34,10 @@ class TriplesPayload(BaseModel):
     entity_type: Optional[str] = "generic"
     entity_type_label: Optional[str] = None
     create_missing: Optional[bool] = True
-    use_heuristics: Optional[bool] = True
 
 
 class EntitiesImportPayload(BaseModel):
     items: List[Dict[str, Any]]
-    use_heuristics: Optional[bool] = True
 
 
 class ProposalPayload(BaseModel):
@@ -103,6 +101,17 @@ class VerifyKnowledgePayload(BaseModel):
 
 class OntologyLinkPayload(BaseModel):
     ontology_entity_id: str
+
+
+class KnowledgeItemUpdatePayload(BaseModel):
+    canonical_value: Optional[str] = None
+    ontology_entity_id: Optional[str] = None
+    confidence: Optional[float] = None
+    status: Optional[str] = None
+    verified: Optional[bool] = None
+    verified_by: Optional[str] = None
+    user_notes: Optional[str] = None
+    notes: Optional[str] = None
 
 
 # --- Dependency ---
@@ -207,7 +216,6 @@ async def import_triples(payload: TriplesPayload, service: KnowledgeService = De
             entity_type=payload.entity_type,
             entity_type_label=payload.entity_type_label,
             create_missing=payload.create_missing,
-            use_heuristics=payload.use_heuristics
         )
     except Exception as e:
         logger.error(f"Import triples error: {e}")
@@ -219,7 +227,6 @@ async def import_entities(payload: EntitiesImportPayload, service: KnowledgeServ
     try:
         return await service.import_entities(
             items=payload.items,
-            use_heuristics=payload.use_heuristics
         )
     except Exception as e:
         logger.error(f"Import entities error: {e}")
@@ -466,6 +473,69 @@ async def link_manager_knowledge_ontology(
     except Exception as e:
         logger.error(f"Manager knowledge ontology link error: {e}")
         raise HTTPException(status_code=500, detail="Failed to link ontology entity")
+
+
+@router.get("/knowledge/manager/items/{knowledge_id}")
+async def get_manager_knowledge_item(
+    knowledge_id: int,
+    db=Depends(get_database_manager_strict_dep),
+) -> Dict[str, Any]:
+    try:
+        item = db.knowledge_get_item(knowledge_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Knowledge item not found")
+        return {"success": True, "item": item}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Manager knowledge get error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get manager knowledge item")
+
+
+@router.put("/knowledge/manager/items/{knowledge_id}")
+async def update_manager_knowledge_item(
+    knowledge_id: int,
+    payload: KnowledgeItemUpdatePayload,
+    db=Depends(get_database_manager_strict_dep),
+) -> Dict[str, Any]:
+    try:
+        ok = db.knowledge_update_item(
+            knowledge_id,
+            canonical_value=payload.canonical_value,
+            ontology_entity_id=payload.ontology_entity_id,
+            confidence=payload.confidence,
+            status=payload.status,
+            verified=payload.verified,
+            verified_by=payload.verified_by,
+            user_notes=payload.user_notes,
+            notes=payload.notes,
+        )
+        if not ok:
+            raise HTTPException(status_code=404, detail="Knowledge item not found or no fields to update")
+        item = db.knowledge_get_item(knowledge_id)
+        return {"success": True, "item": item}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Manager knowledge update error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update manager knowledge item")
+
+
+@router.delete("/knowledge/manager/items/{knowledge_id}")
+async def delete_manager_knowledge_item(
+    knowledge_id: int,
+    db=Depends(get_database_manager_strict_dep),
+) -> Dict[str, Any]:
+    try:
+        ok = db.knowledge_delete_item(knowledge_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Knowledge item not found")
+        return {"success": True, "deleted": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Manager knowledge delete error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete manager knowledge item")
 
 
 @router.get("/knowledge/manager/export")

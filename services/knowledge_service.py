@@ -173,7 +173,7 @@ class KnowledgeService:
             # Location
             if re.search(r"\b(county|city|street|avenue|road|st\.|ave\.|rd\.)\b", low):
                 return "LocationEntity"
-            # Person (two capitalized words heuristic)
+            # Person (two capitalized words pattern)
             if re.match(r"^[A-Z][a-z]+\s+[A-Z][a-z]+(\s+[A-Z][a-z]+)?$", text):
                 return "Person"
         except Exception:
@@ -239,8 +239,7 @@ class KnowledgeService:
     async def import_triples(self, triples: List[Tuple[str, str, str]],
                              entity_type: str = "generic",
                              entity_type_label: str = None,
-                             create_missing: bool = True,
-                             use_heuristics: bool = True) -> Dict[str, int]:
+                             create_missing: bool = True) -> Dict[str, int]:
 
         if not self._check_available():
             raise RuntimeError("Knowledge manager unavailable")
@@ -264,30 +263,14 @@ class KnowledgeService:
 
             if create_missing:
                 if not h_id:
-                    inferred = self._infer_entity_type_label(head) if use_heuristics else None
                     etype = default_type
-                    if inferred:
-                        try:
-                            from agents.extractors.ontology import get_entity_type_by_label
-                            if get_entity_type_by_label(inferred):
-                                etype = inferred
-                        except Exception:
-                            pass
                     attrs = self._extract_entity_attributes(head, etype)
                     res = await self.add_entity(name=head, entity_type=etype, attributes=attrs)
                     h_id = res.get("id")
                     created_entities += 1
 
                 if not t_id:
-                    inferred = self._infer_entity_type_label(tail) if use_heuristics else None
                     etype = default_type
-                    if inferred:
-                        try:
-                            from agents.extractors.ontology import get_entity_type_by_label
-                            if get_entity_type_by_label(inferred):
-                                etype = inferred
-                        except Exception:
-                            pass
                     attrs = self._extract_entity_attributes(tail, etype)
                     res = await self.add_entity(name=tail, entity_type=etype, attributes=attrs)
                     t_id = res.get("id")
@@ -306,7 +289,7 @@ class KnowledgeService:
             "created_relationships": created_rels,
         }
 
-    async def import_entities(self, items: List[Dict[str, Any]], use_heuristics: bool = True) -> Dict[str, int]:
+    async def import_entities(self, items: List[Dict[str, Any]]) -> Dict[str, int]:
         if not self._check_available():
             raise RuntimeError("Knowledge manager unavailable")
 
@@ -326,8 +309,6 @@ class KnowledgeService:
                 except Exception:
                     pass
             attrs = it.get("attributes") or {}
-            if use_heuristics and label and not attrs:
-                attrs = self._extract_entity_attributes(name, label)
             res = await self.add_entity(name=name, entity_type=etype, attributes=attrs)
             if res.get("id"):
                 created += 1
@@ -412,4 +393,3 @@ class KnowledgeService:
         if hasattr(self.knowledge_manager, "export_graph_data"):
             return await self.knowledge_manager.export_graph_data()
         return {"nodes": [], "edges": []}
-

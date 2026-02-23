@@ -418,11 +418,21 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
 
     def _detect_tesseract(self):
         """Detect Tesseract executable on Windows."""
-        if os.name != "nt":
+        if os.name != "nt" or not OCR_AVAILABLE:
             return
             
+        # Resolve the command attribute (some versions nest it)
+        cmd_attr = "tesseract_cmd"
+        target = pytesseract
+        if not hasattr(pytesseract, cmd_attr) and hasattr(pytesseract, "pytesseract"):
+            target = pytesseract.pytesseract
+            
+        if not hasattr(target, cmd_attr):
+            logger.warning("pytesseract missing tesseract_cmd attribute. OCR may fail.")
+            return
+
         # Check if already set
-        if pytesseract.tesseract_cmd != 'tesseract':
+        if getattr(target, cmd_attr) != 'tesseract':
              return
 
         # Common paths
@@ -436,7 +446,7 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
         for path in possible_paths:
             if os.path.exists(path):
                 logger.info(f"Found Tesseract at: {path}")
-                pytesseract.tesseract_cmd = path
+                setattr(target, cmd_attr, path)
                 return
         
         logger.warning("Tesseract executable not found in common locations. OCR may fail.")
@@ -470,9 +480,24 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
                 )
                 content = task_data.get("content")
                 document_id = task_data.get("document_id", metadata.get("document_id"))
+                
+                # Support overriding config with per-task options
+                task_options = task_data.get("options")
+                if isinstance(task_options, dict):
+                    if "enable_ocr" in task_options:
+                        self.config.enable_ocr = bool(task_options["enable_ocr"])
+                    if "ocr_language" in task_options:
+                        self.config.ocr_language = str(task_options["ocr_language"])
+                    if "enable_metadata_extraction" in task_options:
+                        self.config.enable_metadata_extraction = bool(task_options["enable_metadata_extraction"])
             document_id = str(document_id or (file_path.stem if file_path else "inline_doc"))
             if content is not None:
                 content = str(content)
+            
+            # Resolve task-specific options
+            task_options = {}
+            if isinstance(task_data, dict) and "options" in task_data:
+                task_options = task_data["options"]
 
             if not file_path and not content:
                 raise ValueError(
@@ -484,9 +509,9 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
 
             # Step 2: Process the document
             if file_path:
-                processed_doc = await self._process_file(file_path, document_id)
+                processed_doc = await self._process_file(file_path, document_id, task_options)
             else:
-                processed_doc = await self._process_content(content, document_id)
+                processed_doc = await self._process_content(content, document_id, task_options)
 
             # Step 3: Integrate with collective intelligence
             if self._is_memory_available():
@@ -529,9 +554,10 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
     # --- Core Processing Logic ---
 
     async def _process_file(
-        self, file_path: Path, document_id: str
+        self, file_path: Path, document_id: str, options: Optional[Dict[str, Any]] = None
     ) -> ProcessedDocument:
         """Process a file from the filesystem."""
+        options = options or {}
         if not file_path.exists():
             raise FileNotFoundError(f"File not found: {file_path}")
 
@@ -567,21 +593,36 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
             None,
             "unknown",
         )
-        content, metadata, structured, transcription, processing_method = await handler(
-            file_path
-        )
+        
+        # Check if OCR is explicitly requested or disabled
+        enable_ocr = options.get("enable_ocr", self.config.enable_ocr)
+        
+        # Call handler (pass options if needed, but most handlers don't take them yet)
+        # For now, we'll just handle OCR at this level if the handler is _process_image
+        if handler == self._process_image and not enable_ocr:
+            content, metadata, structured, transcription, processing_method = (
+                "", {"ocr_skipped": True}, None, None, "ocr_disabled"
+            )
+        else:
+            content, metadata, structured, transcription, processing_method = await handler(
+                file_path
+            )
+        
         confidence = self._calculate_processing_confidence(
             processing_method, content, file_extension
         )
 
         processing_time = (datetime.now() - start_time).total_seconds()
 
+        legal_detection = options.get("legal_document_detection", self.config.legal_document_detection)
         legal_indicators = self._detect_legal_content(
             content or transcription or "", file_path.name
-        )
+        ) if legal_detection else []
+        
+        enable_chunking = options.get("enable_chunking", self.config.enable_chunking)
         chunks = (
             self._create_chunks(content)
-            if self.config.enable_chunking and content
+            if enable_chunking and content
             else []
         )
 
@@ -606,12 +647,18 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
         )
 
     async def _process_content(
-        self, content: str, document_id: str
+        self, content: str, document_id: str, options: Optional[Dict[str, Any]] = None
     ) -> ProcessedDocument:
         """Process raw text content."""
+        options = options or {}
         start_time = datetime.now()
-        chunks = self._create_chunks(content) if self.config.enable_chunking else []
-        legal_indicators = self._detect_legal_content(content, f"{document_id}.txt")
+        
+        enable_chunking = options.get("enable_chunking", self.config.enable_chunking)
+        chunks = self._create_chunks(content) if enable_chunking else []
+        
+        legal_detection = options.get("legal_document_detection", self.config.legal_document_detection)
+        legal_indicators = self._detect_legal_content(content, f"{document_id}.txt") if legal_detection else []
+        
         processing_time = (datetime.now() - start_time).total_seconds()
 
         return ProcessedDocument(
@@ -721,17 +768,48 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
         return content, {}, None, None, "striprtf"
 
     async def _process_markdown(self, file_path: Path) -> tuple:
-        with open(file_path, "r", encoding="utf-8") as f:
-            md_content = f.read()
+        md_content = ""
+        for encoding in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
+            try:
+                with open(file_path, "r", encoding=encoding) as f:
+                    md_content = f.read()
+                break
+            except UnicodeDecodeError:
+                continue
+        if not md_content:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                md_content = f.read()
         if (
             not MARKDOWN_AVAILABLE
             or markdown is None
             or not BS4_AVAILABLE
             or BeautifulSoup is None
         ):
-            raise RuntimeError(
-                "markdown and BeautifulSoup4 are required for Markdown processing."
-            )
+            # Graceful fallback: keep Markdown processing available even when
+            # optional HTML conversion dependencies are missing.
+            lines: list[str] = []
+            in_code_block = False
+            for raw_line in md_content.splitlines():
+                line = raw_line.strip()
+                if line.startswith("```"):
+                    in_code_block = not in_code_block
+                    continue
+                if in_code_block:
+                    lines.append(raw_line)
+                    continue
+                if line.startswith("#"):
+                    line = line.lstrip("#").strip()
+                if line.startswith(">"):
+                    line = line.lstrip(">").strip()
+                if line.startswith(("- ", "* ")):
+                    line = line[2:].strip()
+                lines.append(line)
+            content = "\n".join(lines).strip()
+            metadata = {
+                "markdown_fallback": True,
+                "markdown_parser": "plain_text_fallback",
+            }
+            return content, metadata, None, None, "markdown_text_fallback"
         html = markdown.markdown(md_content)
         soup = BeautifulSoup(html, "html.parser")
         content = soup.get_text()

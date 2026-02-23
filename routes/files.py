@@ -1,9 +1,11 @@
 from datetime import datetime, timezone
+import functools
 import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from services.dependencies import get_database_manager_strict_dep
 from services.file_index_service import FileIndexService
@@ -181,39 +183,45 @@ async def index_files(
     allowed = [e.lower() if e.startswith(".") else f".{e.lower()}" for e in (payload.allowed_exts or [])]
     if use_taskmaster:
         tm = TaskMasterService(db)
-        return tm.run_file_pipeline(
-            mode="index",
-            payload={
-                "mode": "index",
-                "roots": payload.roots,
-                "recursive": payload.recursive,
-                "allowed_exts": allowed,
-                "include_paths": payload.include_paths,
-                "exclude_paths": payload.exclude_paths,
-                "min_size_bytes": payload.min_size_bytes,
-                "max_size_bytes": payload.max_size_bytes,
-                "modified_after_ts": payload.modified_after_ts,
-                "max_files": payload.max_files,
-                "max_depth": payload.max_depth,
-                "max_runtime_seconds": payload.max_runtime_seconds,
-                "follow_symlinks": payload.follow_symlinks,
-            },
+        return await run_in_threadpool(
+            functools.partial(
+                tm.run_file_pipeline,
+                mode="index",
+                payload={
+                    "mode": "index",
+                    "roots": payload.roots,
+                    "recursive": payload.recursive,
+                    "allowed_exts": allowed,
+                    "include_paths": payload.include_paths,
+                    "exclude_paths": payload.exclude_paths,
+                    "min_size_bytes": payload.min_size_bytes,
+                    "max_size_bytes": payload.max_size_bytes,
+                    "modified_after_ts": payload.modified_after_ts,
+                    "max_files": payload.max_files,
+                    "max_depth": payload.max_depth,
+                    "max_runtime_seconds": payload.max_runtime_seconds,
+                    "follow_symlinks": payload.follow_symlinks,
+                },
+            ),
         )
 
     service = FileIndexService(db)
-    result = service.index_roots(
-        payload.roots,
-        recursive=payload.recursive,
-        allowed_exts=set(allowed) or None,
-        include_paths=payload.include_paths,
-        exclude_paths=payload.exclude_paths,
-        min_size_bytes=payload.min_size_bytes,
-        max_size_bytes=payload.max_size_bytes,
-        modified_after_ts=payload.modified_after_ts,
-        max_files=payload.max_files,
-        max_depth=payload.max_depth,
-        max_runtime_seconds=payload.max_runtime_seconds,
-        follow_symlinks=payload.follow_symlinks,
+    result = await run_in_threadpool(
+        functools.partial(
+            service.index_roots,
+            payload.roots,
+            recursive=payload.recursive,
+            allowed_exts=set(allowed) or None,
+            include_paths=payload.include_paths,
+            exclude_paths=payload.exclude_paths,
+            min_size_bytes=payload.min_size_bytes,
+            max_size_bytes=payload.max_size_bytes,
+            modified_after_ts=payload.modified_after_ts,
+            max_files=payload.max_files,
+            max_depth=payload.max_depth,
+            max_runtime_seconds=payload.max_runtime_seconds,
+            follow_symlinks=payload.follow_symlinks,
+        ),
     )
     return result
 
@@ -250,17 +258,26 @@ async def refresh_index(
     if use_taskmaster:
         tm = TaskMasterService(db)
         mode = "watch_refresh" if run_watches else "refresh"
-        return tm.run_file_pipeline(
-            mode=mode,
-            payload={
-                "mode": mode,
-                "stale_after_hours": stale_after_hours,
-            },
+        return await run_in_threadpool(
+            functools.partial(
+                tm.run_file_pipeline,
+                mode=mode,
+                payload={
+                    "mode": mode,
+                    "stale_after_hours": stale_after_hours,
+                },
+            ),
         )
 
     service = FileIndexService(db)
-    watch_res = service.run_watched_index() if run_watches else {"success": True, "indexed": 0, "errors": 0, "scanned": 0, "watches": 0}
-    refresh_res = service.refresh_index(stale_after_hours=stale_after_hours)
+    watch_res = (
+        await run_in_threadpool(service.run_watched_index)
+        if run_watches
+        else {"success": True, "indexed": 0, "errors": 0, "scanned": 0, "watches": 0}
+    )
+    refresh_res = await run_in_threadpool(
+        functools.partial(service.refresh_index, stale_after_hours=stale_after_hours),
+    )
     return {"success": True, "watch": watch_res, "refresh": refresh_res}
 
 

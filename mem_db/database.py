@@ -1340,6 +1340,37 @@ class DatabaseManager:
     def knowledge_set_ontology_link(self, knowledge_id: int, ontology_entity_id: str) -> bool:
         return self.knowledge_repo.set_ontology_link(knowledge_id, ontology_entity_id)
 
+    def knowledge_get_item(self, knowledge_id: int) -> Optional[Dict[str, Any]]:
+        return self.knowledge_repo.get_item(knowledge_id)
+
+    def knowledge_update_item(
+        self,
+        knowledge_id: int,
+        *,
+        canonical_value: Optional[str] = None,
+        ontology_entity_id: Optional[str] = None,
+        confidence: Optional[float] = None,
+        status: Optional[str] = None,
+        verified: Optional[bool] = None,
+        verified_by: Optional[str] = None,
+        user_notes: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> bool:
+        return self.knowledge_repo.update_item(
+            knowledge_id,
+            canonical_value=canonical_value,
+            ontology_entity_id=ontology_entity_id,
+            confidence=confidence,
+            status=status,
+            verified=verified,
+            verified_by=verified_by,
+            user_notes=user_notes,
+            notes=notes,
+        )
+
+    def knowledge_delete_item(self, knowledge_id: int) -> bool:
+        return self.knowledge_repo.delete_item(knowledge_id)
+
     def knowledge_set_verification(
         self,
         knowledge_id: int,
