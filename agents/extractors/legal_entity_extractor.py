@@ -259,6 +259,11 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                     preferred="Babelscape/rebel-large",
                     candidates=["rebel-large"]
                 )
+                # Do not pass `trust_remote_code` through model_kwargs here.
+                # Newer transformers pipeline forwards trust/code kwargs internally
+                # into AutoConfig.from_pretrained(...), and duplicating them via
+                # model_kwargs causes: "got multiple values for keyword argument
+                # 'trust_remote_code'".
                 self.rebel_pipeline = transformers_pipeline(
                     "text2text-generation",
                     model=rebel_ref,
@@ -266,7 +271,8 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                 )
                 logger.info(f"Loaded REBEL Relationship Extraction from: {rebel_ref}")
             except Exception as e:
-                logger.warning(f"Could not load REBEL: {e}")
+                logger.warning(f"Could not load REBEL: {e}. Relationship extraction will use co-occurrence fallback.")
+                self.rebel_pipeline = None
 
             # Initialize BERT baseline
             try:
@@ -683,16 +689,11 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
             # Step 8: Store results in shared memory for collective intelligence
             await self._store_extraction_result(extraction_result)
 
-            # Step 9: Store entities in legal entity memory
-            entity_record_ids = await self.store_legal_entities(
+            # Step 9: Store entities as Proposals for Expert Review
+            entity_record_ids = await self._propose_legal_entities(
                 document_id=document_id,
-                entities=[entity.to_dict() for entity in all_entities],
-                extraction_method="hybrid_multi_model",
-                metadata={
-                    "processing_time": processing_time,
-                    "extraction_methods": list(extraction_methods_used),
-                    "overall_confidence": overall_confidence,
-                },
+                entities=all_entities,
+                extraction_methods=list(extraction_methods_used)
             )
 
             # Update statistics
@@ -885,20 +886,44 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                 
                 for ent in gliner_entities:
                     raw_label = ent.get("label", "")
+                    text = ent["text"].strip()
+                    start = ent["start"]
+                    end = ent["end"]
+                    
+                    # 1. Natural Boundary Check: Extraction must be a whole word
+                    # Check character BEFORE start
+                    if start > 0:
+                        char_before = chunk[start-1]
+                        if char_before.isalnum(): # If it's a letter/number, this is a fragment
+                            continue
+                    
+                    # Check character AFTER end
+                    if end < len(chunk):
+                        char_after = chunk[end]
+                        if char_after.isalnum(): # If it's a letter/number, this is a fragment
+                            continue
+    
+                    # 2. Fragment Shield: Reject known noise tokens
+                    noise_blacklist = {"rose", "cut", "ion", "bol", "ster", "me", "ift", "our", "teen", "fa", "ls", "eh", "ood", "dant", "fu", "rth", "er"}
+                    if text.lower() in noise_blacklist or len(text) < 3:
+                        continue
+                        
                     canonical_type = label_map.get(raw_label) or self._canonical_entity_type(raw_label)
                     
                     if canonical_type:
                         entities.append(ExtractedEntity(
                             entity_id=str(uuid.uuid4()),
                             entity_type=canonical_type,
-                            text=ent["text"].strip(),
-                            start_pos=ent["start"] + offset,
-                            end_pos=ent["end"] + offset,
+                            text=text,
+                            start_pos=start + offset,
+                            end_pos=end + offset,
                             confidence=float(ent.get("score", 0.8)),
                             extraction_method="gliner_multi_task",
                             attributes={"raw_label": raw_label}
                         ))
             
+            # 2. Span Re-stitching: Merge adjacent fragments of the same type
+            entities = self._restitch_shredded_spans(entities)
             logger.info(f"GLiNER Multi-Task Oracle found {len(entities)} entities")
 
         except Exception as e:
@@ -961,26 +986,29 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                 chunks = [text[i : i + max_chunk] for i in range(0, len(text), max_chunk)]
                 
                 for chunk_idx, chunk in enumerate(chunks):
-                    offset = chunk_idx * max_chunk
-                    results = pipeline(chunk)
-                    
-                    for res in results:
-                        raw_label = str(res.get("entity_group") or res.get("entity") or "").upper()
-                        ctype = label_mapping.get(raw_label)
-                        if ctype:
-                            all_hf_entities.append(ExtractedEntity(
-                                entity_id=str(uuid.uuid4()),
-                                entity_type=ctype,
-                                text=res["word"].replace("##", "").strip(),
-                                start_pos=res["start"] + offset,
-                                end_pos=res["end"] + offset,
-                                confidence=float(res["score"]),
-                                extraction_method=f"hf_{name}",
-                                attributes={"model": name, "hf_label": raw_label}
-                            ))
+                    try:
+                        offset = chunk_idx * max_chunk
+                        results = pipeline(chunk)
+                        
+                        for res in results:
+                            raw_label = str(res.get("entity_group") or res.get("entity") or "").upper()
+                            ctype = label_mapping.get(raw_label)
+                            if ctype:
+                                all_hf_entities.append(ExtractedEntity(
+                                    entity_id=str(uuid.uuid4()),
+                                    entity_type=ctype,
+                                    text=res["word"].replace("##", "").strip(),
+                                    start_pos=res["start"] + offset,
+                                    end_pos=res["end"] + offset,
+                                    confidence=float(res["score"]),
+                                    extraction_method=f"hf_{name}",
+                                    attributes={"model": name, "hf_label": raw_label}
+                                ))
+                    except Exception as chunk_err:
+                        logger.debug(f"HF pipeline '{name}' failed on chunk {chunk_idx}: {chunk_err}")
+                        continue
             except Exception as e:
-                logger.warning(f"HF pipeline '{name}' failed: {e}")
-
+                logger.warning(f"HF pipeline '{name}' critically failed: {e}")
         return all_hf_entities
 
     async def _extract_with_llm(
@@ -1109,46 +1137,60 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
             logger.error(f"LLM Extraction logic failure: {e}")
         return entities
 
+    def _restitch_shredded_spans(self, entities: List[ExtractedEntity]) -> List[ExtractedEntity]:
+        """Merges adjacent fragments (e.g. 'wi' + 'ness' -> 'witness') into single entities."""
+        if not entities:
+            return []
+            
+        # Sort by start position
+        sorted_ents = sorted(entities, key=lambda x: x.start_pos)
+        merged = []
+        
+        if not sorted_ents:
+            return []
+            
+        current = sorted_ents[0]
+        
+        for next_ent in sorted_ents[1:]:
+            # If they are very close (0-2 chars) and have the same type, merge them
+            gap = next_ent.start_pos - current.end_pos
+            if gap <= 2 and next_ent.entity_type == current.entity_type:
+                # Update current with combined text and new end position
+                current.text = current.text + next_ent.text
+                current.end_pos = next_ent.end_pos
+                current.confidence = (current.confidence + next_ent.confidence) / 2
+            else:
+                merged.append(current)
+                current = next_ent
+                
+        merged.append(current)
+        return merged
+
     async def _deduplicate_entities(
         self, entities: List[ExtractedEntity]
     ) -> List[ExtractedEntity]:
-        """Deduplicate and resolve overlapping entities"""
-
+        """Aggressive deduplication: If entities overlap, the longest one always wins."""
         if len(entities) <= 1:
             return entities
 
-        # Sort entities by start position for overlap detection
-        sorted_entities = sorted(entities, key=lambda x: x.start_pos)
+        # Sort by start position, then by length (longest first)
+        sorted_entities = sorted(entities, key=lambda x: (x.start_pos, -(x.end_pos - x.start_pos)))
 
         unique_entities = []
-        i = 0
+        
+        for current in sorted_entities:
+            is_fragment = False
+            for existing in unique_entities:
+                # Check for overlap
+                if (current.start_pos < existing.end_pos and current.end_pos > existing.start_pos):
+                    # Overlap detected. Since we sorted by length, 'existing' is better.
+                    is_fragment = True
+                    break
+            
+            if not is_fragment:
+                unique_entities.append(current)
 
-        while i < len(sorted_entities):
-            current_entity = sorted_entities[i]
-            overlapping = [current_entity]
-
-            # Find all overlapping entities
-            j = i + 1
-            while (
-                j < len(sorted_entities)
-                and sorted_entities[j].start_pos < current_entity.end_pos
-            ):
-                overlapping.append(sorted_entities[j])
-                j += 1
-
-            # Resolve overlapping entities
-            if len(overlapping) == 1:
-                unique_entities.append(current_entity)
-            else:
-                resolved = self._resolve_overlapping_entities(overlapping)
-                unique_entities.extend(resolved)
-
-            i = j
-
-        # Additional text-based deduplication
-        final_entities = self._deduplicate_by_text(unique_entities)
-
-        return final_entities
+        return unique_entities
 
     def _resolve_overlapping_entities(
         self, overlapping: List[ExtractedEntity]
@@ -1236,21 +1278,28 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
         return validated_entities
 
     def _is_valid_entity(self, entity: ExtractedEntity) -> bool:
-        """Check if entity meets validation criteria"""
-
-        # Check minimum confidence
-        if entity.confidence < self.config.min_confidence:
+        """
+        High-Resolution Validation: Rejects 'Mad Lib' abstract nouns.
+        Every entity must be specific or anchored to a proper noun.
+        """
+        # Phase 1 Stoplist: Reject non-specific roles masquerading as insight
+        stoplist = {"defendant", "witness", "judge", "case", "law", "court", "matter", "proceeding", "regulation", "prosecutor", "officer"}
+        
+        text_lower = entity.text.lower().strip()
+        
+        # 1. Reject if the entity is JUST a stoplist word
+        if text_lower in stoplist:
             return False
 
-        # Check entity type exists
+        # 2. Minimum confidence and length
+        if entity.confidence < self.config.min_confidence or len(text_lower) < 2:
+            return False
+
+        # 3. Check entity type exists
         if entity.entity_type not in self.legal_entity_types:
             return False
 
-        # Check minimum text length
-        if len(entity.text.strip()) < 2:
-            return False
-
-        # Check pattern validation if defined
+        # 4. Pattern validation (e.g., for citations)
         entity_def = self.legal_entity_types[entity.entity_type]
         if "validation_pattern" in entity_def:
             pattern = entity_def["validation_pattern"]
@@ -1381,6 +1430,41 @@ class LegalEntityExtractor(BaseAgent, LegalDomainMixin, LegalMemoryMixin):
                 ],
             },
         )
+
+    async def _propose_legal_entities(self, document_id: str, entities: List[ExtractedEntity], extraction_methods: List[str]) -> List[int]:
+        """Save extracted entities as proposals for expert review, skipping already verified ones."""
+        from mem_db.memory import proposals_db
+        proposal_ids = []
+        
+        for entity in entities:
+            # SKIP if this entity was already verified (don't propose what is already known)
+            if entity.extraction_method == "memory_anchor" or entity.attributes.get("expert_verified"):
+                continue
+                
+            try:
+                proposal_data = {
+                    "namespace": "legal_entities",
+                    "key": f"entity_{document_id}_{entity.entity_id}",
+                    "content": json.dumps(entity.to_dict()),
+                    "memory_type": "entity",
+                    "agent_id": self.agent_name,
+                    "document_id": document_id,
+                    "metadata": {
+                        "entity_type": entity.entity_type,
+                        "extraction_method": entity.extraction_method,
+                        "original_text": entity.text
+                    },
+                    "confidence_score": entity.confidence,
+                    "importance_score": 0.7,
+                    "status": "pending",
+                    "created_at": datetime.now().isoformat()
+                }
+                pid = proposals_db.add_proposal(proposal_data)
+                proposal_ids.append(pid)
+            except Exception as e:
+                logger.error(f"Failed to propose entity {entity.text}: {e}")
+                
+        return proposal_ids
 
     def _update_statistics(self, result: ExtractionResult, methods_used: Set[str]):
         """Update agent statistics"""

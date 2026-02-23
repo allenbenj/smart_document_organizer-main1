@@ -30,9 +30,11 @@ def include_default_routers(
         ("personas", "routes.personas", "router", "/api", True),
         ("ontology", "routes.ontology", "router", "/api/ontology", True),
         ("ontology_alias", "routes.ontology", "router", "/api", True),
+        ("aedis_runtime", "routes.aedis_runtime", "router", "/api", True),
         ("experts", "routes.experts", "router", "/api", True),
         ("organization", "routes.organization", "router", "/api", True),
         ("workflow", "routes.workflow", "router", "/api", True),
+        ("data_explorer", "routes.data_explorer", "router", "/api/data-explorer", True),
     ]
 
     for name, module_name, attr_name, prefix, needs_auth in router_specs:

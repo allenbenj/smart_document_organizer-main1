@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
+import asyncio
 import functools
+import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query
@@ -9,10 +12,12 @@ from starlette.concurrency import run_in_threadpool
 
 from services.dependencies import get_database_manager_strict_dep
 from services.file_index_service import FileIndexService
+from services.organization_service import OrganizationService
 from services.semantic_file_service import SemanticFileService
 from services.taskmaster_service import TaskMasterService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class FileIndexRequest(BaseModel):
@@ -48,6 +53,53 @@ class SemanticSearchRequest(BaseModel):
     top_k: int = 10
     min_similarity: float = 0.0
     file_id: Optional[int] = None
+
+
+class SemanticBulkEnrichRequest(BaseModel):
+    embedding_model: str = "local-hash-v1"
+    batch_size: int = 100
+    max_files: int = 100000
+    offset: int = 0
+    sleep_ms: int = 0
+    status: Optional[str] = "ready"
+    ext: Optional[str] = None
+    q: Optional[str] = None
+
+
+class CrawlRequest(BaseModel):
+    roots: List[str]
+    recursive: bool = True
+    allowed_exts: Optional[List[str]] = None
+    include_paths: Optional[List[str]] = None
+    exclude_paths: Optional[List[str]] = None
+    min_size_bytes: Optional[int] = None
+    max_size_bytes: Optional[int] = None
+    modified_after_ts: Optional[float] = None
+    max_files_total: int = 100000
+    batch_size: int = 2000
+    max_runtime_seconds_per_pass: float = 20.0
+    max_passes: int = 200
+    sleep_ms: int = 0
+    max_depth: Optional[int] = None
+    follow_symlinks: bool = False
+    start_after_path: Optional[str] = None
+
+
+class ReorgAutopilotRequest(BaseModel):
+    root_prefix: str
+    allowed_exts: Optional[List[str]] = None
+    max_files_total: int = 100000
+    crawl_batch_size: int = 2000
+    crawl_pass_runtime_seconds: float = 20.0
+    crawl_max_passes: int = 300
+    crawl_sleep_ms: int = 25
+    embedding_model: str = "Qwen3-Embedding"
+    embedding_batch_size: int = 64
+    embedding_sleep_ms: int = 25
+    generate_limit: int = 5000
+    apply_limit: int = 100000
+    dry_run: bool = False
+    follow_symlinks: bool = False
 
 
 def _human_size(n: Optional[int]) -> Optional[str]:
@@ -279,6 +331,128 @@ async def refresh_index(
         functools.partial(service.refresh_index, stale_after_hours=stale_after_hours),
     )
     return {"success": True, "watch": watch_res, "refresh": refresh_res}
+
+
+@router.post("/crawl")
+async def crawl_files(
+    payload: CrawlRequest,
+    db=Depends(get_database_manager_strict_dep),
+) -> Dict[str, Any]:
+    """
+    High-scale resumable crawler.
+    Crawls in bounded passes with a lexical cursor to avoid reprocessing the same head slice.
+    """
+    service = FileIndexService(db)
+    allowed = [e.lower() if e.startswith(".") else f".{e.lower()}" for e in (payload.allowed_exts or [])]
+    batch_size = max(1, min(int(payload.batch_size), 20000))
+    max_files_total = max(1, int(payload.max_files_total))
+    max_passes = max(1, int(payload.max_passes))
+    sleep_ms = max(0, int(payload.sleep_ms))
+    max_runtime = max(1.0, float(payload.max_runtime_seconds_per_pass))
+
+    total_indexed = 0
+    total_errors = 0
+    total_scanned = 0
+    total_skipped = 0
+    total_perm = 0
+    passes_run = 0
+    cursor = payload.start_after_path
+    last_result: Dict[str, Any] = {}
+    logger.info(
+        "[crawler] start roots=%s max_files_total=%s batch_size=%s max_passes=%s pass_runtime=%.1fs sleep_ms=%s start_after=%s",
+        payload.roots,
+        max_files_total,
+        batch_size,
+        max_passes,
+        max_runtime,
+        sleep_ms,
+        cursor,
+    )
+
+    started = time.monotonic()
+    while passes_run < max_passes and total_indexed < max_files_total:
+        passes_run += 1
+        pass_budget = min(batch_size, max_files_total - total_indexed)
+        logger.info(
+            "[crawler] pass %s/%s begin budget=%s cursor=%s",
+            passes_run,
+            max_passes,
+            pass_budget,
+            cursor,
+        )
+        out = await run_in_threadpool(
+            functools.partial(
+                service.index_roots,
+                payload.roots,
+                recursive=payload.recursive,
+                allowed_exts=set(allowed) or None,
+                include_paths=payload.include_paths,
+                exclude_paths=payload.exclude_paths,
+                min_size_bytes=payload.min_size_bytes,
+                max_size_bytes=payload.max_size_bytes,
+                modified_after_ts=payload.modified_after_ts,
+                max_files=pass_budget,
+                max_depth=payload.max_depth,
+                max_runtime_seconds=max_runtime,
+                start_after_path=cursor,
+                follow_symlinks=payload.follow_symlinks,
+            )
+        )
+        last_result = out
+        total_indexed += int(out.get("indexed", 0))
+        total_errors += int(out.get("errors", 0))
+        total_scanned += int(out.get("scanned", 0))
+        total_skipped += int(out.get("skipped", 0))
+        total_perm += int(out.get("permission_errors", 0))
+        cursor = out.get("next_cursor") or cursor
+        logger.info(
+            "[crawler] pass %s end indexed=%s scanned=%s skipped=%s errors=%s truncated=%s next_cursor=%s total_indexed=%s/%s",
+            passes_run,
+            int(out.get("indexed", 0)),
+            int(out.get("scanned", 0)),
+            int(out.get("skipped", 0)),
+            int(out.get("errors", 0)),
+            bool(out.get("truncated", False)),
+            cursor,
+            total_indexed,
+            max_files_total,
+        )
+
+        if not bool(out.get("truncated", False)):
+            break
+        if sleep_ms > 0:
+            logger.info("[crawler] sleeping %sms before next pass", sleep_ms)
+            await asyncio.sleep(sleep_ms / 1000.0)
+
+    elapsed = round(time.monotonic() - started, 3)
+    logger.info(
+        "[crawler] complete passes=%s indexed=%s scanned=%s skipped=%s errors=%s elapsed=%.3fs completed=%s next_cursor=%s",
+        passes_run,
+        total_indexed,
+        total_scanned,
+        total_skipped,
+        total_errors,
+        elapsed,
+        not bool(last_result.get("truncated", False)),
+        cursor,
+    )
+    return {
+        "success": True,
+        "mode": "crawler",
+        "passes_run": passes_run,
+        "indexed": total_indexed,
+        "errors": total_errors,
+        "permission_errors": total_perm,
+        "scanned": total_scanned,
+        "skipped": total_skipped,
+        "max_files_total": max_files_total,
+        "batch_size": batch_size,
+        "sleep_ms": sleep_ms,
+        "elapsed_seconds": elapsed,
+        "next_cursor": cursor,
+        "completed": not bool(last_result.get("truncated", False)),
+        "last_pass": last_result,
+    }
 
 
 @router.get("")
@@ -561,6 +735,401 @@ async def semantic_similarity_search(
         "count": len(results),
         "embedding_model": payload.embedding_model,
         "results": results,
+    }
+
+
+@router.post("/semantic/enrich_all")
+async def semantic_enrich_all(
+    payload: SemanticBulkEnrichRequest,
+    db=Depends(get_database_manager_strict_dep),
+) -> Dict[str, Any]:
+    """
+    Bulk semantic enrichment for indexed files with safe throttling controls.
+    """
+    batch_size = max(1, min(int(payload.batch_size), 1000))
+    max_files = max(1, int(payload.max_files))
+    offset = max(0, int(payload.offset))
+    sleep_ms = max(0, int(payload.sleep_ms))
+    embedding_model = str(payload.embedding_model or "local-hash-v1").strip()
+
+    svc = SemanticFileService(db)
+
+    started = time.monotonic()
+    processed = 0
+    success_count = 0
+    failed_count = 0
+    failures: List[Dict[str, Any]] = []
+    limit_failures = 200
+    cursor = offset
+
+    _, total_available = db.list_indexed_files(
+        limit=1,
+        offset=offset,
+        status=payload.status,
+        ext=(payload.ext.lower() if payload.ext else None),
+        query=payload.q,
+        sort_by="id",
+        sort_dir="asc",
+        keyword=None,
+    )
+    remaining = max(0, min(max_files, max(0, int(total_available) - offset)))
+
+    while processed < remaining:
+        page_limit = min(batch_size, remaining - processed)
+        items, _ = db.list_indexed_files(
+            limit=page_limit,
+            offset=cursor,
+            status=payload.status,
+            ext=(payload.ext.lower() if payload.ext else None),
+            query=payload.q,
+            sort_by="id",
+            sort_dir="asc",
+            keyword=None,
+        )
+        if not items:
+            break
+
+        for rec in items:
+            file_id = int(rec.get("id") or 0)
+            if file_id <= 0:
+                failed_count += 1
+                if len(failures) < limit_failures:
+                    failures.append({"file_id": file_id, "error": "invalid_file_id"})
+                continue
+            try:
+                out = await run_in_threadpool(
+                    functools.partial(
+                        svc.enrich_file,
+                        file_id=file_id,
+                        embedding_model=embedding_model,
+                    )
+                )
+                if out.get("success"):
+                    success_count += 1
+                else:
+                    failed_count += 1
+                    if len(failures) < limit_failures:
+                        failures.append(
+                            {
+                                "file_id": file_id,
+                                "error": str(out.get("error") or "enrich_failed"),
+                            }
+                        )
+            except Exception as e:
+                failed_count += 1
+                if len(failures) < limit_failures:
+                    failures.append({"file_id": file_id, "error": str(e)})
+
+        processed += len(items)
+        cursor += len(items)
+
+        if sleep_ms > 0 and processed < remaining:
+            await asyncio.sleep(sleep_ms / 1000.0)
+
+    elapsed = round(time.monotonic() - started, 3)
+    return {
+        "success": True,
+        "embedding_model": embedding_model,
+        "batch_size": batch_size,
+        "sleep_ms": sleep_ms,
+        "offset": offset,
+        "max_files": max_files,
+        "processed": processed,
+        "succeeded": success_count,
+        "failed": failed_count,
+        "failures": failures,
+        "total_available": int(total_available),
+        "next_offset": cursor,
+        "elapsed_seconds": elapsed,
+    }
+
+
+@router.post("/reorg/autopilot")
+async def reorg_autopilot(
+    payload: ReorgAutopilotRequest,
+    db=Depends(get_database_manager_strict_dep),
+) -> Dict[str, Any]:
+    """
+    One-shot reorg pipeline:
+    1) Crawl/index scope
+    2) Semantic enrichment (embeddings)
+    3) Entity extraction pass
+    4) Dedupe refresh
+    5) Generate organization proposals
+    6) Auto-approve + apply
+    """
+    started = time.monotonic()
+    root_prefix = str(payload.root_prefix or "").strip()
+    if not root_prefix:
+        return {"success": False, "error": "root_prefix_required"}
+
+    file_index = FileIndexService(db)
+    semantic = SemanticFileService(db)
+    org = OrganizationService(db)
+    logger.info(
+        "[autopilot] start root=%s max_files_total=%s crawl_batch=%s embed_model=%s embed_batch=%s dry_run=%s",
+        root_prefix,
+        payload.max_files_total,
+        payload.crawl_batch_size,
+        payload.embedding_model,
+        payload.embedding_batch_size,
+        payload.dry_run,
+    )
+
+    # 1) Crawl in bounded resumable passes.
+    crawl_allowed = [
+        e.lower() if str(e).startswith(".") else f".{str(e).lower()}"
+        for e in (payload.allowed_exts or [])
+    ]
+    total_indexed = 0
+    total_errors = 0
+    total_scanned = 0
+    total_skipped = 0
+    cursor: Optional[str] = None
+    last_crawl: Dict[str, Any] = {}
+
+    max_files_total = max(1, int(payload.max_files_total))
+    crawl_batch = max(1, min(int(payload.crawl_batch_size), 20000))
+    crawl_passes = max(1, int(payload.crawl_max_passes))
+    crawl_runtime = max(1.0, float(payload.crawl_pass_runtime_seconds))
+    crawl_sleep_ms = max(0, int(payload.crawl_sleep_ms))
+
+    for i in range(crawl_passes):
+        if total_indexed >= max_files_total:
+            break
+        pass_budget = min(crawl_batch, max_files_total - total_indexed)
+        logger.info(
+            "[autopilot] crawl pass %s/%s budget=%s cursor=%s",
+            i + 1,
+            crawl_passes,
+            pass_budget,
+            cursor,
+        )
+        out = await run_in_threadpool(
+            functools.partial(
+                file_index.index_roots,
+                [root_prefix],
+                recursive=True,
+                allowed_exts=set(crawl_allowed) or None,
+                max_files=pass_budget,
+                max_runtime_seconds=crawl_runtime,
+                start_after_path=cursor,
+                follow_symlinks=bool(payload.follow_symlinks),
+            )
+        )
+        last_crawl = out
+        total_indexed += int(out.get("indexed", 0))
+        total_errors += int(out.get("errors", 0))
+        total_scanned += int(out.get("scanned", 0))
+        total_skipped += int(out.get("skipped", 0))
+        cursor = out.get("next_cursor") or cursor
+        logger.info(
+            "[autopilot] crawl pass %s end indexed=%s scanned=%s errors=%s truncated=%s total_indexed=%s/%s",
+            i + 1,
+            int(out.get("indexed", 0)),
+            int(out.get("scanned", 0)),
+            int(out.get("errors", 0)),
+            bool(out.get("truncated", False)),
+            total_indexed,
+            max_files_total,
+        )
+
+        if not bool(out.get("truncated", False)):
+            break
+        if crawl_sleep_ms > 0:
+            logger.info("[autopilot] crawl sleep %sms", crawl_sleep_ms)
+            await asyncio.sleep(crawl_sleep_ms / 1000.0)
+
+    # Scope query for indexed files.
+    q_scope = root_prefix.replace("\\", "/")
+    _, total_scoped = db.list_indexed_files(
+        limit=1,
+        offset=0,
+        status="ready",
+        ext=None,
+        query=q_scope,
+        sort_by="id",
+        sort_dir="asc",
+        keyword=None,
+    )
+
+    # 2) Semantic enrichment pass.
+    embed_batch = max(1, min(int(payload.embedding_batch_size), 1000))
+    embed_sleep_ms = max(0, int(payload.embedding_sleep_ms))
+    embed_model = str(payload.embedding_model or "Qwen3-Embedding").strip()
+    enriched_ok = 0
+    enriched_failed = 0
+    enriched_failures: List[Dict[str, Any]] = []
+    offset = 0
+    while offset < int(total_scoped):
+        items, _ = db.list_indexed_files(
+            limit=embed_batch,
+            offset=offset,
+            status="ready",
+            ext=None,
+            query=q_scope,
+            sort_by="id",
+            sort_dir="asc",
+            keyword=None,
+        )
+        if not items:
+            break
+        for rec in items:
+            fid = int(rec.get("id") or 0)
+            if fid <= 0:
+                enriched_failed += 1
+                continue
+            out = await run_in_threadpool(
+                functools.partial(
+                    semantic.enrich_file,
+                    file_id=fid,
+                    embedding_model=embed_model,
+                )
+            )
+            if out.get("success"):
+                enriched_ok += 1
+            else:
+                enriched_failed += 1
+                if len(enriched_failures) < 200:
+                    enriched_failures.append(
+                        {"file_id": fid, "error": str(out.get("error") or "enrich_failed")}
+                    )
+        offset += len(items)
+        logger.info(
+            "[autopilot] semantic progress processed=%s/%s ok=%s failed=%s model=%s",
+            offset,
+            int(total_scoped),
+            enriched_ok,
+            enriched_failed,
+            embed_model,
+        )
+        if embed_sleep_ms > 0 and offset < int(total_scoped):
+            await asyncio.sleep(embed_sleep_ms / 1000.0)
+
+    # 3) Entity extraction pass (reuses existing endpoint logic to persist entity links/knowledge entries).
+    entities_ok = 0
+    entities_failed = 0
+    entity_offset = 0
+    while entity_offset < int(total_scoped):
+        items, _ = db.list_indexed_files(
+            limit=embed_batch,
+            offset=entity_offset,
+            status="ready",
+            ext=None,
+            query=q_scope,
+            sort_by="id",
+            sort_dir="asc",
+            keyword=None,
+        )
+        if not items:
+            break
+        for rec in items:
+            fid = int(rec.get("id") or 0)
+            if fid <= 0:
+                entities_failed += 1
+                continue
+            try:
+                ent = await file_entities(file_id=fid, db=db)
+                if ent.get("success"):
+                    entities_ok += 1
+                else:
+                    entities_failed += 1
+            except Exception:
+                entities_failed += 1
+        entity_offset += len(items)
+        logger.info(
+            "[autopilot] entity progress processed=%s/%s ok=%s failed=%s",
+            entity_offset,
+            int(total_scoped),
+            entities_ok,
+            entities_failed,
+        )
+        if embed_sleep_ms > 0 and entity_offset < int(total_scoped):
+            await asyncio.sleep(embed_sleep_ms / 1000.0)
+
+    # 4) Dedupe refresh.
+    dedupe = db.refresh_exact_duplicate_relationships()
+
+    # 5) Generate proposals from scoped corpus.
+    generate_limit = max(1, int(payload.generate_limit))
+    generated = org.generate_proposals(limit=generate_limit, root_prefix=root_prefix)
+    generated_count = int(generated.get("created", 0))
+
+    # 6) Auto-approve generated proposals, then apply.
+    proposals = db.organization_list_proposals(status="proposed", limit=100000, offset=0)
+    prefixes = org._scope_prefixes(root_prefix)  # noqa: SLF001
+    if prefixes:
+        proposals = [
+            p
+            for p in proposals
+            if org._path_matches_prefixes(p.get("current_path"), prefixes)  # noqa: SLF001
+        ]
+    approved = 0
+    approve_failed = 0
+    for p in proposals:
+        pid = int(p.get("id") or 0)
+        if pid <= 0:
+            continue
+        out = org.approve_proposal(pid)
+        if out.get("success"):
+            approved += 1
+        else:
+            approve_failed += 1
+        if (approved + approve_failed) % 250 == 0:
+            logger.info(
+                "[autopilot] approve progress processed=%s/%s approved=%s failed=%s",
+                approved + approve_failed,
+                len(proposals),
+                approved,
+                approve_failed,
+            )
+
+    apply_out = org.apply_approved(
+        limit=max(1, int(payload.apply_limit)),
+        dry_run=bool(payload.dry_run),
+        root_prefix=root_prefix,
+    )
+
+    elapsed = round(time.monotonic() - started, 3)
+    logger.info(
+        "[autopilot] complete elapsed=%.3fs crawl_indexed=%s semantic_ok=%s entity_ok=%s generated=%s approved=%s apply_success=%s",
+        elapsed,
+        total_indexed,
+        enriched_ok,
+        entities_ok,
+        generated_count,
+        approved,
+        bool(apply_out.get("success", False)),
+    )
+    return {
+        "success": bool(apply_out.get("success", False)),
+        "root_prefix": root_prefix,
+        "elapsed_seconds": elapsed,
+        "crawl": {
+            "indexed": total_indexed,
+            "errors": total_errors,
+            "scanned": total_scanned,
+            "skipped": total_skipped,
+            "next_cursor": cursor,
+            "last_pass": last_crawl,
+        },
+        "semantic": {
+            "embedding_model": embed_model,
+            "succeeded": enriched_ok,
+            "failed": enriched_failed,
+            "failures": enriched_failures,
+        },
+        "entities": {
+            "succeeded": entities_ok,
+            "failed": entities_failed,
+        },
+        "dedupe": dedupe,
+        "organization": {
+            "generated": generated_count,
+            "approved": approved,
+            "approve_failed": approve_failed,
+            "apply": apply_out,
+        },
     }
 
 

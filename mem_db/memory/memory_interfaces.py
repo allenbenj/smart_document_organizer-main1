@@ -21,6 +21,7 @@ class MemoryType(Enum):
     CASE_LAW = "case_law"
     PRECEDENT = "precedent"
     CONTEXT = "context"
+    SUMMARY = "summary"
 
 
 @dataclass
@@ -38,6 +39,7 @@ class MemoryRecord:
     importance_score: float = 1.0
     confidence_score: float = 1.0
     access_count: int = 0
+    embedding_vector: Optional[Any] = None
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
 

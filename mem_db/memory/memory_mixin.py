@@ -1,10 +1,7 @@
-"""
-Memory Mixin for Agents
-=======================
+"""Memory mixin shim.
 
-Provides memory capabilities to agents through a mixin pattern.
-This enables any agent to participate in the shared memory system that
-makes the Legal AI platform collectively intelligent.
+Use `MemoryMixin` for the generic storage behavior.
+Use `LegalMemoryMixin` from `agents.base.agent_mixins` for legal-domain helpers.
 """
 
 import inspect
@@ -442,3 +439,50 @@ class MemoryMixin:
     def _is_memory_available(self) -> bool:
         """Check if memory manager is available."""
         return self._memory_manager is not None
+
+    async def link_memory_to_file(
+        self,
+        memory_record_id: str,
+        file_path: str,
+        relation_type: str = "references",
+        confidence: float = 1.0,
+        source: str = "system",
+    ) -> bool:
+        """Link a memory record to a file path."""
+        if not await self._ensure_memory_manager():
+            logger.warning(f"Memory manager not available for agent {self._agent_id}")
+            return False
+        
+        if not memory_record_id or not file_path:
+            logger.warning("Cannot link memory to file with empty identifiers")
+            return False
+        
+        return await self._memory_manager.link_memory_to_file(
+            memory_record_id=memory_record_id,
+            file_path=file_path,
+            relation_type=relation_type,
+            confidence=confidence,
+            source=source,
+        )
+    
+    async def get_linked_memories_for_file(
+        self, file_path: str, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Retrieve memory records linked to a file path."""
+        if not await self._ensure_memory_manager():
+            logger.warning(f"Memory manager not available for agent {self._agent_id}")
+            return []
+        if not file_path:
+            return []
+        return await self._memory_manager.get_memories_for_file(file_path, limit)
+
+    async def get_linked_files_for_memory(
+        self, memory_record_id: str, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Retrieve file paths linked to a memory record."""
+        if not await self._ensure_memory_manager():
+            logger.warning(f"Memory manager not available for agent {self._agent_id}")
+            return []
+        if not memory_record_id:
+            return []
+        return await self._memory_manager.get_files_for_memory(memory_record_id, limit)

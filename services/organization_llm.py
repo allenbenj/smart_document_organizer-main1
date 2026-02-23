@@ -19,6 +19,7 @@ class OrganizationPromptAdapter:
         current_path: str,
         preview: str,
         known_folders: Optional[list[str]] = None,
+        semantic_summary: Optional[Dict[str, Any]] = None,
     ) -> str:
         folder_hint = ""
         folders = [str(x).strip() for x in (known_folders or []) if str(x).strip()]
@@ -29,6 +30,25 @@ class OrganizationPromptAdapter:
                 + "\n".join(f"- {f}" for f in sample)
                 + "\n"
             )
+
+        semantic_info = ""
+        if semantic_summary:
+            doc_type = semantic_summary.get("document_type")
+            legal_domain = semantic_summary.get("legal_domain")
+            key_topics = ", ".join(semantic_summary.get("key_topics", []))
+            doc_summary = semantic_summary.get("document_summary")
+            confidence = semantic_summary.get("confidence")
+
+            semantic_info = (
+                "\n--- Semantic Analysis ---\n"
+                f"Document Type: {doc_type or 'N/A'}\n"
+                f"Legal Domain: {legal_domain or 'N/A'}\n"
+                f"Key Topics: {key_topics or 'N/A'}\n"
+                f"Summary: {doc_summary or 'N/A'}\n"
+                f"Confidence Score: {confidence:.2f}\n"
+                "-------------------------\n"
+            )
+
         return (
             "You are a file organization assistant. Return ONLY valid JSON with keys: "
             "proposed_folder, proposed_filename, confidence, rationale, alternatives, "
@@ -39,6 +59,7 @@ class OrganizationPromptAdapter:
             f"current_path: {current_path}\n"
             f"preview: {preview[:1200]}\n"
             f"{folder_hint}"
+            f"{semantic_info}"
         )
 
 

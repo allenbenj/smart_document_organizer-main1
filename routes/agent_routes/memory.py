@@ -11,6 +11,8 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from .common import get_memory_service
+from services.contracts.aedis_models import ProvenanceRecord
+from services.provenance_service import ProvenanceGateError
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -26,11 +28,17 @@ class MemoryProposalPayload(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
     confidence_score: float = 1.0
     importance_score: float = 1.0
+    provenance: Optional[Dict[str, Any]] = None
 
 
 class MemoryDecisionPayload(BaseModel):
     proposal_id: int
     corrections: Optional[Dict[str, Any]] = None
+
+
+class MemoryUpdatePayload(BaseModel):
+    content: str
+    metadata: Optional[Dict[str, Any]] = None
 
 
 class MemoryCorrectionPayload(BaseModel):
@@ -64,7 +72,15 @@ async def propose_memory_entry(
     if not svc:
         raise HTTPException(status_code=503, detail="Memory service unavailable")
 
-    return await svc.create_proposal(payload.model_dump())
+    try:
+        prov = (
+            ProvenanceRecord.model_validate(payload.provenance)
+            if isinstance(payload.provenance, dict)
+            else None
+        )
+        return await svc.create_proposal(payload.model_dump(exclude={"provenance"}), prov)
+    except ProvenanceGateError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/agents/memory/proposals/approve")
@@ -94,6 +110,32 @@ async def reject_memory_proposal(decision: MemoryDecisionPayload, request: Reque
         return await svc.reject_proposal(decision.proposal_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/agents/memory/proposals/{proposal_id}/update")
+async def update_memory_proposal(
+    proposal_id: int, payload: MemoryUpdatePayload, request: Request
+) -> Dict[str, Any]:
+    svc = await get_memory_service(request)
+    if not svc:
+        raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+    ok = await svc.update_proposal(proposal_id, payload.content, payload.metadata)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Proposal not found or update failed")
+    return {"updated": ok}
+
+
+@router.delete("/agents/memory/proposals/{proposal_id}")
+async def delete_memory_proposal(proposal_id: int, request: Request) -> Dict[str, Any]:
+    svc = await get_memory_service(request)
+    if not svc:
+        raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+    ok = await svc.delete_proposal(proposal_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    return {"deleted": ok}
 
 
 @router.post("/agents/memory/correct")

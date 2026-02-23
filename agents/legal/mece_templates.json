@@ -1,0 +1,53 @@
+{
+  "search_warrant": {
+    "elements": [
+      "probable_cause",
+      "particularity_place",
+      "particularity_items",
+      "neutral_magistrate",
+      "oath_affirmation",
+      "execution_time_scope"
+    ],
+    "critical_failure_points": [
+      "false_statements_in_affidavit",
+      "stale_information",
+      "general_warrant_language"
+    ]
+  },
+  "brady_violation": {
+    "elements": [
+      "evidence_favorable_to_accused",
+      "evidence_suppressed_by_state",
+      "prejudice_ensued"
+    ],
+    "critical_failure_points": [
+      "impeachment_evidence_withheld",
+      "willful_or_inadvertent_suppression",
+      "materiality_of_evidence"
+    ]
+  },
+  "miranda_violation": {
+    "elements": [
+      "custody",
+      "interrogation",
+      "government_agent",
+      "valid_waiver"
+    ],
+    "critical_failure_points": [
+      "functional_equivalent_of_interrogation",
+      "ambiguous_invocation_of_rights",
+      "coercive_police_conduct"
+    ]
+  },
+  "ineffective_assistance": {
+    "elements": [
+      "deficient_performance",
+      "prejudice_to_defendant"
+    ],
+    "critical_failure_points": [
+      "failure_to_investigate",
+      "failure_to_object",
+      "conflict_of_interest"
+    ]
+  }
+}

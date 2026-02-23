@@ -252,6 +252,60 @@ async def run_pipeline(  # noqa: C901
                         "data": opts.get("data", {}),
                     }
                 )
+        elif name == "shadow_da_simulation":
+            text = opts.get("text") or ctx.get("text") or ""
+            # Map to legal reasoning with specific DA simulation flags
+            res = await manager.analyze_legal_reasoning(
+                text, 
+                analysis_type="da_simulation", 
+                principle=opts.get("principle", "MECE"),
+                model=opts.get("model", "rebel-large")
+            )
+            ctx.setdefault("da_simulation", res.data)
+        elif name == "refutation_search":
+            text = opts.get("text") or ctx.get("text") or ""
+            da_claims = ctx.get("da_simulation", {}).get("claims", [])
+            # Map to defense refutation logic
+            res = await manager.analyze_legal_reasoning(
+                text, 
+                analysis_type="defense_refutation",
+                da_claims=da_claims,
+                model=opts.get("model", "nli-deberta-v3-base")
+            )
+            ctx.setdefault("refutation", res.data)
+        elif name == "extract_claims":
+            text = opts.get("text") or ctx.get("text") or ""
+            res = await manager.analyze_legal_reasoning(text, analysis_type="claim_extraction")
+            ctx.setdefault("claims", res.data.get("claims", []))
+        elif name == "toulmin_mapping":
+            text = opts.get("text") or ctx.get("text") or ""
+            claims = opts.get("claims") or ctx.get("claims") or []
+            res = await manager.analyze_toulmin(
+                text, 
+                claims=claims,
+                validation_gate=opts.get("validation_gate", 0.85),
+                model=opts.get("model", "nli-deberta-v3-base")
+            )
+            ctx.setdefault("toulmin", res.data)
+        elif name == "reassess_motion":
+            # Consolidate all previous intelligence
+            motion = ctx.get("expert_prompt", {}).get("Ava _Legal Writer_", "")
+            da_sim = ctx.get("da_simulation", {})
+            defense_refute = ctx.get("refutation", {})
+            toulmin = ctx.get("toulmin", {})
+            
+            # Final polish step
+            res = await manager.analyze_legal_reasoning(
+                motion,
+                analysis_type="motion_reassessment",
+                context={
+                    "da_theory": da_sim,
+                    "defense_rebuttal": defense_refute,
+                    "toulmin_map": toulmin
+                },
+                persona=opts.get("persona", "Aria _Appellate Specialist_")
+            )
+            ctx.setdefault("final_motion", res.data)
         else:
             raise ValueError(f"Unknown step: {name}")
 

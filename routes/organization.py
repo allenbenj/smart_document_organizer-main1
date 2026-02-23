@@ -145,6 +145,13 @@ async def apply_approved(payload: ApplyPayload, db=Depends(get_database_manager_
     return svc.apply_approved(limit=payload.limit, dry_run=payload.dry_run, root_prefix=payload.root_prefix)
 
 
+@router.post("/organization/proposals/apply")
+async def apply_approved_alias(payload: ApplyPayload, db=Depends(get_database_manager_strict_dep)) -> Dict[str, Any]:
+    """Backward-compatible alias for proposal-apply callers."""
+    svc = OrganizationService(db)
+    return svc.apply_approved(limit=payload.limit, dry_run=payload.dry_run, root_prefix=payload.root_prefix)
+
+
 @router.post("/organization/proposals/clear")
 async def clear_proposals(payload: ClearPayload, db=Depends(get_database_manager_strict_dep)) -> Dict[str, Any]:
     svc = OrganizationService(db)

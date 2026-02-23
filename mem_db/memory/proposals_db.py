@@ -7,7 +7,7 @@ import json
 import sqlite3  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
 from pathlib import Path  # noqa: E402
-from typing import Any, Dict, List  # noqa: E402
+from typing import Any, Dict, List, Optional  # noqa: E402
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "memory_proposals.db"
 
@@ -92,6 +92,19 @@ def list_proposals(limit: int = 200, offset: int = 0) -> List[Dict[str, Any]]:
         return [_row_to_dict(r) for r in rows]
 
 
+def get_proposal(pid: int) -> Optional[Dict[str, Any]]:
+    """Fetch one proposal by id."""
+    init_schema()
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM memory_proposals WHERE id = ?",
+            (int(pid),),
+        ).fetchone()
+        if row is None:
+            return None
+        return _row_to_dict(row)
+
+
 def approve_proposal(pid: int, stored_record_id: str, approved_at: str) -> bool:
     init_schema()
     with _conn() as con:
@@ -112,6 +125,36 @@ def reject_proposal(pid: int, rejected_at: str) -> bool:
         cur = con.execute(
             "UPDATE memory_proposals SET status='rejected', rejected_at=? WHERE id=?",
             (rejected_at, pid),
+        )
+        return cur.rowcount > 0
+
+
+def delete_proposal(pid: int) -> bool:
+    """Permanently delete a proposal row."""
+    init_schema()
+    with _conn() as con:
+        cur = con.execute("DELETE FROM memory_proposals WHERE id=?", (pid,))
+        return cur.rowcount > 0
+
+
+def update_proposal(pid: int, content: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> bool:
+    """Update the content and metadata_json of a pending proposal."""
+    init_schema()
+    with _conn() as con:
+        updates = []
+        params = []
+        if content is not None:
+            updates.append("content = ?")
+            params.append(content)
+        if metadata is not None:
+            updates.append("metadata_json = ?")
+            params.append(json.dumps(metadata))
+        if not updates:
+            return False
+        params.append(pid)
+        cur = con.execute(
+            f"UPDATE memory_proposals SET {', '.join(updates)} WHERE id=?",
+            params,
         )
         return cur.rowcount > 0
 

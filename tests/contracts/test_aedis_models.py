@@ -11,6 +11,8 @@ from services.contracts.aedis_models import (
     CanonicalArtifact,
     EvidenceSpan,
     JudgeRun,
+    LearningPath,
+    LearningStep,
     ProvenanceRecord,
 )
 
@@ -85,3 +87,42 @@ def test_judge_run_verdict_is_strict() -> None:
             score=0.5,
             created_at=_NOW,
         )
+
+
+def test_learning_step_requires_evidence_spans() -> None:
+    with pytest.raises(ValidationError):
+        LearningStep(
+            step_id="step-1",
+            title="Do thing",
+            instruction="Explain decision",
+            objective_id="OBJECTIVE.TEST",
+            heuristic_ids=["h1"],
+            evidence_spans=[],
+            difficulty=1,
+        )
+
+
+def test_learning_path_roundtrip() -> None:
+    step = LearningStep(
+        step_id="step-1",
+        title="Do thing",
+        instruction="Explain decision",
+        objective_id="OBJECTIVE.TEST",
+        heuristic_ids=["h1"],
+        evidence_spans=[
+            EvidenceSpan(artifact_row_id=1, start_char=0, end_char=3, quote="abc")
+        ],
+        difficulty=1,
+    )
+    path = LearningPath(
+        path_id="lp-1",
+        user_id="user-1",
+        objective_id="OBJECTIVE.TEST",
+        steps=[step],
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+    encoded = path.model_dump(mode="json")
+    decoded = LearningPath.model_validate(encoded)
+    assert decoded.steps[0].heuristic_ids == ["h1"]

@@ -36,16 +36,18 @@ class ThematicDiscoveryService:
         agent_service = AgentService(self.agent_manager) if self.agent_manager else None
         
         for theme_idx, items in clusters.items():
-            # Use representative sample for labeling
-            sample_text = "\n".join(items[:3])
+            # Use the COMPLETE content for labeling and summary
+            full_theme_content = "\n".join(items)
             entities = []
             
             # Only attempt entity extraction if manager is available
             if agent_service:
                 try:
+                    # Take a high-quality slice for the Oracle to identify the theme
+                    oracle_sample = "\n".join(items[:5]) 
                     oracle_task = {
                         "type": "entity_extraction",
-                        "text": sample_text,
+                        "text": oracle_sample,
                         "extra_options": {
                             "extraction_model": "gliner_zero_shot",
                             "labels": ["Prosecutor", "Witness", "Misconduct Action", "Violation", "Key Document"]
@@ -57,14 +59,15 @@ class ThematicDiscoveryService:
                 except Exception as e:
                     logger.warning(f"Thematic Oracle extraction failed for cluster {theme_idx}: {e}")
             
-            # Create a 'Theme Artifact'
+            # Create a 'Theme Artifact' with FULL FIDELITY
             theme_record = {
                 "theme_id": str(uuid.uuid4()),
                 "document_id": document_id,
                 "theme_label": f"Strategic Theme {theme_idx + 1}",
                 "evidence_count": len(items),
                 "key_identifiers": [e.get("text") for e in entities],
-                "summary": sample_text[:200] + "...",
+                "full_evidence": items, # EVERY SINGLE SENTENCE
+                "summary": full_theme_content, # THE ENTIRE TEXT BLOCK
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
             
@@ -100,4 +103,13 @@ class ThematicDiscoveryService:
                     "evidence_count": theme_record["evidence_count"]
                 },
                 "confidence_score": 0.95,
-                "import
+                "importance_score": 0.8,
+                "status": "pending",
+                "created_at": theme_record["created_at"]
+            }
+            
+            proposals_db.add_proposal(proposal_data)
+            logger.info(f"Persisted theme proposal: {theme_record['theme_label']}")
+            
+        except Exception as e:
+            logger.error(f"Failed to persist theme: {e}")

@@ -11,6 +11,9 @@ import requests
 import asyncio
 import threading
 import time
+import logging
+import subprocess
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -19,14 +22,19 @@ project_root = str(Path(__file__).resolve().parent.parent)
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-from utils.backend_runtime import backend_base_url
+from utils.backend_runtime import (
+    backend_base_url,
+    backend_health_url,
+    launch_health_timeout_seconds,
+)
 
 try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-        QLabel, QTabWidget, QStatusBar, QMessageBox, QPushButton, QTextEdit
+        QLabel, QTabWidget, QStatusBar, QMessageBox, QPushButton, QTextEdit,
+        QDockWidget, QScrollArea, QFrame, QSizePolicy
     )
-    from PySide6.QtCore import Qt, QTimer, QSize, Signal
+    from PySide6.QtCore import Qt, QTimer, QSize, Signal, QThread
     from PySide6.QtGui import QIcon, QFont, QAction
 except ImportError:
     print("PySide6 is required. Please install it with: pip install PySide6")
@@ -35,6 +43,7 @@ except ImportError:
 # Import Tabs
 # We wrap imports in try/except to handle missing dependencies gracefully during dev
 try:
+    from gui.tabs.quick_start_tab import QuickStartTab
     from gui.tabs.organization_tab import OrganizationTab
     from gui.tabs.document_processing_tab import DocumentProcessingTab
     from gui.tabs.semantic_analysis_tab import SemanticAnalysisTab
@@ -46,7 +55,9 @@ try:
     from gui.tabs.expert_prompts_tab import ExpertPromptsTab
     from gui.tabs.embedding_operations_tab import EmbeddingOperationsTab
     from gui.tabs.classification_tab import ClassificationTab
-    from gui.memory_review_tab import MemoryReviewTab
+    from gui.tabs.learning_path_tab import LearningPathTab
+    from gui.tabs.data_explorer_tab import DataExplorerTab
+    from gui.memory_review_tab import AgentMemoryManagerTab
     from gui.contradictions_tab import ContradictionsTab
     from gui.violations_tab import ViolationsTab
 except ImportError as e:
@@ -54,111 +65,212 @@ except ImportError as e:
     # We will handle missing tabs in the class
 
 from gui.core import AsyncioThread
-from utils.backend_runtime import backend_base_url
+from gui.core.path_config import default_wsl_project_path
 from gui.services import api_client
 
-# Professional Dark Theme (Consistent with DB Monitor)
-DARK_STYLESHEET = """
-QMainWindow {
-    background-color: #1e1e1e;
-    color: #ffffff;
-}
-QWidget {
-    background-color: #1e1e1e;
-    color: #ffffff;
-}
-QGroupBox {
-    border: 1px solid #3e3e3e;
-    border-radius: 5px;
-    margin-top: 10px;
-    font-weight: bold;
-    color: #4dabf7;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    padding: 0 3px;
-}
-QTableWidget {
-    background-color: #252526;
-    gridline-color: #3e3e3e;
-    border: 1px solid #3e3e3e;
-    color: #e0e0e0;
-    selection-background-color: #264f78;
-}
-QHeaderView::section {
-    background-color: #333333;
-    color: #ffffff;
-    padding: 4px;
-    border: 1px solid #3e3e3e;
-}
-QTableWidget::item:selected {
-    background-color: #264f78;
-}
-QLineEdit, QTextEdit, QPlainTextEdit {
-    background-color: #252526;
-    border: 1px solid #3e3e3e;
-    color: #e0e0e0;
-    padding: 4px;
-    font-family: Consolas, monospace;
-}
-QPushButton {
-    background-color: #0e639c;
-    color: white;
-    border: none;
-    padding: 6px 12px;
-    border-radius: 3px;
-    font-weight: bold;
-}
-QPushButton:hover {
-    background-color: #1177bb;
-}
-QPushButton:pressed {
-    background-color: #094771;
-}
-QPushButton:disabled {
-    background-color: #333333;
-    color: #888888;
-}
-QComboBox {
-    background-color: #252526;
-    border: 1px solid #3e3e3e;
-    color: #e0e0e0;
-    padding: 4px;
-}
-QComboBox::drop-down {
-    border: none;
-}
-QStatusBar {
-    background-color: #007acc;
-    color: white;
-}
-QTabWidget::pane {
-    border: 1px solid #3e3e3e;
-}
-QTabBar::tab {
-    background: #2d2d2d;
-    color: #cccccc;
-    padding: 8px 12px;
-    border: 1px solid #3e3e3e;
-    border-bottom: none;
-    border-top-left-radius: 4px;
-    border-top-right-radius: 4px;
-}
-QTabBar::tab:selected {
-    background: #1e1e1e;
-    color: #ffffff;
-    border-bottom: 1px solid #1e1e1e; 
-}
-QTabBar::tab:hover {
-    background: #3e3e3e;
-}
-QLabel#Heading {
-    font-size: 16px;
-    font-weight: bold;
-    color: #4dabf7;
-}
-"""
+logger = logging.getLogger(__name__)
+
+
+
+# ---------------------------------------------------------------------------
+# WSL Backend Configuration
+# ---------------------------------------------------------------------------
+_WSL_DISTRO = os.getenv("WSL_DISTRO", "Ubuntu")
+_WSL_PROJECT_PATH = default_wsl_project_path()
+_BACKEND_HEALTH_URL = os.getenv("BACKEND_HEALTH_URL", backend_health_url())
+_HEALTH_TIMEOUT = launch_health_timeout_seconds(120)
+
+
+class WslBackendThread(QThread):
+    """Start the backend inside WSL and poll until healthy (or timeout)."""
+
+    status_update = Signal(str)  # emitted with progress messages
+    healthy = Signal()           # emitted once health-check passes
+    failed = Signal(str)         # emitted if backend never became healthy
+
+    def __init__(
+        self,
+        distro: str = _WSL_DISTRO,
+        linux_path: str = _WSL_PROJECT_PATH,
+        health_url: str = _BACKEND_HEALTH_URL,
+        timeout_s: int = _HEALTH_TIMEOUT,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.distro = distro
+        self.linux_path = linux_path
+        self.health_url = health_url
+        self.timeout_s = timeout_s
+
+    # -- helpers ----------------------------------------------------------
+    @staticmethod
+    def _backend_already_healthy(url: str) -> bool:
+        """Quick check — is the backend already responding?"""
+        try:
+            import urllib.request
+            with urllib.request.urlopen(url, timeout=2) as r:
+                return r.status == 200
+        except Exception as exc:
+            logger.debug("Backend pre-check failed for %s: %s", url, exc)
+            return False
+
+    def _kill_stale(self) -> None:
+        """Kill any stale backend processes so we can start clean."""
+        self._kill_stale_wsl()
+        self._kill_stale_windows()
+        # Brief pause so ports are released
+        import time
+        time.sleep(0.5)
+
+    def _kill_stale_wsl(self) -> None:
+        """Kill stale backend processes inside WSL."""
+        kill_cmd = (
+            f"set +e; cd '{self.linux_path}'; "
+            f"if [ -f .backend-wsl.pid ]; then "
+            f"  kill $(cat .backend-wsl.pid) 2>/dev/null; "
+            f"  rm -f .backend-wsl.pid; "
+            f"fi; "
+            f"pkill -f 'uvicorn Start:app' 2>/dev/null; "
+            f"echo CLEANED"
+        )
+        try:
+            result = subprocess.run(
+                ["wsl", "-d", self.distro, "bash", "-lc", kill_cmd],
+                capture_output=True, text=True, timeout=15,
+            )
+            self.status_update.emit(
+                f"Stale cleanup (WSL): {result.stdout.strip() or 'done'}"
+            )
+        except FileNotFoundError:
+            self.status_update.emit("WSL executable not found during stale cleanup.")
+        except Exception as exc:
+            self.status_update.emit(f"Stale cleanup warning: {exc}")
+
+    @staticmethod
+    def _find_pids_on_port(netstat_output: str, port: int = 8000) -> set[int]:
+        """Parse netstat -ano output for PIDs listening on *port*."""
+        my_pid = os.getpid()
+        pids: set[int] = set()
+        for line in netstat_output.splitlines():
+            if f":{port}" in line and "LISTENING" in line:
+                parts = line.split()
+                try:
+                    pid = int(parts[-1])
+                    if pid > 0 and pid != my_pid:
+                        pids.add(pid)
+                except (ValueError, IndexError):
+                    pass
+        return pids
+
+    def _kill_stale_windows(self) -> None:
+        """Kill any Windows processes listening on port 8000."""
+        try:
+            ns = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True, timeout=10,
+            )
+            for pid in self._find_pids_on_port(ns.stdout):
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", str(pid)],
+                        capture_output=True, timeout=5,
+                    )
+                    self.status_update.emit(f"Killed stale Windows PID {pid}")
+                except Exception as exc:
+                    self.status_update.emit(
+                        f"Failed to kill Windows PID {pid}: {exc}"
+                    )
+        except Exception as exc:
+            self.status_update.emit(f"Windows cleanup warning: {exc}")
+
+    def _start_in_wsl(self) -> str:
+        """Launch the backend inside WSL. Returns stdout text."""
+        result = subprocess.run(
+            [
+                "wsl", "-d", self.distro, "bash",
+                f"{self.linux_path}/tools/launchers/start_backend_wsl.sh",
+                self.linux_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        return (result.stdout + result.stderr).strip()
+
+    def _resolve_wsl_ip(self) -> str | None:
+        """Get the WSL2 distro's IP address (for when localhost forwarding is broken)."""
+        try:
+            result = subprocess.run(
+                ["wsl", "-d", self.distro, "hostname", "-I"],
+                capture_output=True, text=True, timeout=5,
+            )
+            ip = result.stdout.strip().split()[0]
+            if ip:
+                return ip
+        except Exception as exc:
+            logger.debug("WSL IP resolution failed: %s", exc)
+        return None
+
+    def _poll_health(self) -> bool:
+        """Block until the backend is healthy or we time out."""
+        import time, urllib.request  # noqa: E401
+        deadline = time.monotonic() + self.timeout_s
+        while time.monotonic() < deadline:
+            if self.isInterruptionRequested():
+                return False
+            try:
+                with urllib.request.urlopen(self.health_url, timeout=2) as r:
+                    if r.status == 200:
+                        return True
+            except Exception as exc:
+                logger.debug("Backend health poll not ready at %s: %s", self.health_url, exc)
+            time.sleep(1.2)
+        return False
+
+    # -- thread entry point -----------------------------------------------
+    def run(self):  # noqa: C901
+        # 1) Kill stale instances for a clean start
+        self.status_update.emit("Cleaning up stale processes...")
+        self._kill_stale()
+
+        # 2) Start backend via WSL
+        self.status_update.emit(f"Starting backend in WSL ({self.distro})...")
+        try:
+            out = self._start_in_wsl()
+            self.status_update.emit(f"WSL: {out}")
+        except FileNotFoundError:
+            self.failed.emit("wsl.exe not found — is WSL installed?")
+            return
+        except subprocess.TimeoutExpired:
+            self.failed.emit("WSL start command timed out (30 s)")
+            return
+        except Exception as exc:
+            self.failed.emit(f"WSL launch error: {exc}")
+            return
+
+        # 3) Resolve WSL2 IP and update health URL
+        wsl_ip = self._resolve_wsl_ip()
+        if wsl_ip:
+            self.health_url = f"http://{wsl_ip}:8000/api/health"
+            self.status_update.emit(f"WSL2 IP: {wsl_ip} — using it for health checks")
+        else:
+            self.status_update.emit("Could not resolve WSL2 IP, trying localhost")
+
+        # 4) Poll for health
+        self.status_update.emit("Waiting for backend to become healthy...")
+        if self._poll_health():
+            # Update the global api_client so all tabs use the correct URL
+            if wsl_ip:
+                api_client.base_url = f"http://{wsl_ip}:8000"
+            else:
+                api_client.base_url = backend_base_url()
+            self.status_update.emit("Backend healthy")
+            self.healthy.emit()
+        else:
+            self.failed.emit(
+                f"Backend did not become healthy within {self.timeout_s}s.\n"
+                f"Check: wsl -d {self.distro} bash -lc "
+                f"\"tail -n 80 '{self.linux_path}/logs/backend-wsl.log'\""
+            )
+
 
 class ProfessionalManager(QMainWindow):
     backend_check_finished = Signal(bool, object)
@@ -167,6 +279,7 @@ class ProfessionalManager(QMainWindow):
         super().__init__()
         self.setWindowTitle("Smart Document Organizer - Professional Manager")
         self.resize(1400, 900)
+        self.setMinimumSize(1000, 700)
         self.asyncio_thread = AsyncioThread(self)
         self.asyncio_thread.start()
         app = QApplication.instance()
@@ -192,7 +305,12 @@ class ProfessionalManager(QMainWindow):
         QTimer.singleShot(100, lambda: self.check_backend_status(False))
 
     def apply_styles(self):
-        self.setStyleSheet(DARK_STYLESHEET)
+        qss_file = Path(__file__).parent / "assets" / "dark_theme.qss"
+        if qss_file.exists():
+            with open(qss_file, "r") as f:
+                self.setStyleSheet(f.read())
+        else:
+            logger.warning("dark_theme.qss not found at %s", qss_file)
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -218,27 +336,39 @@ class ProfessionalManager(QMainWindow):
         refresh_btn = QPushButton("🔄 Reconnect")
         refresh_btn.clicked.connect(lambda: self.check_backend_status(True))
         top_bar.addWidget(refresh_btn)
+
+        self.toggle_logs_btn = QPushButton("🧾 Logs")
+        self.toggle_logs_btn.clicked.connect(self.toggle_diagnostics_dock)
+        top_bar.addWidget(self.toggle_logs_btn)
         
         main_layout.addLayout(top_bar)
 
-        # --- Main Tabs (Wrapped in ScrollArea for responsiveness) ---
-        from PySide6.QtWidgets import QScrollArea
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        
+        # --- Main Tabs ---
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True) # Professional look
+        self.tabs.setMovable(True)
         self.load_tabs()
-        scroll.setWidget(self.tabs)
-        main_layout.addWidget(scroll)
+        main_layout.addWidget(self.tabs)
 
-        # --- Diagnostic Log ---
+        # --- Diagnostic Log Dock (does not steal tab layout space) ---
+        self.diagnostics_dock = QDockWidget("📡 System Connection & Diagnostic Stream", self)
+        self.diagnostics_dock.setAllowedAreas(Qt.BottomDockWidgetArea)
+        self.diagnostics_dock.setFeatures(
+            QDockWidget.DockWidgetClosable
+            | QDockWidget.DockWidgetMovable
+            | QDockWidget.DockWidgetFloatable
+        )
+        log_container = QWidget()
+        log_layout = QVBoxLayout(log_container)
+        log_layout.setContentsMargins(4, 4, 4, 4)
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setMaximumHeight(100)
         self.log_output.setPlaceholderText("Connection diagnostic logs will appear here...")
-        self.log_output.setStyleSheet("background-color: #1a1a1a; color: #aaa; font-family: Consolas; font-size: 10px;")
-        main_layout.addWidget(self.log_output)
+        self.log_output.setStyleSheet("background-color: #1a1a1a; color: #00ff00; font-family: Consolas; font-size: 10px; border: 1px solid #333;")
+        log_layout.addWidget(self.log_output)
+        self.diagnostics_dock.setWidget(log_container)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.diagnostics_dock)
+        self.diagnostics_dock.hide()
 
         # --- Status Bar ---
         self.status_bar = QStatusBar()
@@ -246,104 +376,103 @@ class ProfessionalManager(QMainWindow):
         self.status_bar.showMessage("Initializing...")
 
     def load_tabs(self):
-        """Initialize and add all functional tabs."""
-        # 1. Organization
-        try:
-            self.org_tab = OrganizationTab()
-            self.tabs.addTab(self.org_tab, "📂 Organization")
-        except NameError:
-            self.tabs.addTab(QLabel("Organization Tab not available"), "📂 Organization")
+        """Initialize and add all functional tabs in strategic order."""
+        def _open_tab_by_label(label: str) -> bool:
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i) == label:
+                    self.tabs.setCurrentIndex(i)
+                    return True
+            return False
 
-        # 2. Document Processing
-        try:
-            self.doc_tab = DocumentProcessingTab()
-            self.tabs.addTab(self.doc_tab, "📄 Processing")
-        except NameError:
-            self.tabs.addTab(QLabel("Processing Tab not available"), "📄 Processing")
+        def _wrap_tab_widget(tab: QWidget) -> QScrollArea:
+            """Wrap tabs so smaller windows remain usable without clipped controls."""
+            container = QWidget()
+            container_layout = QVBoxLayout(container)
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            container_layout.setSpacing(0)
+            tab.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            container_layout.addWidget(tab, 0, Qt.AlignTop)
+            container_layout.addStretch(1)
 
-        # 3. Semantic Analysis
-        try:
-            self.semantic_tab = SemanticAnalysisTab(asyncio_thread=self.asyncio_thread)
-            self.tabs.addTab(self.semantic_tab, "🧠 Semantic Analysis")
-        except NameError:
-            self.tabs.addTab(QLabel("Semantic Analysis Tab not available"), "🧠 Semantic Analysis")
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.NoFrame)
+            scroll.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+            scroll.setWidget(container)
+            return scroll
 
-        # 4. Entity Extraction
-        try:
-            self.entity_tab = EntityExtractionTab()
-            self.tabs.addTab(self.entity_tab, "🔍 Entities")
-        except NameError:
-            self.tabs.addTab(QLabel("Entity Tab not available"), "🔍 Entities")
+        def _add_optional_tab(
+            attr_name: str,
+            class_name: str,
+            label: str,
+            *,
+            kwargs: dict | None = None,
+            required: bool = False,
+            wrap_in_scroll: bool = True,
+        ) -> None:
+            tab_class = globals().get(class_name)
+            if tab_class is None:
+                msg = f"{class_name} unavailable; tab '{label}' will use placeholder"
+                logger.warning(msg)
+                self.tabs.addTab(QLabel(f"{label} not available"), label)
+                return
+            try:
+                tab = tab_class(**(kwargs or {}))
+                setattr(self, attr_name, tab)
+                self.tabs.addTab(_wrap_tab_widget(tab) if wrap_in_scroll else tab, label)
+            except Exception as exc:
+                logger.exception("Failed to initialize tab '%s': %s", label, exc)
+                if required:
+                    raise
+                self.tabs.addTab(QLabel(f"{label} failed to initialize"), label)
 
-        # 5. Legal Reasoning
-        try:
-            self.reasoning_tab = LegalReasoningTab()
-            self.tabs.addTab(self.reasoning_tab, "⚖️ Legal Reasoning")
-        except NameError:
-            self.tabs.addTab(QLabel("Reasoning Tab not available"), "⚖️ Legal Reasoning")
-
-        # 6. Knowledge Graph
-        try:
-            self.kg_tab = KnowledgeGraphTab(asyncio_thread=self.asyncio_thread)
-            self.tabs.addTab(self.kg_tab, "🕸️ Knowledge Graph")
-        except NameError:
-            self.tabs.addTab(QLabel("KG Tab not available"), "🕸️ Knowledge Graph")
-
-        # 7. Vector Search
-        try:
-            self.vector_tab = VectorSearchTab()
-            self.tabs.addTab(self.vector_tab, "🔎 Vector Search")
-        except NameError:
-            self.tabs.addTab(QLabel("Vector Tab not available"), "🔎 Vector Search")
-            
-        # 8. Pipelines
-        try:
-            self.pipelines_tab = PipelinesTab()
-            self.tabs.addTab(self.pipelines_tab, "🚀 Pipelines")
-        except NameError:
-            pass
-
-        # 9. Expert Prompts
-        try:
-            self.expert_prompts_tab = ExpertPromptsTab()
-            self.tabs.addTab(self.expert_prompts_tab, "🧑‍🏫 Expert Prompts")
-        except NameError:
-            self.tabs.addTab(QLabel("Expert Prompts Tab not available"), "🧑‍🏫 Expert Prompts")
-
-        # 10. Embedding Operations
-        try:
-            self.embedding_ops_tab = EmbeddingOperationsTab(self.asyncio_thread)
-            self.tabs.addTab(self.embedding_ops_tab, "🔩 Embeddings")
-        except NameError:
-            self.tabs.addTab(QLabel("Embedding Tab not available"), "🔩 Embeddings")
-
-        # 11. Classification
-        try:
-            self.classification_tab = ClassificationTab()
-            self.tabs.addTab(self.classification_tab, "🏷️ Classification")
-        except NameError:
-            self.tabs.addTab(QLabel("Classification Tab not available"), "🏷️ Classification")
-
-        # 12. Contradictions
-        try:
-            self.contradictions_tab = ContradictionsTab()
-            self.tabs.addTab(self.contradictions_tab, "⚔️ Contradictions")
-        except NameError:
-            self.tabs.addTab(QLabel("Contradictions Tab not available"), "⚔️ Contradictions")
-
-        # 13. Violations
-        try:
-            self.violations_tab = ViolationsTab()
-            self.tabs.addTab(self.violations_tab, "🚨 Violations")
-        except NameError:
-            self.tabs.addTab(QLabel("Violations Tab not available"), "🚨 Violations")
-
-        # 14. Memory Review
-        try:
-            self.memory_review_tab = MemoryReviewTab()
-            self.tabs.addTab(self.memory_review_tab, "🧠 Memory Review")
-        except NameError:
-            self.tabs.addTab(QLabel("Memory Review Tab not available"), "🧠 Memory Review")
+        _add_optional_tab(
+            "quick_start_tab",
+            "QuickStartTab",
+            "🚦 Quick Start",
+            kwargs={
+                "open_tab": _open_tab_by_label,
+                "run_health_check": lambda: self.check_backend_status(True),
+            },
+            wrap_in_scroll=True,
+        )
+        _add_optional_tab("data_explorer_tab", "DataExplorerTab", "🔍 Data Explorer")
+        _add_optional_tab("org_tab", "OrganizationTab", "📂 Organization")
+        _add_optional_tab("doc_tab", "DocumentProcessingTab", "📄 Processing")
+        _add_optional_tab(
+            "memory_review_tab",
+            "AgentMemoryManagerTab",
+            "🧠 Agent Memory Manager",
+            wrap_in_scroll=False,
+        )
+        _add_optional_tab(
+            "semantic_tab",
+            "SemanticAnalysisTab",
+            "🧠 Semantic Analysis",
+            kwargs={"asyncio_thread": self.asyncio_thread},
+        )
+        _add_optional_tab("entity_tab", "EntityExtractionTab", "🔍 Entities")
+        _add_optional_tab("reasoning_tab", "LegalReasoningTab", "⚖️ Legal Reasoning")
+        _add_optional_tab("vector_tab", "VectorSearchTab", "🔎 Vector Search")
+        _add_optional_tab("pipelines_tab", "PipelinesTab", "🚀 Pipelines")
+        _add_optional_tab("expert_prompts_tab", "ExpertPromptsTab", "🧑‍🏫 Expert Prompts")
+        _add_optional_tab(
+            "embedding_ops_tab",
+            "EmbeddingOperationsTab",
+            "🔩 Embeddings",
+            kwargs={"asyncio_thread": self.asyncio_thread},
+        )
+        _add_optional_tab(
+            "learning_path_tab",
+            "LearningPathTab",
+            "🎯 Learning Paths",
+            kwargs={"asyncio_thread": self.asyncio_thread},
+        )
+        _add_optional_tab("classification_tab", "ClassificationTab", "🏷️ Classification")
+        _add_optional_tab("contradictions_tab", "ContradictionsTab", "⚔️ Contradictions")
+        _add_optional_tab("violations_tab", "ViolationsTab", "🚨 Violations")
+        # Default to first-time guide tab so users land in a known workflow.
+        _open_tab_by_label("🚦 Quick Start")
 
     def check_backend_status(self, user_initiated=False):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -427,11 +556,22 @@ class ProfessionalManager(QMainWindow):
         print("[ProfessionalManager] Backend ready. Notifying tabs...")
         for i in range(self.tabs.count()):
             widget = self.tabs.widget(i)
-            if hasattr(widget, "on_backend_ready"):
+            target = widget
+            if isinstance(widget, QScrollArea):
+                inner = widget.widget()
+                if inner and inner.layout() and inner.layout().count() > 0:
+                    child = inner.layout().itemAt(0).widget()
+                    if child:
+                        target = child
+            if hasattr(target, "on_backend_ready"):
                 try:
-                    widget.on_backend_ready()
+                    target.on_backend_ready()
                 except Exception as e:
-                    print(f"Error notifying tab {i}: {e}")
+                    logger.exception("Error notifying tab %s on backend ready: %s", i, e)
+
+    def toggle_diagnostics_dock(self):
+        """Show/hide diagnostics without affecting tab layout geometry."""
+        self.diagnostics_dock.setVisible(not self.diagnostics_dock.isVisible())
 
     def closeEvent(self, event):
         self._stop_asyncio_thread()
@@ -444,14 +584,80 @@ class ProfessionalManager(QMainWindow):
                 if not self.asyncio_thread.wait(2000):
                     self.asyncio_thread.terminate()
                     self.asyncio_thread.wait(1000)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.exception("Failed to stop asyncio thread cleanly: %s", exc)
 
     def __del__(self):
         self._stop_asyncio_thread()
 
-if __name__ == "__main__":
+
+def _handle_fatal_error(e: Exception) -> None:
+    """Display fatal startup error information."""
+    try:
+        print(f"Fatal GUI startup error: {e}", file=sys.stderr)
+        traceback.print_exc()
+    except Exception as exc:
+        logger.error("Failed to print fatal startup traceback: %s", exc)
+    try:
+        QMessageBox.critical(None, "GUI startup failed", str(e))
+    except Exception as exc:
+        logger.error("Failed to show fatal startup dialog: %s", exc)
+
+
+def main():
     app = QApplication(sys.argv)
-    window = ProfessionalManager()
-    window.show()
-    sys.exit(app.exec())
+    app.setApplicationName("Smart Document Organizer")
+    app.setApplicationVersion("2.0.0")
+
+    asyncio_thread = AsyncioThread()
+    asyncio_thread.start()
+
+    app.aboutToQuit.connect(asyncio_thread.stop)
+
+    wsl_thread = None
+    if os.getenv("GUI_SKIP_WSL_BACKEND_START", "0").lower() not in {"1", "true", "yes"}:
+        wsl_thread = WslBackendThread()
+    
+    try:
+        window = ProfessionalManager()
+        
+        if wsl_thread:
+            # Log WSL progress to the diagnostic stream
+            wsl_thread.status_update.connect(
+                lambda msg: window._update_status_ui("wsl_startup", "orange", msg)
+            )
+            wsl_thread.failed.connect(
+                lambda msg: window._update_status_ui("wsl_failed", "red", msg)
+            )
+            # When healthy, notify all tabs and refresh status
+            wsl_thread.healthy.connect(window.on_backend_ready)
+            wsl_thread.healthy.connect(lambda: window.check_backend_status(True))
+            wsl_thread.start()
+        else:
+            # If not using WSL thread, trigger ready checks manually
+            QTimer.singleShot(100, lambda: window.check_backend_status(True))
+
+        window.show()
+        rc = app.exec()
+
+    except Exception as e:
+        logger.exception("Fatal GUI startup error")
+        _handle_fatal_error(e)
+        rc = 1
+    finally:
+        # Clean up WSL thread (does NOT stop the backend)
+        if wsl_thread and wsl_thread.isRunning():
+            wsl_thread.requestInterruption()
+            wsl_thread.wait(2000)
+        
+        # Stop asyncio loop
+        if asyncio_thread.isRunning():
+            asyncio_thread.stop()
+            if not asyncio_thread.wait(2000):
+                asyncio_thread.terminate()
+
+    sys.exit(rc)
+
+
+if __name__ == "__main__":
+    main()

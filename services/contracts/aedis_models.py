@@ -130,3 +130,34 @@ class OntologyRecord(BaseModel):
     status: str = Field(..., min_length=1, max_length=40)
     description: str | None = Field(default=None, max_length=500)
     created_at: datetime
+
+
+class LearningStep(BaseModel):
+    """A single instructional step linked to traceable evidence and heuristics."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    step_id: str = Field(..., min_length=1, max_length=200)
+    title: str = Field(..., min_length=1, max_length=300)
+    instruction: str = Field(..., min_length=1, max_length=4000)
+    objective_id: str = Field(..., min_length=1, max_length=200)
+    heuristic_ids: list[str] = Field(default_factory=list)
+    evidence_spans: list[EvidenceSpan] = Field(default_factory=list, min_length=1)
+    difficulty: int = Field(default=1, ge=1, le=5)
+    completed: bool = Field(default=False)
+
+
+class LearningPath(BaseModel):
+    """Trace-backed learning path for a specific user and objective."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path_id: str = Field(..., min_length=1, max_length=200)
+    user_id: str = Field(..., min_length=1, max_length=200)
+    objective_id: str = Field(..., min_length=1, max_length=200)
+    status: str = Field(default="active", min_length=1, max_length=40)
+    steps: list[LearningStep] = Field(default_factory=list)
+    ontology_version: int = Field(default=1, ge=1)
+    heuristic_snapshot: list[str] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime

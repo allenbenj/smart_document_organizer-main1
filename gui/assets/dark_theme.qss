@@ -1,0 +1,99 @@
+QMainWindow {
+    background-color: #1e1e1e;
+    color: #ffffff;
+}
+QWidget {
+    background-color: #1e1e1e;
+    color: #ffffff;
+}
+QGroupBox {
+    border: 1px solid #3e3e3e;
+    border-radius: 5px;
+    margin-top: 10px;
+    font-weight: bold;
+    color: #4dabf7;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 0 3px;
+}
+QTableWidget {
+    background-color: #252526;
+    gridline-color: #3e3e3e;
+    border: 1px solid #3e3e3e;
+    color: #e0e0e0;
+    selection-background-color: #264f78;
+}
+QHeaderView::section {
+    background-color: #333333;
+    color: #ffffff;
+    padding: 4px;
+    border: 1px solid #3e3e3e;
+}
+QTableWidget::item:selected {
+    background-color: #264f78;
+}
+QLineEdit, QTextEdit, QPlainTextEdit {
+    background-color: #252526;
+    border: 1px solid #3e3e3e;
+    color: #e0e0e0;
+    padding: 4px;
+    font-family: Consolas, monospace;
+}
+QPushButton {
+    background-color: #0e639c;
+    color: white;
+    border: none;
+    padding: 6px 12px;
+    border-radius: 3px;
+    font-weight: bold;
+}
+QPushButton:hover {
+    background-color: #1177bb;
+}
+QPushButton:pressed {
+    background-color: #094771;
+}
+QPushButton:disabled {
+    background-color: #333333;
+    color: #888888;
+}
+QComboBox {
+    background-color: #252526;
+    border: 1px solid #3e3e3e;
+    color: #e0e0e0;
+    padding: 4px;
+}
+QComboBox::drop-down {
+    border: none;
+}
+QStatusBar {
+    background-color: #007acc;
+    color: white;
+}
+QTabWidget::pane {
+    border: 1px solid #3e3e3e;
+}
+QTabBar::tab {
+    background: #2d2d2d;
+    color: #cccccc;
+    padding: 8px 12px;
+    border: 1px solid #3e3e3e;
+    border-bottom: none;
+    border-top-left-radius: 4px;
+    border-top-right-radius: 4px;
+}
+QTabBar::tab:selected {
+    background: #1e1e1e;
+    color: #ffffff;
+    border-bottom: 1px solid #1e1e1e; 
+}
+QTabBar::tab:hover {
+    background: #3e3e3e;
+}
+QLabel#Heading {
+    font-size: 16px;
+    font-weight: bold;
+    color: #4dabf7;
+}

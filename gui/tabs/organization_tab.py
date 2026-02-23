@@ -14,20 +14,13 @@ Key Features:
 """
 
 import os
-import re
 import json
+import logging # Added for consistent logging
 from pathlib import Path
-from typing import Optional
-from urllib.parse import quote_plus
-
-
-
-from ..services import api_client
-from ..services.audit_store import OrganizationAuditStore
+from typing import Optional, Any
 
 try:
     from PySide6.QtWidgets import (
-        QWidget,
         QVBoxLayout,
         QHBoxLayout,
         QLabel,
@@ -50,16 +43,23 @@ try:
 except ImportError:
     PYSIDE6_AVAILABLE = False
 
-from .status_presenter import TabStatusPresenter
 from .default_paths import get_default_dialog_dir
 if PYSIDE6_AVAILABLE:
     from ..ui import JobStatusWidget
+from ..services.audit_store import OrganizationAuditStore
 from ..services.organization_service import organization_service, OrgJobType, OrgJobStatus
 from .org_workers import LoadProposalsWorker, GenerateProposalsWorker, BulkActionWorker, ApplyProposalsWorker, ClearProposalsWorker
-from .org_utils import normalize_root_scope, get_scope_prefixes, get_existing_runtime_roots
+from .org_utils import normalize_root_scope
+from gui.core.base_tab import BaseTab
+
+import requests # Required for requests.exceptions
+import requests.exceptions # Explicitly import requests.exceptions
+from ..services import api_client
+
+logger = logging.getLogger(__name__) # Initialized logger
 
 
-class OrganizationTab(QWidget):  # type: ignore[misc]
+class OrganizationTab(BaseTab):
     """
     Tab for ontology-based document organization workflow.
     
@@ -71,16 +71,19 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
     5. Store organized metadata for consumption by other tabs
     """
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Organization", asyncio_thread, parent)
         self.all_proposals_cache = []
         self.proposals_cache = []
         self._folder_cache = {}
+        self._folder_scan_truncated = False
         self.audit_store = OrganizationAuditStore()
         self.selected_proposal = None
         self.backend_ready = False
         self._last_generate_summary = None
-        self.worker = None
+        self._current_offset = 0
+        self._page_size = 500
+        self._last_total = 0
         self.setup_ui()
         self.connect_signals()
         
@@ -100,6 +103,12 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 # results handling is usually in worker signals, 
                 # but we can also use service state here
                 pass
+
+    def _handle_worker_error(self, error_msg: str):
+        """Common error handler for worker failures."""
+        self.status.error(f"Operation failed: {error_msg}")
+        QMessageBox.critical(self, "Error", f"An operation failed:\n{error_msg}")
+        self.worker = None # Clear worker reference on error
 
     @staticmethod
     def _proposal_snapshot(proposal: Optional[dict]) -> dict:
@@ -155,15 +164,19 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
         try:
             self.audit_store.log_event(event_type, safe_payload)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.exception(f"Error logging audit event '{event_type}': {e}")
 
     def _find_proposal_by_id(self, proposal_id: Optional[int]) -> Optional[dict]:
         if proposal_id is None:
             return None
         try:
             pid = int(proposal_id)
-        except Exception:
+        except ValueError:
+            logger.warning(f"Invalid proposal_id '{proposal_id}' provided to _find_proposal_by_id.")
+            return None
+        except Exception as e:
+            logger.exception(f"An unexpected error occurred in _find_proposal_by_id with proposal_id '{proposal_id}': {e}")
             return None
         for item in self.proposals_cache:
             if int(item.get("id") or -1) == pid:
@@ -182,18 +195,20 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             return None
         try:
             pid = int(id_item.text())
-        except Exception:
+        except ValueError:
+            logger.warning(f"Invalid proposal ID in table row {row}: '{id_item.text()}'")
+            return None
+        except Exception as e:
+            logger.exception(f"An unexpected error occurred in _proposal_for_table_row for row {row}: {e}")
             return None
         return self._find_proposal_by_id(pid)
 
     def setup_ui(self):
         """Setup the user interface."""
-        layout = QVBoxLayout(self)
-
         # Title
         title = QLabel("Document Organization")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
 
         # Description
         desc = QLabel(
@@ -202,7 +217,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #666; padding: 5px 0;")
-        layout.addWidget(desc)
+        self.main_layout.addWidget(desc)
 
 # LLM Provider Control Group
         llm_group = QGroupBox("🤖 AI Provider (Ontology-Aware)")
@@ -236,7 +251,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.stats_btn.setToolTip("View organization statistics")
         llm_layout.addWidget(self.stats_btn)
 
-        layout.addWidget(llm_group)
+        self.main_layout.addWidget(llm_group)
 
         # Folder scope group
         scope_group = QGroupBox("Folder Scope")
@@ -245,7 +260,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         scope_row = QHBoxLayout()
         scope_row.addWidget(QLabel("Root Folder:"))
         self.org_root_input = QLineEdit()
-        self.org_root_input.setPlaceholderText(r"E:\Organization_Folder or /mnt/e/...")
+        self.org_root_input.setPlaceholderText("Select project or corpus root folder...")
         default_folder = get_default_dialog_dir()
         if default_folder:
             self.org_root_input.setText(default_folder)
@@ -258,7 +273,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
         # Action buttons
         action_btn_row = QHBoxLayout()
-        self.org_load_button = QPushButton("📋 Review Proposals")
+        self.org_load_button = QPushButton("📋 Load Proposals")
         self.org_load_button.setStyleSheet("""
             QPushButton {
                 background-color: #2196F3;
@@ -272,7 +287,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             }
         """)
         
-        self.org_generate_button = QPushButton("⚡ Generate Scoped")
+        self.org_generate_button = QPushButton("⚡ Generate Proposals (Scoped)")
         self.org_generate_button.setStyleSheet("""
             QPushButton {
                 background-color: #FF9800;
@@ -286,7 +301,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             }
         """)
         
-        self.org_clear_button = QPushButton("🗑️ Clear Scoped")
+        self.org_clear_button = QPushButton("🗑️ Clear Scoped Proposals")
         self.org_clear_button.setStyleSheet("""
             QPushButton {
                 background-color: #757575;
@@ -298,7 +313,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 background-color: #616161;
             }
         """)
-        self.org_apply_button = QPushButton("🚚 Apply Approved")
+        self.org_apply_button = QPushButton("🚚 Apply Approved Moves")
         self.org_apply_button.setStyleSheet("""
             QPushButton {
                 background-color: #2E7D32;
@@ -319,7 +334,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         action_btn_row.addStretch()
         scope_layout.addLayout(action_btn_row)
         
-        layout.addWidget(scope_group)
+        self.main_layout.addWidget(scope_group)
 
         # Proposals table group
         proposals_group = QGroupBox("📋 Organization Proposals (Ontology-Based)")
@@ -337,17 +352,17 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
         table_toolbar.addStretch()
 
-        self.bulk_approve_btn = QPushButton("✓ Bulk Approve")
+        self.bulk_approve_btn = QPushButton("✓ Approve Selected")
         self.bulk_approve_btn.setStyleSheet("background:#4CAF50; color:white; padding:4px 10px; border-radius:3px;")
         self.bulk_approve_btn.setEnabled(False)
         table_toolbar.addWidget(self.bulk_approve_btn)
 
-        self.bulk_reject_btn = QPushButton("✗ Bulk Reject")
+        self.bulk_reject_btn = QPushButton("✗ Reject Selected")
         self.bulk_reject_btn.setStyleSheet("background:#f44336; color:white; padding:4px 10px; border-radius:3px;")
         self.bulk_reject_btn.setEnabled(False)
         table_toolbar.addWidget(self.bulk_reject_btn)
 
-        self.export_proposals_btn = QPushButton("💾 Export")
+        self.export_proposals_btn = QPushButton("💾 Export Proposals")
         table_toolbar.addWidget(self.export_proposals_btn)
 
         proposals_layout.addLayout(table_toolbar)
@@ -367,13 +382,28 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Filter by path, folder, filename, rationale...")
         search_toolbar.addWidget(self.search_input)
-        self.search_apply_btn = QPushButton("Filter")
+        self.search_apply_btn = QPushButton("Apply Filter")
         search_toolbar.addWidget(self.search_apply_btn)
         self.search_clear_btn = QPushButton("Clear")
         search_toolbar.addWidget(self.search_clear_btn)
         self.select_filtered_btn = QPushButton("Select Filtered")
         self.select_filtered_btn.setMaximumWidth(140)
         search_toolbar.addWidget(self.select_filtered_btn)
+        search_toolbar.addWidget(QLabel("Page Size:"))
+        self.page_size_combo = QComboBox()
+        self.page_size_combo.addItems(["200", "500", "1000", "2000"])
+        self.page_size_combo.setCurrentText("500")
+        self.page_size_combo.setMaximumWidth(90)
+        search_toolbar.addWidget(self.page_size_combo)
+        self.prev_page_btn = QPushButton("◀ Prev")
+        self.prev_page_btn.setMaximumWidth(90)
+        search_toolbar.addWidget(self.prev_page_btn)
+        self.next_page_btn = QPushButton("Next ▶")
+        self.next_page_btn.setMaximumWidth(90)
+        search_toolbar.addWidget(self.next_page_btn)
+        self.page_info_label = QLabel("Page 1")
+        self.page_info_label.setStyleSheet("color: #666;")
+        search_toolbar.addWidget(self.page_info_label)
         proposals_layout.addLayout(search_toolbar)
 
         self.org_table = QTableWidget(0, 6)
@@ -390,7 +420,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         header.setStretchLastSection(True)
         
         proposals_layout.addWidget(self.org_table)
-        layout.addWidget(proposals_group)
+        self.main_layout.addWidget(proposals_group)
 
         # Refinement group
         refine_group = QGroupBox("Refine Selected Proposal")
@@ -475,18 +505,19 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         proposal_action_row.addStretch()
         refine_layout.addLayout(proposal_action_row)
         
-        layout.addWidget(refine_group)
+        self.main_layout.addWidget(refine_group)
 
         # Status and results
-        self.status_label = QLabel("Ready - Select a folder to begin")
+        self.status_label = QLabel("Ready - Select a folder to begin") # The QLabel for status is still needed for BaseTab to set text/style
         self.status_label.setStyleSheet("padding: 5px; background-color: #f5f5f5; border-radius: 3px;")
-        layout.addWidget(self.status_label)
+        self.main_layout.addWidget(self.status_label)
         
-        self.status = TabStatusPresenter(self, self.status_label, source="Organization")
+        # self.status is now handled by BaseTab
+        self._update_pagination_controls()
         
         if PYSIDE6_AVAILABLE:
             self.job_status = JobStatusWidget("Organization Job")
-            layout.addWidget(self.job_status)
+            self.main_layout.addWidget(self.job_status)
 
         # Results browser
         results_group = QGroupBox("API Response")
@@ -494,9 +525,9 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.results_browser = QTextBrowser()
         self.results_browser.setMaximumHeight(150)
         results_layout.addWidget(self.results_browser)
-        layout.addWidget(results_group)
+        self.main_layout.addWidget(results_group)
 
-        layout.addStretch()
+        self.main_layout.addStretch()
 
     def connect_signals(self):
         """Connect UI signals to handlers."""
@@ -522,6 +553,9 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         self.select_filtered_btn.clicked.connect(self.select_filtered_proposals)
         self.search_input.returnPressed.connect(self.apply_search_filter)
         self.proposal_status_filter.currentIndexChanged.connect(self.org_load_proposals)
+        self.page_size_combo.currentIndexChanged.connect(self._on_page_size_changed)
+        self.prev_page_btn.clicked.connect(self.load_previous_page)
+        self.next_page_btn.clicked.connect(self.load_next_page)
         self.org_table.itemSelectionChanged.connect(self.org_on_selection_changed)
         self.org_table.itemChanged.connect(self.handle_table_cell_changed)
         
@@ -558,33 +592,55 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
     def org_load_proposals(self):
         """Load organization proposals from API for the scoped folder (non-blocking)."""
+        self._current_offset = 0
+        self._load_proposals_page(silent=False)
+
+    def _load_proposals_page(self, silent: bool = False):
+        """Load one page of proposals from API for the scoped folder."""
         if self.worker and self.worker.isRunning():
             self.status.info("Another task is in progress")
             return
 
         try:
-            self.status.info("Requesting proposals...")
+            if not silent:
+                self.status.info("Requesting proposals...")
             root = normalize_root_scope(self.org_root_input.text())
             status_filter = self._selected_status()
+            self._page_size = int(self.page_size_combo.currentText() or "500")
 
-            job_id = organization_service.create_job(OrgJobType.LOAD, {"root": root, "status": status_filter})
-            self.worker = LoadProposalsWorker(job_id, root_prefix=root, status=status_filter)
-            organization_service.register_worker(job_id, self.worker)
+            job_id = organization_service.create_job(
+                OrgJobType.LOAD,
+                {
+                    "root": root,
+                    "status": status_filter,
+                    "limit": self._page_size,
+                    "offset": self._current_offset,
+                },
+            )
+            worker_instance = LoadProposalsWorker(
+                job_id,
+                root_prefix=root,
+                status=status_filter,
+                limit=self._page_size,
+                offset=self._current_offset,
+            )
+            organization_service.register_worker(job_id, worker_instance)
             
-            def _on_finished(items):
+            def _on_finished(payload):
+                items = list((payload or {}).get("items", []))
                 self.all_proposals_cache = list(items)
+                self._last_total = int((payload or {}).get("total", len(items)) or 0)
                 self.apply_search_filter(silent=True)
-                self.status.success(f"Loaded {len(items)} proposals")
-                self.worker = None
+                self._update_pagination_controls()
+                if not silent:
+                    self.status.success(
+                        f"Loaded {len(items)} proposals "
+                        f"(offset={self._current_offset}, total={self._last_total})"
+                    )
 
-            def _on_error(err):
-                self.status.error(f"Failed to load proposals: {err}")
-                self.results_browser.setPlainText(f"Error: {err}")
-                self.worker = None
-
-            self.worker.finished_ok.connect(_on_finished)
-            self.worker.finished_err.connect(_on_error)
-            self.worker.start()
+            worker_instance.finished_ok.connect(_on_finished)
+            worker_instance.finished_err.connect(self._handle_worker_error) # Connect error signal
+            self.start_worker(worker_instance)
             
         except Exception as e:
             self.status.error(f"Failed to initiate load: {e}")
@@ -594,7 +650,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         # #region agent log
         _before_id = None
         try:
-            import json as _j, time
+            import json as _j
+            import time
             from pathlib import Path as _P
             _log = _P(__file__).resolve().parent.parent.parent / "debug-4d484f.log"
             _before_id = self._selected_proposal_id()
@@ -682,7 +739,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         if root:
             self._folder_cache.pop(root, None)
         self._refresh_folder_suggestions(self.proposals_cache or self.all_proposals_cache)
-        self.status.info(f"Folder suggestions: {self.org_folder_input.count()} options")
+        suffix = " (bounded scan)" if self._folder_scan_truncated else ""
+        self.status.info(f"Folder suggestions: {self.org_folder_input.count()} options{suffix}")
 
     @staticmethod
     def _candidate_roots_for_folder_scan(root_txt: str) -> list[Path]:
@@ -698,7 +756,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 roots.append(broad)
         return roots
 
-    def _folders_from_root(self, max_items: int = 500) -> list[str]:
+    def _folders_from_root(self, max_items: int = 500, max_dirs_scan: int = 4000) -> list[str]:
         """Collect existing folders under selected root as suggestion options."""
         root_txt = (self.org_root_input.text() or "").strip()
         if not root_txt:
@@ -709,19 +767,42 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
         out: list[str] = []
         seen = set()
+        self._folder_scan_truncated = False
         roots = [r for r in self._candidate_roots_for_folder_scan(root_txt) if r.exists() and r.is_dir()]
         try:
             for base in roots:
-                for dirpath, dirnames, _ in os.walk(str(base)):
-                    rel = Path(dirpath).relative_to(base).as_posix()
+                stack = [base]
+                scanned = 0
+                while stack:
+                    if scanned >= max_dirs_scan:
+                        self._folder_scan_truncated = True
+                        self._folder_cache[key] = list(out)
+                        return out[:max_items]
+                    current = stack.pop()
+                    scanned += 1
+                    rel = current.relative_to(base).as_posix()
                     if rel and rel not in seen:
                         seen.add(rel)
                         out.append(rel)
                         if len(out) >= max_items:
                             self._folder_cache[key] = list(out)
-                            return out
-                    dirnames.sort()
-        except Exception:
+                            return out[:max_items]
+                    try:
+                        children = []
+                        with os.scandir(current) as it:
+                            for entry in it:
+                                if entry.is_dir(follow_symlinks=False):
+                                    children.append(Path(entry.path))
+                        children.sort(key=lambda p: p.name.lower(), reverse=True)
+                        stack.extend(children)
+                    except (OSError, IOError) as e:
+                        logger.warning(f"File system error scanning directory '{current}': {e}")
+                        continue
+                    except Exception as e:
+                        logger.exception(f"Unexpected error during directory scan '{current}': {e}")
+                        continue
+        except Exception as e:
+            logger.exception(f"An unexpected error occurred while collecting folders from root '{root_txt}': {e}")
             pass
         self._folder_cache[key] = list(out)
         return out[:max_items]
@@ -765,7 +846,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             )
         self.results_browser.setPlainText(
             f"✓ Loaded {len(self.all_proposals_cache)} proposals | Showing {len(items)} "
-            f"(status={self._selected_status() or 'all'}){details}"
+            f"(status={self._selected_status() or 'all'}, offset={self._current_offset}, "
+            f"limit={self._page_size}, total={self._last_total}){details}"
         )
         if not silent:
             self.status.success(f"Showing {len(items)} of {len(self.all_proposals_cache)} proposals")
@@ -824,26 +906,48 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
     def org_load_proposals_silent(self):
         """Silently load proposals on startup without UI feedback (non-blocking)."""
-        if self.worker and self.worker.isRunning():
-            return
+        self._current_offset = 0
+        self._load_proposals_page(silent=True)
 
+    def _on_page_size_changed(self):
+        """Reset paging when user changes page size."""
         try:
-            root = normalize_root_scope(self.org_root_input.text())
-            job_id = organization_service.create_job(OrgJobType.LOAD, {"root": root, "silent": True})
-            self.worker = LoadProposalsWorker(job_id, root_prefix=root)
-            organization_service.register_worker(job_id, self.worker)
-            
-            def _on_finished(items):
-                if items:
-                    self.all_proposals_cache = list(items)
-                    self.apply_search_filter(silent=True)
-                    print(f"[OrganizationTab] Auto-loaded {len(items)} proposals")
-                self.worker = None
+            self._page_size = int(self.page_size_combo.currentText() or "500")
+        except Exception:
+            self._page_size = 500
+        self._current_offset = 0
+        self._load_proposals_page(silent=False)
 
-            self.worker.finished_ok.connect(_on_finished)
-            self.worker.start()
-        except Exception as e:
-            print(f"[OrganizationTab] Silent load failed: {e}")
+    def load_previous_page(self):
+        """Load previous proposals page."""
+        if self._current_offset <= 0:
+            return
+        self._current_offset = max(0, self._current_offset - self._page_size)
+        self._load_proposals_page(silent=False)
+
+    def load_next_page(self):
+        """Load next proposals page."""
+        next_offset = self._current_offset + self._page_size
+        if self._last_total and next_offset >= self._last_total:
+            return
+        self._current_offset = next_offset
+        self._load_proposals_page(silent=False)
+
+    def _update_pagination_controls(self):
+        """Update pagination label and button state."""
+        if self._page_size <= 0:
+            self._page_size = 500
+        current_page = (self._current_offset // self._page_size) + 1
+        if self._last_total > 0:
+            total_pages = max(1, (self._last_total + self._page_size - 1) // self._page_size)
+            self.page_info_label.setText(f"Page {current_page}/{total_pages} ({self._last_total} total)")
+        else:
+            self.page_info_label.setText(f"Page {current_page}")
+        self.prev_page_btn.setEnabled(self._current_offset > 0 and not (self.worker and self.worker.isRunning()))
+        self.next_page_btn.setEnabled(
+            not (self.worker and self.worker.isRunning())
+            and (self._last_total == 0 or (self._current_offset + self._page_size) < self._last_total)
+        )
 
     def org_generate_scoped(self):
         """Generate new organization proposals for the scoped folder (non-blocking)."""
@@ -856,8 +960,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             self.status.info("Initializing generation job...")
             
             job_id = organization_service.create_job(OrgJobType.GENERATE, {"root": root})
-            self.worker = GenerateProposalsWorker(job_id, root)
-            organization_service.register_worker(job_id, self.worker)
+            worker_instance = GenerateProposalsWorker(job_id, root)
+            organization_service.register_worker(job_id, worker_instance)
             
             def _on_finished(out):
                 self._last_generate_summary = out if isinstance(out, dict) else None
@@ -867,18 +971,16 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                     self.status.success(f"Generation complete: created {created} proposals")
                 else:
                     self.status.warning("Generation complete: no new proposals created")
-                self.worker = None
                 self.org_load_proposals() # Reload to show new items
+            
+            def _on_error(error_msg):
+                self.status.error(f"Generation failed: {error_msg}")
+                QMessageBox.critical(self, "Generation Error", f"Failed to generate proposals:\n{error_msg}")
 
-            def _on_error(err):
-                self.status.error(f"Generation failed: {err}")
-                self.results_browser.setPlainText(f"Error: {err}")
-                self.worker = None
-
-            self.worker.finished_ok.connect(_on_finished)
-            self.worker.finished_err.connect(_on_error)
-            self.worker.progress_update.connect(lambda msg: self.status.info(msg))
-            self.worker.start()
+            worker_instance.finished_ok.connect(_on_finished)
+            worker_instance.finished_err.connect(_on_error)
+            worker_instance.progress_update.connect(lambda msg: self.status.info(msg))
+            self.start_worker(worker_instance)
             
         except Exception as e:
             self.status.error(f"Failed to initiate generation: {e}")
@@ -894,23 +996,18 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             root = normalize_root_scope(self.org_root_input.text())
             
             job_id = organization_service.create_job(OrgJobType.CLEAR, {"root": root})
-            self.worker = ClearProposalsWorker(job_id, root)
-            organization_service.register_worker(job_id, self.worker)
+            worker_instance = ClearProposalsWorker(job_id, root)
+            organization_service.register_worker(job_id, worker_instance)
             
             def _on_finished(out):
                 self.results_browser.setPlainText(str(out))
                 self.status.success("Cleared scoped proposals")
                 self._audit("clear_scoped", {"root": root, "cleared": int(out.get("cleared", 0))})
-                self.worker = None
-                self.org_load_proposals()
-
-            def _on_error(err):
-                self.status.error(f"Failed to clear: {err}")
-                self.worker = None
-
-            self.worker.finished_ok.connect(_on_finished)
-            self.worker.finished_err.connect(_on_error)
-            self.worker.start()
+                self.org_load_proposals() # Reload to show new items
+            
+            worker_instance.finished_ok.connect(_on_finished)
+            worker_instance.finished_err.connect(self._handle_worker_error) # Connect error signal
+            self.start_worker(worker_instance)
             
         except Exception as e:
             self.status.error(f"Failed to initiate clear: {e}")
@@ -936,8 +1033,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             self.status.info("Applying approved proposals (moving files)...")
             
             job_id = organization_service.create_job(OrgJobType.APPLY, {"root": root})
-            self.worker = ApplyProposalsWorker(job_id, root)
-            organization_service.register_worker(job_id, self.worker)
+            worker_instance = ApplyProposalsWorker(job_id, root)
+            organization_service.register_worker(job_id, worker_instance)
             
             def _on_finished(out):
                 applied = int(out.get("applied", 0))
@@ -968,7 +1065,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 })
                 
                 for item in out.get("results", []) or []:
-                    if not isinstance(item, dict): continue
+                    if not isinstance(item, dict):
+                        continue
                     self._audit("apply_result", {
                         "action": "move",
                         "proposal_id": item.get("proposal_id"),
@@ -979,27 +1077,21 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                         "error": item.get("error"),
                         "proposal": self._proposal_snapshot(self._find_proposal_by_id(item.get("proposal_id"))),
                     })
-                
-                self.worker = None
                 self.org_load_proposals()
 
-            def _on_error(err):
-                self.status.error(f"Apply failed: {err}")
-                self.worker = None
-
-            self.worker.finished_ok.connect(_on_finished)
-            self.worker.finished_err.connect(_on_error)
-            self.worker.start()
-            
+            worker_instance.finished_ok.connect(_on_finished)
+            worker_instance.finished_err.connect(self._handle_worker_error) # Connect error signal
+            self.start_worker(worker_instance)            
         except Exception as e:
-            self.status.error(f"Failed to initiate apply: {e}")
+            self._handle_worker_error(f"Failed to initiate apply: {e}")
 
     def org_on_selection_changed(self):
         """Handle proposal selection in table - populate refinement inputs."""
         row = self.org_table.currentRow()
         # #region agent log
         try:
-            import json as _j, time
+            import json as _j
+            import time
             from pathlib import Path as _P
             _log = _P(__file__).resolve().parent.parent.parent / "debug-4d484f.log"
             _resolved = self._proposal_for_table_row(row)
@@ -1084,7 +1176,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                     )
                     QTimer.singleShot(0, lambda: _handle_approve_sync(True, res))
                 except Exception as e:
-                    QTimer.singleShot(0, lambda: _handle_approve_sync(False, str(e)))
+                    err = str(e)
+                    QTimer.singleShot(0, lambda err=err: _handle_approve_sync(False, err))
 
             def _handle_approve_sync(success, res):
                 if success:
@@ -1100,13 +1193,13 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                         },
                     )
                 else:
-                    self.status.error(f"Approve failed: {res}")
+                    self._handle_worker_error(f"Approve failed: {res}")
                 self.org_note_input.clear()
                 self.org_load_proposals()
 
             threading.Thread(target=_thread_target, daemon=True).start()
         except Exception as e:
-            self.status.error(f"Failed to start approve: {e}")
+            self._handle_worker_error(f"Failed to start approve: {e}")
 
     def org_reject_selected(self):
         """Reject the currently selected proposal (non-blocking)."""
@@ -1123,8 +1216,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             note = self.org_note_input.toPlainText() or None
             self.status.info(f"Rejecting proposal #{pid}...")
             job_id = organization_service.create_job(OrgJobType.BULK_REJECT, {"pid": pid})
-            self.worker = BulkActionWorker(job_id, [pid], "reject", note=note)
-            organization_service.register_worker(job_id, self.worker)
+            worker_instance = BulkActionWorker(job_id, [pid], "reject", note=note)
+            organization_service.register_worker(job_id, worker_instance)
             
             def _on_finished(results):
                 if results['success'] > 0:
@@ -1133,13 +1226,12 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 else:
                     self.status.error(f"Reject failed: {results['errors'][0] if results['errors'] else 'Unknown'}")
                 self.org_note_input.clear()
-                self.worker = None
                 self.org_load_proposals()
 
-            self.worker.finished_ok.connect(_on_finished)
-            self.worker.start()
+            worker_instance.finished_ok.connect(_on_finished)
+            self.start_worker(worker_instance)
         except Exception as e:
-            self.status.error(f"Failed to start reject: {e}")
+            self._handle_worker_error(f"Failed to start reject: {e}")
 
     def org_edit_approve_selected(self):
         """Refine and approve the currently selected proposal (non-blocking)."""
@@ -1188,20 +1280,21 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                     res = api_client.post(f"/organization/proposals/{pid}/edit", json=payload, timeout=60.0)
                     QTimer.singleShot(0, lambda: _handle_edit_sync(True, res))
                 except Exception as e:
-                    QTimer.singleShot(0, lambda: _handle_edit_sync(False, str(e)))
+                    err = str(e)
+                    QTimer.singleShot(0, lambda err=err: _handle_edit_sync(False, err))
 
             def _handle_edit_sync(success, res):
                 if success:
                     self.status.success(f"Proposal #{pid} refined and approved")
                 else:
-                    self.status.error(f"Refine failed: {res}")
+                    self._handle_worker_error(f"Refine failed: {res}")
                 self.org_note_input.clear()
                 self.org_load_proposals()
 
             threading.Thread(target=_thread_target, daemon=True).start()
             
         except Exception as e:
-            self.status.error(f"Failed to initiate refine: {e}")
+            self._handle_worker_error(f"Failed to initiate refine: {e}")
 
     # -------------------------------------------------------------------------
     # LLM Provider Management
@@ -1209,7 +1302,7 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
     def on_backend_ready(self):
         """Called when backend is ready - load initial data."""
-        print("[OrganizationTab] on_backend_ready signal received. Starting init...")
+        logger.info("[OrganizationTab] on_backend_ready signal received. Starting init...")
         self.backend_ready = True
         self.llm_status_label.setText("Current: Loading...")
         self.llm_status_label.setStyleSheet("color: #666;")
@@ -1217,11 +1310,10 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         
         # Auto-load proposals if any exist (non-blocking)
         try:
-            print("[OrganizationTab] Scheduling silent load of proposals...")
+            logger.info("[OrganizationTab] Scheduling silent load of proposals...")
             QTimer.singleShot(150, self.org_load_proposals_silent)
         except Exception as e:
-            print(f"[OrganizationTab] Auto-load proposals failed: {e}")
-
+            logger.exception(f"[OrganizationTab] Auto-load proposals failed: {e}")
     def load_current_llm_provider(self):
         """Load and display the current LLM provider."""
         if not self.backend_ready:
@@ -1230,9 +1322,9 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             return
             
         try:
-            print("[OrganizationTab] GET /organization/llm ...")
+            logger.info("[OrganizationTab] GET /organization/llm ...")
             data = api_client.get("/organization/llm", timeout=10.0)
-            print(f"[OrganizationTab] Received: {data}")
+            logger.info(f"[OrganizationTab] Received: {data}")
             
             # API returns nested structure: {"active": {...}, "configured": {...}}
             active = data.get("active", {})
@@ -1263,22 +1355,31 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             
             self.status.info(f"LLM Provider: {current_provider}")
             
+        except requests.exceptions.RequestException as e:
+            self.llm_status_label.setText("Current: API Error")
+            self.llm_status_label.setStyleSheet("color: red;")
+            logger.error(f"[OrganizationTab] Failed to load LLM provider - API connection error: {e}")
+            self._handle_worker_error(f"Failed to load LLM provider (API connection error):\n{e}")
+        except json.JSONDecodeError as e:
+            self.llm_status_label.setText("Current: Invalid Response")
+            self.llm_status_label.setStyleSheet("color: red;")
+            logger.error(f"[OrganizationTab] Failed to load LLM provider - Invalid API response: {e}")
+            self._handle_worker_error(f"Failed to load LLM provider (Invalid API response):\n{e}")
         except Exception as e:
             self.llm_status_label.setText("Current: Error loading")
             self.llm_status_label.setStyleSheet("color: red;")
-            print(f"[OrganizationTab] Failed to load LLM provider ERROR: {e}")
-            self.status.error(f"Failed to load LLM provider: {e}")
-
+            logger.exception(f"[OrganizationTab] Failed to load LLM provider: {e}")
+            self._handle_worker_error(f"Failed to load LLM provider:\n{e}")
     def switch_llm_provider(self):
         """Switch to the selected LLM provider."""
         try:
             selected_provider = self.llm_provider_combo.currentText()
             self.status.info(f"Switching to {selected_provider}...")
             
-            print(f"[OrganizationTab] POST /organization/llm/switch provider={selected_provider} ...")
+            logger.info(f"[OrganizationTab] POST /organization/llm/switch provider={selected_provider} ...")
             payload = {"provider": selected_provider}
             data = api_client.post("/organization/llm/switch", json=payload, timeout=15.0)
-            print(f"[OrganizationTab] Switch response: {data}")
+            logger.info(f"[OrganizationTab] Switch response: {data}")
             
             success = data.get("success", False)
             message = data.get("message", "")
@@ -1295,22 +1396,22 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                     f"Could not switch to {selected_provider}.\n\n{message}"
                 )
             
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[OrganizationTab] Switch provider failed - API connection error: {e}")
+            self._handle_worker_error(f"Failed to switch LLM provider (API connection error):\n{e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"[OrganizationTab] Switch provider failed - Invalid API response: {e}")
+            self._handle_worker_error(f"Failed to switch LLM provider (Invalid API response):\n{e}")
         except Exception as e:
-            print(f"[OrganizationTab] Switch provider failed ERROR: {e}")
-            self.status.error(f"Switch provider failed: {e}")
-            QMessageBox.critical(
-                self,
-                "Error",
-                f"Failed to switch LLM provider:\n{e}"
-            )
-
+            logger.exception(f"[OrganizationTab] Switch provider failed: {e}")
+            self._handle_worker_error(f"Failed to switch LLM provider:\n{e}")
     def show_stats(self):
         """Display organization statistics."""
         try:
             self.status.info("Loading statistics...")
-            print("[OrganizationTab] GET /organization/stats ...")
+            logger.info("[OrganizationTab] GET /organization/stats ...")
             data = api_client.get("/organization/stats", timeout=30.0)
-            print(f"[OrganizationTab] Stats response: {data}")
+            logger.info(f"[OrganizationTab] Stats response: {data}")
             
             # Format statistics
             stats_text = "Organization Statistics:\n\n"
@@ -1327,14 +1428,15 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
             )
             self.status.success("Statistics loaded")
             
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[OrganizationTab] Failed to load statistics - API connection error: {e}")
+            self._handle_worker_error(f"Failed to load organization statistics (API connection error):\n{e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"[OrganizationTab] Failed to load statistics - Invalid API response: {e}")
+            self._handle_worker_error(f"Failed to load organization statistics (Invalid API response):\n{e}")
         except Exception as e:
-            print(f"[OrganizationTab] Failed to load statistics ERROR: {e}")
-            self.status.error(f"Failed to load statistics: {e}")
-            QMessageBox.critical(
-                self,
-                "Error",
-                f"Failed to load organization statistics:\n{e}"
-            )
+            logger.exception(f"[OrganizationTab] Failed to load statistics: {e}")
+            self._handle_worker_error(f"Failed to load organization statistics:\n{e}")
 
     # -------------------------------------------------------------------------
     # Bulk Operations
@@ -1397,13 +1499,13 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
 
         try:
             job_id = organization_service.create_job(OrgJobType.BULK_APPROVE, {"count": len(proposal_ids)})
-            self.worker = BulkActionWorker(
+            worker_instance = BulkActionWorker(
                 job_id,
                 proposal_ids,
                 "approve",
                 edits_by_id=edits_by_id,
             )
-            organization_service.register_worker(job_id, self.worker)
+            organization_service.register_worker(job_id, worker_instance)
             
             def _on_finished(results):
                 msg = f"Bulk Approve complete: {results['success']} success, {results['failed']} failed"
@@ -1413,14 +1515,19 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 else:
                     self.status.success(msg)
                     QMessageBox.information(self, "Bulk Approve Success", msg)
-                self.worker = None
                 self.org_load_proposals()
-
-            self.worker.finished_ok.connect(_on_finished)
-            self.worker.start()
             
+            worker_instance.finished_ok.connect(_on_finished)
+            worker_instance.finished_err.connect(self._handle_worker_error) # Connect error signal
+            self.start_worker(worker_instance)            
+        except requests.exceptions.RequestException as e:
+            self._handle_worker_error(f"API connection error starting bulk approve: {e}")
+        except json.JSONDecodeError as e:
+            self._handle_worker_error(f"Invalid API response starting bulk approve: {e}")
+        except RuntimeError as e:
+            self._handle_worker_error(f"Runtime error starting bulk approve: {e}")
         except Exception as e:
-            self.status.error(f"Failed to start bulk approve: {e}")
+            self._handle_worker_error(f"An unexpected error occurred starting bulk approve: {e}")
 
     def bulk_reject_proposals(self):
         """Reject all selected proposals via worker (non-blocking)."""
@@ -1448,8 +1555,8 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
         try:
             note = self.org_note_input.toPlainText() or "Bulk reject"
             job_id = organization_service.create_job(OrgJobType.BULK_REJECT, {"count": len(proposal_ids)})
-            self.worker = BulkActionWorker(job_id, proposal_ids, "reject", note=note)
-            organization_service.register_worker(job_id, self.worker)
+            worker_instance = BulkActionWorker(job_id, proposal_ids, "reject", note=note)
+            organization_service.register_worker(job_id, worker_instance)
             
             def _on_finished(results):
                 msg = f"Bulk Reject complete: {results['success']} success, {results['failed']} failed"
@@ -1457,15 +1564,21 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                     self.status.warning(msg)
                 else:
                     self.status.success(msg)
-                self.worker = None
                 self.org_note_input.clear()
                 self.org_load_proposals()
 
-            self.worker.finished_ok.connect(_on_finished)
-            self.worker.start()
+            worker_instance.finished_ok.connect(_on_finished)
+            worker_instance.finished_err.connect(self._handle_worker_error) # Connect error signal
+            self.start_worker(worker_instance)
             
+        except requests.exceptions.RequestException as e:
+            self._handle_worker_error(f"API connection error starting bulk reject: {e}")
+        except json.JSONDecodeError as e:
+            self._handle_worker_error(f"Invalid API response starting bulk reject: {e}")
+        except RuntimeError as e:
+            self._handle_worker_error(f"Runtime error starting bulk reject: {e}")
         except Exception as e:
-            self.status.error(f"Failed to start bulk reject: {e}")
+            self._handle_worker_error(f"An unexpected error occurred starting bulk reject: {e}")
 
     def export_proposals(self):
         """Export proposals to JSON or CSV file."""
@@ -1509,16 +1622,16 @@ class OrganizationTab(QWidget):  # type: ignore[misc]
                 f"Exported {len(self.proposals_cache)} proposals to:\n{file_path}"
             )
             
-        except Exception as e:
+        except (IOError, OSError) as e:
+            logger.error(f"File system error during export: {e}")
             self.status.error(f"Export failed: {e}")
-            QMessageBox.critical(self, "Error", f"Export failed:\n{e}")
+            QMessageBox.critical(self, "Error", f"Export failed (File System Error):\n{e}")
+        except Exception as e:
+            logger.exception(f"An unexpected error occurred during export: {e}")
+            self.status.error(f"Export failed: {e}")
+            QMessageBox.critical(self, "Error", f"Export failed (Unexpected Error):\n{e}")
 
-    def closeEvent(self, event):
-        """Clean up workers on close."""
-        if self.worker:
-            self.worker.requestInterruption()
-            self.worker.wait(1000)
-        super().closeEvent(event)
+
 
     # -------------------------------------------------------------------------
     # Inline Editing

@@ -36,29 +36,28 @@ except ImportError:
 
 from .status_presenter import TabStatusPresenter
 from ..services import api_client
+from gui.core.base_tab import BaseTab
 
 logger = logging.getLogger(__name__)
 
-class HeuristicLifecycleTab(QWidget):  # type: ignore[misc]
+class HeuristicLifecycleTab(BaseTab):
     """
     Tab for heuristic promotion and governance.
     Fulfills AEDIS Phase 5 'GUI-Integrated' mandate.
     """
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Heuristic Lifecycle", asyncio_thread, parent)
         self.current_snapshot = {}
         self.setup_ui()
         self.connect_signals()
 
     def setup_ui(self):
         """Setup the user interface."""
-        layout = QVBoxLayout(self)
-
         # Title
         title = QLabel("Heuristic Lifecycle & Governance")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
 
         # Description
         desc = QLabel(
@@ -67,11 +66,11 @@ class HeuristicLifecycleTab(QWidget):  # type: ignore[misc]
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #666; padding: 5px 0;")
-        layout.addWidget(desc)
+        self.main_layout.addWidget(desc)
 
         # Main splitter
         splitter = QSplitter(Qt.Horizontal)
-        layout.addWidget(splitter)
+        self.main_layout.addWidget(splitter)
 
         # Left panel - Candidate Queue
         left_widget = QWidget()
@@ -94,10 +93,10 @@ class HeuristicLifecycleTab(QWidget):  # type: ignore[misc]
         left_layout.addWidget(candidate_group)
 
         # Status
-        self.status_label = QLabel("Ready")
+        self.status_label = QLabel("Ready") # The QLabel for status is still needed for BaseTab to set text/style
         self.status_label.setStyleSheet("padding: 5px; background-color: #f5f5f5; border-radius: 3px;")
         left_layout.addWidget(self.status_label)
-        self.status = TabStatusPresenter(self, self.status_label, source="Heuristics")
+        # self.status is now handled by BaseTab
 
         splitter.addWidget(left_widget)
 
@@ -179,11 +178,13 @@ class HeuristicLifecycleTab(QWidget):  # type: ignore[misc]
 
         h_id = selected_items[0].text()
         item = self.current_snapshot.get(h_id, {})
-        
-        self.rule_browser.setPlainText(f"ID: {h_id}
-Stage: {item.get('stage')}
 
-Rule logic placeholder...")
+        self.rule_browser.setPlainText(
+            f"ID: {h_id}\n"
+            f"Owner: {item.get('owner', 'unknown')}\n"
+            f"Stage: {item.get('stage')}\n\n"
+            f"{item.get('rule_text', 'No rule text available.')}"
+        )
         self.promote_button.setEnabled(item.get("stage") in ["promoted", "qualified"])
         self.deprecate_button.setEnabled(True)
 
@@ -227,8 +228,13 @@ Rule logic placeholder...")
     def deprecate_selected(self):
         """Deprecate the selected heuristic."""
         selected_items = self.candidate_table.selectedItems()
-        if not selected_items: return
+        if not selected_items:
+            return
         h_id = selected_items[0].text()
         self.status.loading(f"Deprecating {h_id}...")
-        # Implementation would follow promote_selected
-        self.status.warn("Deprecation logic not yet wired to API")
+        try:
+            api_client.deprecate_heuristic(h_id)
+            self.status.success(f"Heuristic {h_id} deprecated")
+            self.load_snapshot()
+        except Exception as e:
+            self.status.error(f"Deprecation failed: {e}")

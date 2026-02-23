@@ -36,28 +36,27 @@ except ImportError:
 
 from .status_presenter import TabStatusPresenter
 from ..services import api_client
+from gui.core.base_tab import BaseTab
 
 logger = logging.getLogger(__name__)
 
-class PlannerJudgeTab(QWidget):  # type: ignore[misc]
+class PlannerJudgeTab(BaseTab):  # type: ignore[misc]
     """
     Tab for running and inspecting Planner-Judge cycles.
     Fulfills AEDIS Phase 4 'GUI-Integrated' mandate.
     """
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Planner-Judge", asyncio_thread, parent)
         self.setup_ui()
         self.connect_signals()
 
     def setup_ui(self):
         """Setup the user interface."""
-        layout = QVBoxLayout(self)
-
         # Title
         title = QLabel("Planner-Judge Verification Core")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
 
         # Description
         desc = QLabel(
@@ -66,11 +65,11 @@ class PlannerJudgeTab(QWidget):  # type: ignore[misc]
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #666; padding: 5px 0;")
-        layout.addWidget(desc)
+        self.main_layout.addWidget(desc)
 
         # Main splitter
         splitter = QSplitter(Qt.Horizontal)
-        layout.addWidget(splitter)
+        self.main_layout.addWidget(splitter)
 
         # Left panel - Planner Composition
         left_widget = QWidget()
@@ -96,10 +95,10 @@ class PlannerJudgeTab(QWidget):  # type: ignore[misc]
 
         planner_layout.addWidget(QLabel("Strategy JSON:"))
         self.strategy_edit = QTextEdit()
-        self.strategy_edit.setPlaceholderText('{
+        self.strategy_edit.setPlaceholderText("""{
   "goal": "organize into legal folders",
   "steps": []
-}')
+}""")
         self.strategy_edit.setFont(QFont("Courier New", 10))
         planner_layout.addWidget(self.strategy_edit)
 
@@ -110,10 +109,10 @@ class PlannerJudgeTab(QWidget):  # type: ignore[misc]
         left_layout.addWidget(planner_group)
 
         # Status
-        self.status_label = QLabel("Ready")
+        self.status_label = QLabel("Ready") # The QLabel for status is still needed for BaseTab to set text/style
         self.status_label.setStyleSheet("padding: 5px; background-color: #f5f5f5; border-radius: 3px;")
         left_layout.addWidget(self.status_label)
-        self.status = TabStatusPresenter(self, self.status_label, source="PlannerJudge")
+        # self.status is now handled by BaseTab
 
         splitter.addWidget(left_widget)
 
@@ -156,21 +155,38 @@ class PlannerJudgeTab(QWidget):  # type: ignore[misc]
         
         try:
             strategy = json.loads(self.strategy_edit.toPlainText())
-        except Exception as e:
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid Strategy JSON: {e}")
             self.status.error(f"Invalid Strategy JSON: {e}")
+            return
+        except Exception as e:
+            logger.exception(f"An unexpected error occurred during JSON parsing: {e}")
+            self.status.error(f"An unexpected error occurred during JSON parsing: {e}")
             return
 
         self.status.loading("Executing Planner-Judge cycle...")
         try:
             result = api_client.run_planner_judge(obj_id, art_id, strategy)
             if not result.get("success"):
-                self.status.error(f"Execution Failed: {result.get('error')}")
+                error_message = result.get('error', 'Unknown error during execution.')
+                logger.error(f"Planner-Judge execution failed: {error_message}")
+                self.status.error(f"Execution Failed: {error_message}")
                 return
 
             self.update_scorecard(result.get("judge_run", {}))
             self.status.success("Cycle completed")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"API connection error during Planner-Judge cycle: {e}")
+            self.status.error(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid API response during Planner-Judge cycle: {e}")
+            self.status.error(f"Invalid API response: {e}")
+        except RuntimeError as e: # Catch custom RuntimeError
+            logger.error(f"Runtime error during Planner-Judge cycle: {e}")
+            self.status.error(f"Runtime error: {e}")
         except Exception as e:
-            self.status.error(f"API Error: {e}")
+            logger.exception(f"An unexpected API error occurred during Planner-Judge cycle: {e}")
+            self.status.error(f"An unexpected API error occurred: {e}")
 
     def update_scorecard(self, judge_run: dict):
         """Update the UI with judge results."""

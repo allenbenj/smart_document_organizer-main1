@@ -1,390 +1,332 @@
 """
-Semantic Analysis Tab - GUI component for document semantic analysis
-
-This module provides the UI for semantic analysis operations including
-document summarization, topic identification, and content analysis.
+Semantic Analysis Tab - AEDIS High-Fidelity Intelligence
+Thematic discovery, clustering, and strategic content analysis.
 """
 
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    import PySide6.QtWidgets as _QtWidgets  # noqa: F401
-    import PySide6.QtCore as _QtCore        # noqa: F401
-    import PySide6.QtGui as _QtGui          # noqa: F401
+from typing import Optional, Any
+import pandas as pd
+import logging
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QFont  # noqa: E402
-from PySide6.QtWidgets import (  # noqa: E402
-    QCheckBox,
-    QComboBox,
-    QFileDialog,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QMessageBox,
-    QPushButton,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, 
+    QPushButton, QComboBox, QCheckBox, QGroupBox, QSplitter, 
+    QLineEdit, QMessageBox, QFileDialog, QScrollArea, QTableWidget, QTableWidgetItem, QHeaderView
 )
-from .default_paths import get_default_dialog_dir  # noqa: E402
+
+from ..ui import JobStatusWidget, KnowledgeBaseBrowser
+from .default_paths import get_default_dialog_dir
+from .workers import SemanticAnalysisWorker
+from gui.core.base_tab import BaseTab
+from gui.services import api_client # Import api_client
+
+logger = logging.getLogger(__name__)
+
+class SemanticAnalysisTab(BaseTab):
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Semantic Analysis", asyncio_thread, parent)
+        self.last_analysis_result = None  # Store the last result for export
+        self.setup_ui()
+        # Connect signals for linked memories after UI setup
+        self.file_path.textChanged.connect(self._refresh_action_state)
+        self.file_path.textChanged.connect(self.load_linked_memories) # Load memories when file path changes
+        self.text_input.textChanged.connect(self._refresh_action_state)
+        self._refresh_action_state()
 
 
-class SemanticAnalysisTab(QWidget):
-    """Tab for semantic analysis operations."""
+    def setup_ui(self):
+        """Initializes the semantic analysis tab UI."""
+        title = QLabel("Semantic Analysis & Thematic Discovery")
+        title.setFont(QFont("Arial", 16, QFont.Bold))
+        self.main_layout.addWidget(title)
 
-    def __init__(self, asyncio_thread=None, parent=None):
-        super().__init__(parent)
-        self.asyncio_thread = asyncio_thread
-        self.worker = None
-        self.init_ui()
-
-    def init_ui(self):
-        """Initialize the semantic analysis tab UI."""
-        layout = QVBoxLayout()
-
-        # Title
-        title = QLabel("Semantic Analysis")
-        title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
-
-        # Input Group
-        input_group = QGroupBox("Document Input")
-        input_layout = QVBoxLayout()
-
-        # File selection
-        file_layout = QHBoxLayout()
-        self.file_path = QLineEdit()
-        self.file_path.setPlaceholderText("Select document file...")
-        self.browse_btn = QPushButton("Browse File")
-        self.browse_btn.clicked.connect(self.browse_file)
-        file_layout.addWidget(QLabel("File:"))
-        file_layout.addWidget(self.file_path)
-        file_layout.addWidget(self.browse_btn)
-        input_layout.addLayout(file_layout)
-
-        # Folder selection
-        folder_layout = QHBoxLayout()
-        self.folder_path = QLineEdit()
-        self.folder_path.setPlaceholderText("Or select folder...")
-        self.browse_folder_btn = QPushButton("Browse Folder")
-        self.browse_folder_btn.clicked.connect(self.browse_folder)
-        folder_layout.addWidget(QLabel("Folder:"))
-        folder_layout.addWidget(self.folder_path)
-        folder_layout.addWidget(self.browse_folder_btn)
-        input_layout.addLayout(folder_layout)
-
-        # Text input
-        input_layout.addWidget(QLabel("Or enter text directly:"))
-        self.text_input = QTextEdit()
-        self.text_input.setMaximumHeight(100)
-        self.text_input.setPlaceholderText("Enter document text for analysis...")
-        input_layout.addWidget(self.text_input)
-
-        input_group.setLayout(input_layout)
-
-        # Analysis Options Group
-        options_group = QGroupBox("Strategic Analysis Settings")
-        options_layout = QVBoxLayout()
-
-        # Analysis type
-        type_layout = QHBoxLayout()
-        type_layout.addWidget(QLabel("Core Engine:"))
-        self.analysis_combo = QComboBox()
-        self.analysis_combo.addItems(
-            [
-                "Strategic Clustering", 
-                "Summarization",
-                "Topic Identification",
-                "Sentiment Analysis",
-                "Key Phrases",
-            ]
+        quick_help = QLabel(
+            "Quick Start: 1) Load from Knowledge Base OR choose a file/text. "
+            "2) Click Start Discovery. 3) Review output. 4) Export if needed."
         )
-        type_layout.addWidget(self.analysis_combo)
-        options_layout.addLayout(type_layout)
+        quick_help.setWordWrap(True)
+        quick_help.setStyleSheet("color: #9e9e9e; padding: 4px 0 8px 0;")
+        self.main_layout.addWidget(quick_help)
+        self.prereq_status = QLabel("")
+        self.prereq_status.setWordWrap(True)
+        self.prereq_status.setStyleSheet("color: #ffcc80; padding: 0 0 8px 0;")
+        self.main_layout.addWidget(self.prereq_status)
 
-        # Strategic Refinements (New Intelligence Layer)
-        refinement_label = QLabel("Intelligence Refinements:")
-        refinement_label.setStyleSheet("font-weight: bold; color: #4dabf7; margin-top: 10px;")
-        options_layout.addWidget(refinement_label)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_layout.addWidget(self.main_splitter)
 
-        self.auto_label_themes = QCheckBox("Auto-Label Themes (Knowledge Graph Prep)")
-        self.auto_label_themes.setToolTip("Uses LLM to name clusters based on legal theory (e.g., 'Discovery Abuse').")
-        self.auto_label_themes.setChecked(True)
-        options_layout.addWidget(self.auto_label_themes)
+        # LEFT: Configuration
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
 
-        self.outlier_detection = QCheckBox("Smoking Gun Detection (Outlier Analysis)")
-        self.outlier_detection.setToolTip("Flags sentences that don't fit any theme—often where the unique evidence is hidden.")
-        options_layout.addWidget(self.outlier_detection)
+        # 1. KB Browser
+        kb_group = QGroupBox("1. Load from Knowledge Base")
+        kb_layout = QVBoxLayout(kb_group)
+        self.kb_browser = KnowledgeBaseBrowser()
+        self.kb_browser.document_selected.connect(self.on_kb_document_selected)
+        kb_layout.addWidget(self.kb_browser)
+        kb_group.setLayout(kb_layout)
+        left_layout.addWidget(kb_group)
 
-        self.pattern_finder = QCheckBox("Cross-Document Pattern Finder")
-        self.pattern_finder.setToolTip("Extracts cluster vectors for searching similar misconduct patterns in other cases.")
-        options_layout.addWidget(self.pattern_finder)
-
-        self.denoise_boilerplate = QCheckBox("Boilerplate De-noising")
-        self.denoise_boilerplate.setToolTip("Automatically identifies and suppresses administrative/procedural filler.")
-        options_layout.addWidget(self.denoise_boilerplate)
-
-        # Advanced options
-        self.deep_analysis = QCheckBox("Enable deep semantic analysis (High-Res)")
-        options_layout.addWidget(self.deep_analysis)
-
-        options_group.setLayout(options_layout)
-
-        # Actions Group
-        actions_group = QGroupBox("Actions")
-        actions_layout = QHBoxLayout()
-
-        self.analyze_btn = QPushButton("Analyze Document")
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setEnabled(False)
-        self.clear_btn = QPushButton("Clear Results")
-        self.export_btn = QPushButton("Export Results")
+        # 2. Input
+        input_group = QGroupBox("2. Intelligence Input")
+        input_layout = QVBoxLayout(input_group)
         
-        # New: Expert Review Bridge
-        self.verify_btn = QPushButton("Verify Findings in Knowledge Graph")
-        self.verify_btn.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold;")
-        self.verify_btn.setEnabled(False)
-        self.verify_btn.clicked.connect(self.open_memory_review)
+        path_row = QHBoxLayout()
+        self.file_path = QLineEdit()
+        self.file_path.setPlaceholderText("Select file path...")
+        path_row.addWidget(self.file_path)
+        self.browse_btn = QPushButton("...")
+        self.browse_btn.setMaximumWidth(40)
+        self.browse_btn.clicked.connect(self.browse_file)
+        path_row.addWidget(self.browse_btn)
+        input_layout.addLayout(path_row)
 
-        actions_layout.addWidget(self.analyze_btn)
-        actions_layout.addWidget(self.cancel_btn)
-        actions_layout.addWidget(self.verify_btn)
-        actions_layout.addWidget(self.clear_btn)
-        actions_group.setLayout(actions_layout)
+        self.text_input = QTextEdit()
+        self.text_input.setPlaceholderText("Paste text for thematic clustering...")
+        self.text_input.setMaximumHeight(150)
+        input_layout.addWidget(self.text_input)
+        left_layout.addWidget(input_group)
 
-        # Feedback/status label
-        self.status_label = QLabel("")
-        self.status = TabStatusPresenter(self, self.status_label, source="Semantic Analysis")
-        self.status.info("Ready")
+        # 3. Settings
+        strategy_group = QGroupBox("3. Analysis Strategy")
+        strategy_layout = QVBoxLayout(strategy_group)
+        
+        self.analysis_combo = QComboBox()
+        self.analysis_combo.addItems([
+            "Strategic Clustering", "Summarization", "Topic Identification",
+            "Sentiment Analysis", "Key Phrases"
+        ])
+        strategy_layout.addWidget(self.analysis_combo)
+        
+        self.auto_label = QCheckBox("Auto-Label Themes (KG Prep)")
+        self.auto_label.setChecked(True)
+        strategy_layout.addWidget(self.auto_label)
+        
+        self.smoking_gun = QCheckBox("Smoking Gun Detection (Outliers)")
+        strategy_layout.addWidget(self.smoking_gun)
+        left_layout.addWidget(strategy_group)
 
-        self.job_status = JobStatusWidget("Semantic Analysis Job")
-        self.results_summary = ResultsSummaryBox()
+        # 4. Action
+        self.analyze_btn = QPushButton("⚡ Start Discovery")
+        self.analyze_btn.setMinimumHeight(50)
+        self.analyze_btn.setStyleSheet("background-color: #1565C0; color: white; font-weight: bold; font-size: 14px;")
+        self.analyze_btn.clicked.connect(self.analyze_document)
+        left_layout.addWidget(self.analyze_btn)
+        
+        left_layout.addStretch()
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(left_widget)
+        self.main_splitter.addWidget(scroll)
 
-        # Results Group
-        results_group = QGroupBox("Analysis Results")
-        results_layout = QVBoxLayout()
-
+        # RIGHT: Results
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        
         self.results_text = QTextEdit()
         self.results_text.setReadOnly(True)
-        self.results_text.setMinimumHeight(300)
-        results_layout.addWidget(self.results_text)
-        results_group.setLayout(results_layout)
+        right_layout.addWidget(self.results_text)
 
-        layout.addWidget(input_group)
-        layout.addWidget(options_group)
-        layout.addWidget(actions_group)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.job_status)
-        layout.addWidget(self.results_summary)
-        layout.addWidget(results_group)
+        self.discover_btn_right = QPushButton("⚡ Start Discovery")
+        self.discover_btn_right.setStyleSheet(
+            "background-color: #1565C0; color: white; font-weight: bold; font-size: 14px;"
+        )
+        self.discover_btn_right.clicked.connect(self.analyze_document)
+        right_layout.addWidget(self.discover_btn_right)
 
-        self.setLayout(layout)
+        # Export to Excel Button
+        self.export_btn = QPushButton("Export to Excel")
+        self.export_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold; font-size: 14px;")
+        self.export_btn.setEnabled(False) # Initially disabled
+        self.export_btn.clicked.connect(self.export_results_to_excel)
+        right_layout.addWidget(self.export_btn)
+        
+        self.status_label = QLabel("Ready") # The QLabel for status is still needed for BaseTab to set text/style
+        right_layout.addWidget(self.status_label)
+        
+        self.job_status = JobStatusWidget("Discovery Job")
+        right_layout.addWidget(self.job_status)
 
-        # Connect signals
-        self.analyze_btn.clicked.connect(self.analyze_document)
-        self.cancel_btn.clicked.connect(self.cancel_analysis)
-        self.clear_btn.clicked.connect(self.clear_results)
-        self.export_btn.clicked.connect(self.export_results)
+        # Linked Memories Section
+        linked_memories_group = QGroupBox("Linked Memories")
+        linked_memories_layout = QVBoxLayout(linked_memories_group)
+        self.linked_memories_table = QTableWidget()
+        self.linked_memories_table.setColumnCount(4)
+        self.linked_memories_table.setHorizontalHeaderLabels(["Content", "Relation", "Source", "Linked At"])
+        self.linked_memories_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        linked_memories_layout.addWidget(self.linked_memories_table)
+        right_layout.addWidget(linked_memories_group)
+        
+        self.main_splitter.addWidget(right_widget)
+        self.main_splitter.setSizes([450, 750])
+
+    def on_kb_document_selected(self, doc):
+        self.text_input.setPlainText(doc.get("content", ""))
+        self.file_path.setText(doc.get("file_path", ""))
+        self.status.success(f"Loaded: {doc.get('title')}")
+        self.export_btn.setEnabled(False) # Disable export when new document is loaded
+        self._refresh_action_state()
+        # self.load_linked_memories() # Already connected via signal
 
     def browse_file(self):
-        """Browse for document file."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Document",
-            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
-            "All Files (*);;Text Files (*.txt);;PDF Files (*.pdf);;Word Files (*.docx);;Markdown (*.md)",
-        )
-        if file_path:
-            self.file_path.setText(file_path)
-            self.folder_path.clear()
+        path, _ = QFileDialog.getOpenFileName(self, "Select Document", get_default_dialog_dir(), "All Files (*)")
+        if path:
+            self.file_path.setText(path)
+            self.text_input.clear()
+        self._refresh_action_state()
+        # self.load_linked_memories() # Already connected via signal
 
-    def browse_folder(self):
-        """Browse for a folder."""
-        folder_path = QFileDialog.getExistingDirectory(
-            self,
-            "Select Folder",
-            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
-        )
-        if folder_path:
-            self.folder_path.setText(folder_path)
-            self.file_path.clear()
+    def _refresh_action_state(self) -> None:
+        has_text = bool(self.text_input.toPlainText().strip())
+        has_path = bool(self.file_path.text().strip())
+        ready = has_text or has_path
+        self.analyze_btn.setEnabled(ready)
+        self.discover_btn_right.setEnabled(ready)
+        if ready:
+            self.prereq_status.setText("Ready: click Start Discovery.")
+            self.prereq_status.setStyleSheet("color: #81c784; padding: 0 0 8px 0;")
+        else:
+            self.prereq_status.setText("Missing input: load a KB document, choose a file, or paste text.")
+            self.prereq_status.setStyleSheet("color: #ffcc80; padding: 0 0 8px 0;")
 
     def analyze_document(self):
-        """Analyze document using semantic analyzer."""
-        # Get input
-        file_path = self.file_path.text().strip()
-        text_input = self.text_input.toPlainText().strip()
-
-        if not file_path and not text_input:
-            self.status.warn("Please provide a file or text input.")
+        text = self.text_input.toPlainText().strip()
+        path = self.file_path.text().strip()
+        if not text and not path:
+            self.status.warn("Input required.")
             return
 
-        # Get options
-        analysis_type = self.analysis_combo.currentText()
+        self.job_status.set_status("running", "Clustering...")
+        self.analyze_btn.setEnabled(False)
+        self.status.loading("Identifying strategic themes...")
+        self._refresh_action_state()
+
         options = {
-            "deep_analysis": self.deep_analysis.isChecked(),
-            "auto_label": self.auto_label_themes.isChecked(),
-            "outlier_detection": self.outlier_detection.isChecked(),
-            "pattern_finder": self.pattern_finder.isChecked(),
-            "denoise": self.denoise_boilerplate.isChecked(),
+            "auto_label": self.auto_label.isChecked(),
+            "outliers": self.smoking_gun.isChecked()
         }
 
-        try:
-            if self.worker is not None and self.worker.isRunning():
-                self.status.warn("Analysis already running. Please wait for completion.")
-                return
+        worker_instance = SemanticAnalysisWorker(self.asyncio_thread, path, text, self.analysis_combo.currentText(), options)
+        worker_instance.result_ready.connect(self.on_analysis_result)
+        # BaseTab handles error_occurred and finished, so no need to connect directly
+        self.start_worker(worker_instance)
 
-            self.results_text.clear()
-            self.results_text.append(f"Starting {analysis_type.lower()}...")
-            self.job_status.set_status("running", f"{analysis_type} in progress")
-            self.status.loading(f"Running {analysis_type.lower()}...")
-            self.cancel_btn.setEnabled(True)
-
-            # Create worker thread
-            self.worker = SemanticAnalysisWorker(
-                self.asyncio_thread,
-                file_path,
-                text_input,
-                analysis_type,
-                options
-            )
-            self.worker.result_ready.connect(self.on_analysis_result)
-            self.worker.error_occurred.connect(self.on_analysis_error)
-            self.worker.finished.connect(self.worker.deleteLater)
-            self.worker.start()
-
-        except Exception as e:
-            self.cancel_btn.setEnabled(False)
-            self.job_status.set_status("failed", "Failed to start")
-            self.results_summary.set_summary(
-                "Failed to start semantic analysis",
-                "No output generated",
-                "See Run Console / status line",
-            )
-            self.status.error(f"Failed to start analysis: {str(e)}")
-
-    def clear_results(self):
-        """Clear all results and inputs."""
-        self.cancel_btn.setEnabled(False)
-        self.results_text.clear()
-        self.text_input.clear()
-        self.file_path.clear()
-
-    def export_results(self):
-        """Export analysis results."""
-        if not self.results_text.toPlainText():
-            QMessageBox.warning(self, "Warning", "No results to export.")
+    def export_results_to_excel(self):
+        if not self.last_analysis_result or "semantic_analysis" not in self.last_analysis_result.get("data", {}):
+            QMessageBox.warning(self, "Export Error", "No analysis results to export.")
             return
 
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Results", "analysis_results.txt", "Text Files (*.txt)"
+            self, "Export Results to Excel", get_default_dialog_dir(), "Excel Files (*.xlsx)"
         )
-        if file_path:
-            try:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(self.results_text.toPlainText())
-                QMessageBox.information(
-                    self, "Success", "Results exported successfully."
-                )
-            except Exception as e:
-                QMessageBox.critical(
-                    self, "Error", f"Failed to export results: {str(e)}"
-                )
 
-    def cancel_analysis(self):
-        """Cancel the ongoing analysis."""
-        if self.worker and self.worker.isRunning():
-            self.worker.requestInterruption()
-            self.status.warn("Analysis cancelled")
-            self.cancel_btn.setEnabled(False)
+        if not file_path:
+            return
 
-    def on_analysis_result(self, result):
-        """Handle analysis results with support for thematic clustering and auto-labeling."""
-        self.worker = None
-        self.cancel_btn.setEnabled(False)
-        self.results_text.clear()
-        
-        # Check for clustering specific result (Formal Discovery Service format)
-        if isinstance(result, dict) and result.get("type") == "strategic_discovery":
-            self.results_text.append("AEDIS STRATEGIC INTELLIGENCE: DISCOVERY PROPOSALS")
-            self.results_text.append("=" * 60)
-            data = result.get("data", {})
-            themes = data.get("results", [])
-            
-            for theme in themes:
-                self.results_text.append(f"\n[PROPOSAL: {theme.get('theme_label').upper()}]")
-                self.results_text.append(f"Linked Evidence: {theme.get('evidence_count')} Items")
-                self.results_text.append(f"Key Identifiers: {', '.join(theme.get('key_identifiers', []))}")
-                self.results_text.append("-" * 40)
-                self.results_text.append(f"Summary: {theme.get('summary')}")
-            
-            # Enable Human-in-the-Loop Review
-            self.verify_btn.setEnabled(True)
-            self.status.success("Discovery complete - Ready for Expert Verification")
-        else:
-            # Fallback for standard analysis
-            if isinstance(result, dict) and "clusters" in result:
-                self.results_text.append("AEDIS STRATEGIC INTELLIGENCE: THEMATIC CLUSTERS")
-                self.results_text.append("=" * 60)
-                clusters = result["clusters"]
-                for theme, items in clusters.items():
-                    header = f"\n[THEME: {theme.upper()}]" if not str(theme).isdigit() else f"\n[THEME {int(theme) + 1}]"
-                    self.results_text.append(header)
-                    self.results_text.append(f"Linked Evidence: {len(items)} Items")
-                    self.results_text.append("-" * 40)
-                    for item in items:
-                        self.results_text.append(f" • {item}")
-            else:
-                self.results_text.append("Analysis Results:")
-                self.results_text.append("-" * 50)
-                if isinstance(result, dict):
-                    for key, value in result.items():
-                        self.results_text.append(f"{key}: {value}")
-                else:
-                    self.results_text.append(str(result))
+        try:
+            semantic_data = self.last_analysis_result["data"]["semantic_analysis"]
+
+            with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
+                # 1. Summary
+                summary_df = pd.DataFrame([{"Document Summary": semantic_data.get("document_summary", "N/A")}])
+                summary_df.to_excel(writer, sheet_name="Summary", index=False)
+
+                # 2. Key Topics
+                key_topics = semantic_data.get("key_topics", [])
+                if key_topics:
+                    topics_data = []
+                    for topic in key_topics:
+                        topics_data.append({
+                            "Topic Name": topic.get("topic_name", "N/A"),
+                            "Category": topic.get("topic_category", "N/A"),
+                            "Keywords": ", ".join(topic.get("keywords", [])),
+                            "Confidence": topic.get("confidence", 0.0),
+                            "Relevance Score": topic.get("relevance_score", 0.0),
+                            "Legal Framework": topic.get("legal_framework", "N/A"),
+                        })
+                    topics_df = pd.DataFrame(topics_data)
+                    topics_df.to_excel(writer, sheet_name="Key Topics", index=False)
+
+                # 3. Legal Concepts
+                legal_concepts = semantic_data.get("legal_concepts", [])
+                if legal_concepts:
+                    concepts_data = []
+                    for concept in legal_concepts:
+                        concepts_data.append({
+                            "Concept": concept.get("concept", "N/A"),
+                            "Type": concept.get("concept_type", "N/A"),
+                            "Confidence": concept.get("confidence", 0.0),
+                            "Context": concept.get("context", "N/A"),
+                            "Legal Domain": concept.get("legal_domain", "N/A"),
+                            "Relationships": ", ".join(concept.get("relationships", [])),
+                            "Importance Score": concept.get("importance_score", 0.0),
+                        })
+                    concepts_df = pd.DataFrame(concepts_data)
+                    concepts_df.to_excel(writer, sheet_name="Legal Concepts", index=False)
+
+                # 4. Document Classification
+                classification = semantic_data.get("document_classification", {})
+                classification_df = pd.DataFrame([{
+                    "Document Type": classification.get("document_type", "N/A"),
+                    "Legal Domain": classification.get("legal_domain", "N/A"),
+                    "Jurisdiction": classification.get("jurisdiction", "N/A"),
+                    "Practice Area": classification.get("practice_area", "N/A"),
+                    "Confidence": classification.get("confidence", 0.0),
+                    "Classification Features": ", ".join(classification.get("classification_features", [])),
+                }])
+                classification_df.to_excel(writer, sheet_name="Classification", index=False)
+
+                # 5. Semantic Relationships
+                semantic_relationships = semantic_data.get("semantic_relationships", [])
+                if semantic_relationships:
+                    relationships_df = pd.DataFrame(semantic_relationships)
+                    relationships_df.to_excel(writer, sheet_name="Relationships", index=False)
                 
-        self.job_status.set_status("success", "Completed")
-
-    def open_memory_review(self):
-        """Bridge to the Memory Review tab for expert verification."""
-        # Find the main window and switch tabs if possible
-        parent = self.window()
-        if hasattr(parent, "tab_widget"):
-            # Search for 'Memory Review' tab
-            for i in range(parent.tab_widget.count()):
-                if parent.tab_widget.tabText(i) == "Memory Review":
-                    parent.tab_widget.setCurrentIndex(i)
-                    self.status.info("Switched to Memory Review for expert verification.")
-                    return
-        
-        QMessageBox.information(self, "Expert Review", "Findings saved to database. Please open the 'Memory Review' tab to finalize.")
-        self.results_summary.set_summary(
-            "Semantic analysis completed successfully",
-            "Visible in Analysis Results (use Export Results to save)",
-            "Run Console",
-        )
-        self.status.success("Semantic analysis complete")
-
-    def on_analysis_error(self, error_msg):
-        """Handle analysis errors."""
-        self.worker = None
-        self.cancel_btn.setEnabled(False)
-        self.results_text.clear()
-        self.results_text.append(f"Error: {error_msg}")
-        self.job_status.set_status("failed", "Analysis failed")
-        self.results_summary.set_summary(
-            f"Semantic analysis failed: {error_msg}",
-            "No output generated",
-            "Run Console",
-        )
-        self.status.error(f"Analysis error: {error_msg}")
+                # 6. Content Structure
+                content_structure = semantic_data.get("content_structure", {})
+                content_structure_data = [{
+                    "Total Length": content_structure.get("total_length", "N/A"),
+                    "Paragraph Count": content_structure.get("paragraph_count", "N/A"),
+                    "Sentence Count": content_structure.get("sentence_count", "N/A"),
+                    "Average Sentence Length": content_structure.get("avg_sentence_length", 0.0),
+                    "Legal Sections": "; ".join([s.get('section', 'N/A') for s in content_structure.get('legal_sections', [])]),
+                }]
+                content_structure_df = pd.DataFrame(content_structure_data)
+                content_structure_df.to_excel(writer, sheet_name="Content Structure", index=False)
 
 
-# Import here to avoid circular imports
-from .status_presenter import TabStatusPresenter  # noqa: E402
-from ..ui import JobStatusWidget, ResultsSummaryBox  # noqa: E402
-from .workers import SemanticAnalysisWorker  # noqa: E402
+            QMessageBox.information(self, "Export Successful", f"Results exported to {file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Export Error", f"Failed to export results: {e}")
+
+    async def load_linked_memories(self):
+        """Loads and displays memories linked to the current file path."""
+        file_path = self.file_path.text().strip()
+        if not file_path:
+            self.linked_memories_table.setRowCount(0)
+            return
+
+        self.status.loading(f"Loading linked memories for {file_path}...")
+        try:
+            # Use self.asyncio_thread to run the async API call
+            linked_memories = await self.asyncio_thread.run_coroutine_threadsafe(
+                api_client.get("/api/data-explorer/file-memories", params={"file_path": file_path})
+            )
+            self._display_linked_memories(linked_memories)
+            self.status.success(f"Loaded {len(linked_memories)} linked memories.")
+        except Exception as e:
+            logger.error(f"Failed to load linked memories for {file_path}: {e}")
+            self.status.error(f"Failed to load linked memories: {e}")
+            self.linked_memories_table.setRowCount(0)
+
+    def _display_linked_memories(self, memories: list[dict]):
+        """Populates the linked memories table with data."""
+        self.linked_memories_table.setRowCount(len(memories))
+        for i, memory in enumerate(memories):
+            self.linked_memories_table.setItem(i, 0, QTableWidgetItem(memory.get("content", "")))
+            self.linked_memories_table.setItem(i, 1, QTableWidgetItem(memory.get("relation_type", "")))
+            self.linked_memories_table.setItem(i, 2, QTableWidgetItem(memory.get("link_source", "")))
+            self.linked_memories_table.setItem(i, 3, QTableWidgetItem(memory.get("linked_at", "").split("T")[0])) # Just date

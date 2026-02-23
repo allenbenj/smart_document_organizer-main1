@@ -5,52 +5,73 @@ This module provides the UI for text embedding operations including
 generation, similarity search, and visualization.
 """
 
+from typing import Any, Optional
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
-    QWidget,
 )
 
 from ..services.model_capability_registry import ModelCapabilityRegistry
+from .default_paths import get_default_dialog_dir
 from .workers import EmbeddingWorker
+from gui.core.base_tab import BaseTab
 
-
-class EmbeddingOperationsTab(QWidget):
+class EmbeddingOperationsTab(BaseTab):
     """Tab for embedding operations."""
 
-    def __init__(self, asyncio_thread):
-        super().__init__()
-        self.asyncio_thread = asyncio_thread
-        self.worker = None
-        self.init_ui()
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Embedding Operations", asyncio_thread, parent)
+        self.setup_ui()
 
-    def init_ui(self):
+    def setup_ui(self):
         """Initialize the embedding operations tab UI."""
-        layout = QVBoxLayout()
         self.registry = ModelCapabilityRegistry("models")
 
         # Title
         title = QLabel("Text Embedding Operations")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
 
         # Input Group
         input_group = QGroupBox("Text Input")
         input_layout = QVBoxLayout()
 
+        file_row = QHBoxLayout()
+        self.file_path_input = QLineEdit()
+        self.file_path_input.setPlaceholderText("Optional: select one file...")
+        file_row.addWidget(self.file_path_input)
+        self.browse_file_btn = QPushButton("File...")
+        file_row.addWidget(self.browse_file_btn)
+        input_layout.addLayout(file_row)
+
+        folder_row = QHBoxLayout()
+        self.folder_path_input = QLineEdit()
+        self.folder_path_input.setPlaceholderText(
+            "Optional: select a folder to embed all supported files..."
+        )
+        folder_row.addWidget(self.folder_path_input)
+        self.browse_folder_btn = QPushButton("Folder...")
+        folder_row.addWidget(self.browse_folder_btn)
+        input_layout.addLayout(folder_row)
+
         self.text_input = QTextEdit()
         self.text_input.setMaximumHeight(120)
-        self.text_input.setPlaceholderText("Enter text to generate embeddings...")
+        self.text_input.setPlaceholderText(
+            "Enter text to generate embeddings (or leave empty to use file/folder)."
+        )
         input_layout.addWidget(self.text_input)
         input_group.setLayout(input_layout)
 
@@ -125,7 +146,7 @@ class EmbeddingOperationsTab(QWidget):
         actions_layout = QHBoxLayout()
 
         self.process_btn = QPushButton("Process Embeddings")
-        self.clear_btn = QPushButton("Clear Results")
+        self.clear_btn = QPushButton("Clear Output")
         self.visualize_btn = QPushButton("Visualize")
 
         actions_layout.addWidget(self.process_btn)
@@ -150,25 +171,31 @@ class EmbeddingOperationsTab(QWidget):
         results_layout.addWidget(self.registry_text)
         results_group.setLayout(results_layout)
 
-        layout.addWidget(input_group)
-        layout.addWidget(options_group)
-        layout.addWidget(actions_group)
-        layout.addWidget(results_group)
-
-        self.setLayout(layout)
+        self.main_layout.addWidget(input_group)
+        self.main_layout.addWidget(options_group)
+        self.main_layout.addWidget(actions_group)
+        self.main_layout.addWidget(results_group)
 
         # Connect signals
         self.process_btn.clicked.connect(self.process_embeddings)
         self.clear_btn.clicked.connect(self.clear_results)
         self.visualize_btn.clicked.connect(self.visualize_embeddings)
         self.refresh_registry_btn.clicked.connect(self.refresh_model_registry)
+        self.browse_file_btn.clicked.connect(self.select_file)
+        self.browse_folder_btn.clicked.connect(self.select_folder)
         self.refresh_model_registry()
 
     def process_embeddings(self):
         """Process text embeddings using the UnifiedEmbeddingAgent."""
         text = self.text_input.toPlainText().strip()
-        if not text:
-            QMessageBox.warning(self, "Warning", "Please enter text to process.")
+        file_path = self.file_path_input.text().strip()
+        folder_path = self.folder_path_input.text().strip()
+        if not text and not file_path and not folder_path:
+            QMessageBox.warning(
+                self,
+                "Warning",
+                "Provide text input, a file path, or a folder path to process.",
+            )
             return
 
         # Get selected options
@@ -196,13 +223,18 @@ class EmbeddingOperationsTab(QWidget):
             }
 
             # Create worker thread for embedding processing
-            self.worker = EmbeddingWorker(
-                self.asyncio_thread, text, model_name, operation, strategic_options
+            worker_instance = EmbeddingWorker(
+                self.asyncio_thread,
+                text,
+                model_name,
+                operation,
+                strategic_options,
+                file_path=file_path,
+                folder_path=folder_path,
             )
-            self.worker.result_ready.connect(self.on_embedding_result)
-            self.worker.error_occurred.connect(self.on_embedding_error)
-            self.worker.finished.connect(self.worker.deleteLater)
-            self.worker.start()
+            worker_instance.result_ready.connect(self.on_embedding_result)
+            # BaseTab handles error_occurred and finished, so no need to connect directly
+            self.start_worker(worker_instance) # Use BaseTab's start_worker
 
         except Exception as e:
             QMessageBox.critical(
@@ -212,6 +244,8 @@ class EmbeddingOperationsTab(QWidget):
     def clear_results(self):
         """Clear all results and input fields."""
         self.text_input.clear()
+        self.file_path_input.clear()
+        self.folder_path_input.clear()
         self.results_text.clear()
 
     def visualize_embeddings(self):
@@ -231,12 +265,30 @@ class EmbeddingOperationsTab(QWidget):
         else:
             self.results_text.append(str(result))
 
-    def on_embedding_error(self, error_msg):
-        """Handle embedding processing errors."""
-        self.worker = None
-        self.results_text.clear()
-        self.results_text.append(f"Error: {error_msg}")
-        QMessageBox.critical(self, "Processing Error", error_msg)
+
+
+    def select_file(self):
+        """Select one file to embed."""
+        default_dir = get_default_dialog_dir(self.file_path_input.text())
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select File to Embed",
+            default_dir,
+            "All Files (*)",
+        )
+        if path:
+            self.file_path_input.setText(path)
+
+    def select_folder(self):
+        """Select a folder to embed recursively."""
+        default_dir = get_default_dialog_dir(self.folder_path_input.text())
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder to Embed",
+            default_dir,
+        )
+        if folder:
+            self.folder_path_input.setText(folder)
 
     def refresh_model_registry(self):
         """Rebuild and display local model capability registry."""

@@ -6,6 +6,7 @@ with various presets and override options.
 """
 
 import json
+from typing import Optional, Any # Added Optional, Any
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -32,21 +33,21 @@ except ImportError:
     requests = None  # type: ignore
 
 from ..services import api_client
+from gui.core.base_tab import BaseTab
 
 
-class PipelinesTab(QWidget):
-    def __init__(self):
-        super().__init__()
+class PipelinesTab(BaseTab):
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Pipelines", asyncio_thread, parent)
         self.presets = []
-        self.init_ui()
+        self.setup_ui()
         # self.load_presets() - Defer until backend is ready
 
-    def init_ui(self):
-        layout = QVBoxLayout()
+    def setup_ui(self):
         title = QLabel("Pipelines")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
 
         controls = QGroupBox("Run Preset")
         c_layout = QVBoxLayout()
@@ -151,37 +152,48 @@ class PipelinesTab(QWidget):
         results.setLayout(r_layout)
 
         self.status_label = QLabel("Ready")
-        self.status = TabStatusPresenter(self, self.status_label, source="Pipelines")
         self.job_status = JobStatusWidget("Pipeline Job")
         self.results_summary = ResultsSummaryBox()
 
-        layout.addWidget(controls)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.job_status)
-        layout.addWidget(self.results_summary)
-        layout.addWidget(results)
-        self.setLayout(layout)
-
+        self.main_layout.addWidget(controls)
+        self.main_layout.addWidget(self.status_label)
+        self.main_layout.addWidget(self.job_status)
+        self.main_layout.addWidget(self.results_summary)
+        self.main_layout.addWidget(results)
         self.refresh_btn.clicked.connect(self.load_presets)
         self.browse_btn.clicked.connect(self.browse_path)
         self.run_btn.clicked.connect(self.run_pipeline)
 
     def load_presets(self):
         try:
-            print("[PipelinesTab] Fetching pipeline presets...")
+            logger.info("[PipelinesTab] Fetching pipeline presets...")
             result = api_client.get_pipeline_presets()
             data = result.get("items", [])
-            print(f"[PipelinesTab] Loaded {len(data)} presets.")
+            logger.info(f"[PipelinesTab] Loaded {len(data)} presets.")
             self.presets = data
             self.preset_combo.clear()
             for p in data:
                 self.preset_combo.addItem(p.get("name", "Preset"))
-        except Exception as e:
-            msg = f"Failed to load presets: {e}"
-            print(f"[PipelinesTab] ERROR: {msg}")
+        except requests.exceptions.RequestException as e:
+            msg = f"Failed to load presets - API connection error: {e}"
+            logger.error(f"[PipelinesTab] ERROR: {msg}")
             self.results_text.setPlainText(msg)
             self.status.error(msg)
-
+        except json.JSONDecodeError as e:
+            msg = f"Failed to load presets - Invalid API response: {e}"
+            logger.error(f"[PipelinesTab] ERROR: {msg}")
+            self.results_text.setPlainText(msg)
+            self.status.error(msg)
+        except RuntimeError as e:
+            msg = f"Failed to load presets - Runtime error: {e}"
+            logger.error(f"[PipelinesTab] ERROR: {msg}")
+            self.results_text.setPlainText(msg)
+            self.status.error(msg)
+        except Exception as e:
+            msg = f"Failed to load presets - An unexpected error occurred: {e}"
+            logger.exception(f"[PipelinesTab] ERROR: {msg}")
+            self.results_text.setPlainText(msg)
+            self.status.error(msg)
     def current_preset(self) -> dict:
         idx = self.preset_combo.currentIndex()
         if 0 <= idx < len(self.presets):
@@ -234,7 +246,12 @@ class PipelinesTab(QWidget):
                 opts = s.get("options", {})
                 opts.update({"model": self.ov_emb_model.currentText()})
                 s["options"] = opts
-        if getattr(self, "_worker", None) is not None and self._worker.isRunning():
+            if s.get("name") in ["shadow_da_simulation", "refutation_search", "toulmin_mapping", "reassess_motion"]:
+                opts = s.get("options", {})
+                # Use classifier model combo as a generic model selector for these advanced steps
+                opts.update({"model": self.ov_cls_model.currentText()})
+                s["options"] = opts
+        if self.worker and self.worker.isRunning(): # Use BaseTab's self.worker
             self.status.warn("Pipeline already running. Please wait for completion.")
             return
 
@@ -243,11 +260,10 @@ class PipelinesTab(QWidget):
         self.results_text.setPlainText("Running pipeline...")
         self.job_status.set_status("running", "Executing preset pipeline")
         self.status.loading("Running pipeline...")
-        worker = PipelineRunnerWorker(modified, path)
-        worker.finished_ok.connect(self.on_pipeline_ok)
-        worker.finished_err.connect(self.on_pipeline_err)
-        worker.start()
-        self._worker = worker
+        worker_instance = PipelineRunnerWorker(modified, path) # Use local variable
+        worker_instance.finished_ok.connect(self.on_pipeline_ok)
+        # BaseTab handles finished_err and finished, so no need to connect directly
+        self.start_worker(worker_instance) # Use BaseTab's start_worker
 
     def on_pipeline_ok(self, result: dict):
         try:
@@ -264,25 +280,29 @@ class PipelinesTab(QWidget):
                 "Run Console",
             )
             self.status.success("Pipeline run complete")
-        except Exception as e:  # noqa: F841
-            self.results_text.setPlainText(str(result))
-            self.job_status.set_status("success", "Pipeline run complete")
+        except TypeError as e:
+            error_msg = f"Error displaying pipeline results: {e}. Raw result: {str(result)}"
+            logger.exception(error_msg)
+            self.results_text.setPlainText(error_msg)
+            self.job_status.set_status("failure", "Error displaying results")
             self.results_summary.set_summary(
-                "Pipeline completed",
-                "Displayed in Results panel",
+                "Error displaying results",
+                "Check logs for details",
                 "Run Console",
             )
-            self.status.success("Pipeline run complete")
+            self.status.error("Error displaying pipeline results.")
+        except Exception as e:
+            error_msg = f"An unexpected error occurred in on_pipeline_ok: {e}. Raw result: {str(result)}"
+            logger.exception(error_msg)
+            self.results_text.setPlainText(error_msg)
+            self.job_status.set_status("failure", "Unexpected error")
+            self.results_summary.set_summary(
+                "Unexpected error",
+                "Check logs for details",
+                "Run Console",
+            )
+            self.status.error("An unexpected error occurred.")
 
-    def on_pipeline_err(self, err: str):
-        self.results_text.setPlainText(f"Error: {err}")
-        self.job_status.set_status("failed", "Pipeline failed")
-        self.results_summary.set_summary(
-            f"Pipeline failed: {err}",
-            "No output generated",
-            "Run Console",
-        )
-        self.status.error(f"Pipeline error: {err}")
 
 
 # Import here to avoid circular imports

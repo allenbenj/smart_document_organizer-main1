@@ -21,6 +21,7 @@ import json
 import threading  # noqa: E402
 from pathlib import Path  # noqa: E402
 from typing import Any, Dict, List, Optional, Set  # noqa: E402
+import uuid # New import
 
 # Core dependencies
 try:
@@ -72,9 +73,13 @@ from .knowledge_graph_models import (  # noqa: E402
     LegalEntity,
     LegalRelationship,
 )
+from services.contracts.aedis_models import ProvenanceRecord # New import
+from services.provenance_service import ProvenanceGateError, get_provenance_service # New imports for gate enforcement
 
 logger = logging.getLogger(__name__)
 
+# New service instance
+provenance_service = get_provenance_service()
 
 class UnifiedKnowledgeGraphManager:
     """Unified knowledge graph manager with consolidated features."""
@@ -277,8 +282,20 @@ class UnifiedKnowledgeGraphManager:
         jurisdiction: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         entity_id: Optional[str] = None,
+        provenance_record: Optional[ProvenanceRecord] = None, # New parameter
     ) -> str:
         await self._ensure_initialized()
+
+        # Enforce Provenance Gate if provenance_record is provided
+        if provenance_record:
+            # Generate a temporary ID if not provided, for validation purposes
+            temp_entity_id = entity_id or str(uuid.uuid4())
+            provenance_service.validate_write_gate(
+                provenance_record,
+                "knowledge_entity",
+                temp_entity_id, # Use temporary ID for validation
+            )
+
         entity = LegalEntity(
             id=entity_id or f"ent_{len(self._entities) + 1}",
             name=name,
@@ -314,8 +331,72 @@ class UnifiedKnowledgeGraphManager:
                     await db.commit()
             except Exception as e:
                 self.logger.warning(f"Failed persisting entity {entity.id}: {e}")
+                if provenance_record: # If provenance was attempted, and persistence failed, it's a gate failure.
+                    raise ProvenanceGateError(f"Persistence failed for provenanced entity {entity.id}: {e}")
 
+        # Record Provenance after successful entity persistence
+        if provenance_record:
+            try:
+                prov_id = provenance_service.record_provenance(
+                    provenance_record,
+                    "knowledge_entity",
+                    entity.id,
+                )
+                # You might want to store this prov_id in the entity's metadata for retrieval
+                entity.metadata["provenance_id"] = prov_id
+                # And update the entity in DB to store this
+                if self.enable_persistence and AIOSQLITE_AVAILABLE:
+                    async with aiosqlite.connect(self.db_path) as db:
+                        await db.execute(
+                            "UPDATE entities SET metadata_json = ? WHERE id = ?",
+                            (json.dumps(entity.metadata), entity.id),
+                        )
+                        await db.commit()
+            except ProvenanceGateError as e:
+                self.logger.error(f"Provenance gate failed after entity {entity.id} persistence: {e}. Deleting entity.")
+                # If provenance record fails, delete the entity to enforce fail-closed
+                await self.delete_entity(entity.id)
+                raise
+            except Exception as e:
+                self.logger.exception(f"Unexpected error recording provenance for entity {entity.id}: {e}. Deleting entity.")
+                await self.delete_entity(entity.id)
+                raise
         return entity.id
+
+    async def delete_entity(self, entity_id: str) -> bool:
+        await self._ensure_initialized()
+        if entity_id not in self._entities:
+            return False
+
+        # Remove from in-memory stores
+        entity = self._entities.pop(entity_id)
+        self._entities_by_type.get(entity.entity_type, set()).discard(entity_id)
+        if self._networkx_graph is not None:
+            self._networkx_graph.remove_node(entity_id)
+
+        # Remove from persistent store
+        if self.enable_persistence and AIOSQLITE_AVAILABLE:
+            try:
+                async with aiosqlite.connect(self.db_path) as db:
+                    await db.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+                    await db.commit()
+            except Exception as e:
+                self.logger.warning(f"Failed deleting entity {entity_id} from DB: {e}")
+                return False
+        
+        # Also delete any linked provenance records
+        try:
+            # We don't have a direct provenance_id stored in the entity table itself
+            # so we'll query the links table directly to find and delete.
+            # This is a bit of a hack without a foreign key.
+            prov_service = get_provenance_service()
+            if prov_service:
+                await prov_service.delete_provenance_links_for_target("knowledge_entity", entity_id)
+                # Note: delete_provenance_links_for_target needs to be implemented in provenance_service
+        except Exception as e:
+            self.logger.warning(f"Failed deleting provenance links for entity {entity_id}: {e}")
+
+        return True
 
     async def list_entities(self, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
         await self._ensure_initialized()
@@ -339,8 +420,19 @@ class UnifiedKnowledgeGraphManager:
         relation_type: str,
         metadata: Optional[Dict[str, Any]] = None,
         relationship_id: Optional[str] = None,
+        provenance_record: Optional[ProvenanceRecord] = None, # New parameter
     ) -> str:
         await self._ensure_initialized()
+
+        # Enforce Provenance Gate if provenance_record is provided
+        if provenance_record:
+            temp_relationship_id = relationship_id or str(uuid.uuid4()) # Generate a temporary ID if not provided
+            provenance_service.validate_write_gate(
+                provenance_record,
+                "knowledge_relationship",
+                temp_relationship_id, # Use temporary ID for validation
+            )
+
         relation_enum = self._normalize_relation_type(relation_type)
         rel_metadata = dict(metadata or {})
         if relation_enum is RelationType.RELATED_TO and relation_type:
@@ -389,8 +481,68 @@ class UnifiedKnowledgeGraphManager:
                 self.logger.warning(
                     f"Failed persisting relationship {relationship.id}: {e}"
                 )
+                if provenance_record:
+                    raise ProvenanceGateError(f"Persistence failed for provenanced relationship {relationship.id}: {e}")
+
+        # Record Provenance after successful relationship persistence
+        if provenance_record:
+            try:
+                prov_id = provenance_service.record_provenance(
+                    provenance_record,
+                    "knowledge_relationship",
+                    relationship.id,
+                )
+                relationship.metadata["provenance_id"] = prov_id
+                if self.enable_persistence and AIOSQLITE_AVAILABLE:
+                    async with aiosqlite.connect(self.db_path) as db:
+                        await db.execute(
+                            "UPDATE relationships SET metadata_json = ? WHERE id = ?",
+                            (json.dumps(relationship.metadata), relationship.id),
+                        )
+                        await db.commit()
+            except ProvenanceGateError as e:
+                self.logger.error(f"Provenance gate failed after relationship {relationship.id} persistence: {e}. Deleting relationship.")
+                await self.delete_relationship(relationship.id)
+                raise
+            except Exception as e:
+                self.logger.exception(f"Unexpected error recording provenance for relationship {relationship.id}: {e}. Deleting relationship.")
+                await self.delete_relationship(relationship.id)
+                raise
 
         return relationship.id
+
+    async def delete_relationship(self, relationship_id: str) -> bool:
+        await self._ensure_initialized()
+        if relationship_id not in self._relationships:
+            return False
+
+        # Remove from in-memory stores
+        rel = self._relationships.pop(relationship_id)
+        self._relationships_by_type.get(rel.relation_type, set()).discard(relationship_id)
+        if self._networkx_graph is not None:
+            # networkx remove_edge requires source, target, and key
+            if self._networkx_graph.has_edge(rel.source_id, rel.target_id, key=relationship_id):
+                self._networkx_graph.remove_edge(rel.source_id, rel.target_id, key=relationship_id)
+
+        # Remove from persistent store
+        if self.enable_persistence and AIOSQLITE_AVAILABLE:
+            try:
+                async with aiosqlite.connect(self.db_path) as db:
+                    await db.execute("DELETE FROM relationships WHERE id = ?", (relationship_id,))
+                    await db.commit()
+            except Exception as e:
+                self.logger.warning(f"Failed deleting relationship {relationship_id} from DB: {e}")
+                return False
+        
+        # Also delete any linked provenance records
+        try:
+            prov_service = get_provenance_service()
+            if prov_service:
+                await prov_service.delete_provenance_links_for_target("knowledge_relationship", relationship_id)
+        except Exception as e:
+            self.logger.warning(f"Failed deleting provenance links for relationship {relationship_id}: {e}")
+
+        return True
 
     async def list_relationships(
         self, limit: int = 50, offset: int = 0

@@ -75,7 +75,9 @@ class OrganizationService:
             try:
                 callback(job)
             except Exception as e:
-                logger.error(f"[OrgService] Observer error: {e}")
+                # Log the exception, but don't re-raise as one observer's failure shouldn't stop others
+                job_id_info = f" for job {job.id}" if job and job.id else ""
+                logger.exception("[OrgService] Observer error%s: %s", job_id_info, e)
 
     def register_worker(self, job_id: str, worker: Any):
         """Register a worker thread to be managed by the service."""

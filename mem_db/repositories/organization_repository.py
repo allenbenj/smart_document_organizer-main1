@@ -117,6 +117,16 @@ class OrganizationRepository(BaseRepository):
 
         return self.write_with_retry(_op)
 
+    def delete_proposal(self, proposal_id: int) -> bool:
+        def _op(conn: Any) -> bool:
+            cur = conn.execute(
+                "DELETE FROM organization_proposals WHERE id = ?",
+                (proposal_id,),
+            )
+            return (cur.rowcount or 0) > 0
+
+        return self.write_with_retry(_op)
+
     def add_feedback(self, feedback: Dict[str, Any]) -> int:
         def _op(conn: Any) -> int:
             cur = conn.execute(

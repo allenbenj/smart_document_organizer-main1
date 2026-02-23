@@ -69,6 +69,21 @@ async def run_entity_extraction(
         if isinstance(extraction_result.get("extraction_stats"), dict)
         else {}
     )
+    extraction_methods_used = (
+        extraction_result.get("extraction_methods_used")
+        if isinstance(extraction_result.get("extraction_methods_used"), list)
+        else []
+    )
+    validation_results = (
+        extraction_result.get("validation_results")
+        if isinstance(extraction_result.get("validation_results"), dict)
+        else {}
+    )
+    if not extraction_stats:
+        extraction_stats = {
+            "entity_count": len(entities),
+            "relationship_count": len(relationships),
+        }
 
     out = {
         "success": success,
@@ -77,6 +92,8 @@ async def run_entity_extraction(
             "entities": entities,
             "relationships": relationships,
             "extraction_stats": extraction_stats,
+            "extraction_methods_used": extraction_methods_used,
+            "validation_results": validation_results,
         },
         "error": error,
         "processing_time": processing_time,

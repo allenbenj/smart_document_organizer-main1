@@ -40,13 +40,15 @@ except ImportError:
 
 try:
     import faiss  # noqa: E402
-    import numpy as np  # noqa: E402
+    import numpy as np  # noqa: E402 # Make numpy always available
+    from sklearn.cluster import MiniBatchKMeans # For clustering
 
     FAISS_AVAILABLE = True
 except ImportError:
     FAISS_AVAILABLE = False
     faiss = None
     np = None
+    MiniBatchKMeans = None
 
 try:
     import aiosqlite  # noqa: E402
@@ -65,6 +67,17 @@ from .memory_interfaces import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+def _blob_to_numpy(blob_data: bytes) -> Optional[np.ndarray]:
+    """Converts BLOB data from SQLite to a NumPy array."""
+    if np is None or blob_data is None:
+        return None
+    try:
+        # Assuming the BLOB stores float32 values
+        return np.frombuffer(blob_data, dtype=np.float32)
+    except Exception as e:
+        logger.error(f"Failed to convert BLOB to NumPy array: {e}")
+        return None
 
 
 class UnifiedMemoryManager(MemoryProvider):
@@ -131,9 +144,7 @@ class UnifiedMemoryManager(MemoryProvider):
                 db.row_factory = aiosqlite.Row
                 yield db
         else:
-            # This part is tricky because the rest of the code uses async.
-            # A proper solution would be to use a thread pool for sync operations.
-            # For now, we'll just connect directly, but this will block.
+            # Fallback path when aiosqlite is unavailable; direct sqlite access may block.
             logger.warning(
                 "aiosqlite not found, using synchronous sqlite3 which will block."
             )
@@ -205,7 +216,8 @@ class UnifiedMemoryManager(MemoryProvider):
             confidence_score REAL DEFAULT 1.0,
             access_count INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            embedding_vector BLOB -- Add embedding_vector column
         );
 
         CREATE INDEX IF NOT EXISTS idx_memory_type ON memory_records(memory_type);
@@ -220,6 +232,21 @@ class UnifiedMemoryManager(MemoryProvider):
             relevance_score REAL DEFAULT 1.0,
             FOREIGN KEY (source_record_id) REFERENCES memory_records(record_id)
         );
+
+        CREATE TABLE IF NOT EXISTS memory_code_links (
+            memory_record_id TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            relation_type TEXT NOT NULL DEFAULT 'references',
+            confidence REAL NOT NULL DEFAULT 1.0,
+            source TEXT NOT NULL DEFAULT 'system',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(memory_record_id, file_path, relation_type)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_memory_code_links_file_path
+            ON memory_code_links(file_path);
+        CREATE INDEX IF NOT EXISTS idx_memory_code_links_memory_record_id
+            ON memory_code_links(memory_record_id);
         """
         async with self._get_db_connection() as db:
             if self._async_db:
@@ -294,8 +321,8 @@ class UnifiedMemoryManager(MemoryProvider):
         query = """
         INSERT OR REPLACE INTO memory_records
         (record_id, namespace, key, content, memory_type, agent_id, document_id,
-         metadata, importance_score, confidence_score, access_count, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         metadata, importance_score, confidence_score, access_count, created_at, updated_at, embedding_vector)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
         params = (
             record.record_id,
@@ -311,6 +338,7 @@ class UnifiedMemoryManager(MemoryProvider):
             record.access_count,
             record.created_at.isoformat(),
             record.updated_at.isoformat(),
+            record.embedding_vector.tobytes() if record.embedding_vector is not None else None,
         )
         await db.execute(query, params)
 
@@ -327,15 +355,18 @@ class UnifiedMemoryManager(MemoryProvider):
             "agent_id": record.agent_id or "",
             "document_id": record.document_id or "",
         }
-        self._vector_collection.upsert(
-            documents=[record.content], metadatas=[metadata], ids=[record.record_id]
-        )
+        # ChromaDB expects embeddings as list of floats
+        embeddings_list = record.embedding_vector.tolist() if record.embedding_vector is not None else None
+        if embeddings_list:
+            self._vector_collection.upsert(
+                embeddings=[embeddings_list], metadatas=[metadata], ids=[record.record_id]
+            )
+        else:
+            logger.warning(f"No embedding to store for record {record.record_id} in ChromaDB.")
+
 
     async def _store_faiss(self, record: MemoryRecord) -> None:
-        # This requires an embedding function to be available
-        # For now, this is a placeholder for the logic.
-        # embeddings = self._get_embedding(record.content)
-        # self._vector_store.add(embeddings)
+        # FAISS persistence requires embedding generation wiring.
         logger.warning("FAISS storage logic is not fully implemented.")
 
     async def retrieve(self, record_id: str) -> Optional[MemoryRecord]:
@@ -542,6 +573,7 @@ class UnifiedMemoryManager(MemoryProvider):
             access_count=row["access_count"],
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+            embedding_vector=_blob_to_numpy(row["embedding_vector"]),
         )
 
     def _manage_cache(self):
@@ -679,6 +711,294 @@ class UnifiedMemoryManager(MemoryProvider):
             ),
             "system_stats": self._stats,
         }
+
+    async def link_memory_to_file(
+        self,
+        memory_record_id: str,
+        file_path: str,
+        relation_type: str = "references",
+        confidence: float = 1.0,
+        source: str = "system",
+    ) -> bool:
+        """Create or update a memory-to-file edge link."""
+        if not self._initialized:
+            await self.initialize()
+        if not memory_record_id or not file_path:
+            logger.warning("Cannot link memory to file with empty identifiers")
+            return False
+
+        async with self._get_db_connection() as db:
+            exists_cursor = await db.execute(
+                "SELECT 1 FROM memory_records WHERE record_id = ?",
+                (memory_record_id,),
+            )
+            if not await exists_cursor.fetchone():
+                logger.warning(
+                    "Cannot create memory link; record not found: %s", memory_record_id
+                )
+                return False
+
+            await db.execute(
+                """
+                INSERT INTO memory_code_links
+                    (memory_record_id, file_path, relation_type, confidence, source)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(memory_record_id, file_path, relation_type)
+                DO UPDATE SET
+                    confidence=excluded.confidence,
+                    source=excluded.source,
+                    created_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    memory_record_id,
+                    file_path,
+                    relation_type,
+                    float(confidence),
+                    source,
+                ),
+            )
+            await db.commit()
+        return True
+
+    async def get_memories_for_file(
+        self, file_path: str, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Return memory records linked to a file path, including edge metadata."""
+        if not self._initialized:
+            await self.initialize()
+        if not file_path:
+            return []
+
+        out: List[Dict[str, Any]] = []
+        async with self._get_db_connection() as db:
+            cursor = await db.execute(
+                """
+                SELECT
+                    l.memory_record_id,
+                    l.file_path,
+                    l.relation_type,
+                    l.confidence,
+                    l.source,
+                    l.created_at AS linked_at,
+                    m.namespace,
+                    m.key,
+                    m.content,
+                    m.memory_type,
+                    m.agent_id,
+                    m.document_id,
+                    m.metadata,
+                    m.importance_score,
+                    m.confidence_score,
+                    m.updated_at,
+                    m.embedding_vector
+                FROM memory_code_links l
+                JOIN memory_records m ON m.record_id = l.memory_record_id
+                WHERE l.file_path = ?
+                ORDER BY l.confidence DESC, l.created_at DESC
+                LIMIT ?
+                """,
+                (file_path, limit),
+            )
+            rows = await cursor.fetchall()
+
+        for row in rows:
+            out.append(
+                {
+                    "memory_record_id": row["memory_record_id"],
+                    "file_path": row["file_path"],
+                    "relation_type": row["relation_type"],
+                    "link_confidence": row["confidence"],
+                    "link_source": row["source"],
+                    "linked_at": row["linked_at"],
+                    "namespace": row["namespace"],
+                    "key": row["key"],
+                    "content": row["content"],
+                    "memory_type": row["memory_type"],
+                    "agent_id": row["agent_id"],
+                    "document_id": row["document_id"],
+                    "metadata": json.loads(row["metadata"] or "{}"),
+                    "importance_score": row["importance_score"],
+                    "confidence_score": row["confidence_score"],
+                    "updated_at": row["updated_at"],
+                    "embedding_vector": _blob_to_numpy(row["embedding_vector"]),
+                }
+            )
+        return out
+
+    async def get_files_for_memory(
+        self, memory_record_id: str, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """Return file links associated with a memory record."""
+        if not self._initialized:
+            await self.initialize()
+        if not memory_record_id:
+            return []
+
+        out: List[Dict[str, Any]] = []
+        async with self._get_db_connection() as db:
+            cursor = await db.execute(
+                """
+                SELECT
+                    memory_record_id,
+                    file_path,
+                    relation_type,
+                    confidence,
+                    source,
+                    created_at
+                FROM memory_code_links
+                WHERE memory_record_id = ?
+                ORDER BY confidence DESC, created_at DESC
+                LIMIT ?
+                """,
+                (memory_record_id, limit),
+            )
+            rows = await cursor.fetchall()
+
+        for row in rows:
+            out.append(
+                {
+                    "memory_record_id": row["memory_record_id"],
+                    "file_path": row["file_path"],
+                    "relation_type": row["relation_type"],
+                    "link_confidence": row["confidence"],
+                    "link_source": row["source"],
+                    "linked_at": row["created_at"],
+                }
+            )
+        return out
+
+    async def cluster_memories(
+        self,
+        n_clusters: int = 5,
+        limit: int = 1000,
+        memory_type: Optional[MemoryType] = None,
+        namespace: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Clusters memory records based on their embedding vectors.
+        Returns a list of clusters, each containing memory records and their cluster label.
+        """
+        if not self._initialized:
+            await self.initialize()
+        if np is None or MiniBatchKMeans is None:
+            logger.warning("NumPy or MiniBatchKMeans not available for clustering.")
+            return []
+
+        # Fetch memory records with embeddings
+        records = await self.get_all_records(
+            memory_type=memory_type, namespace=namespace, limit=limit
+        )
+        
+        # Filter records that have embeddings
+        records_with_embeddings = [r for r in records if r.embedding_vector is not None]
+        
+        if not records_with_embeddings:
+            logger.info("No memory records with embeddings found for clustering.")
+            return []
+
+        embeddings = np.array([r.embedding_vector for r in records_with_embeddings])
+
+        if embeddings.shape[0] < n_clusters:
+            logger.warning(
+                f"Number of records ({embeddings.shape[0]}) is less than n_clusters ({n_clusters}). "
+                "Returning unclustered records."
+            )
+            # Assign each record to its own cluster if not enough for n_clusters
+            return [
+                {
+                    "cluster_id": i,
+                    "memories": [
+                        {
+                            "record_id": r.record_id,
+                            "namespace": r.namespace,
+                            "key": r.key,
+                            "content": r.content,
+                            "memory_type": r.memory_type.value,
+                            "agent_id": r.agent_id,
+                            "document_id": r.document_id,
+                            "metadata": r.metadata,
+                            "importance_score": r.importance_score,
+                            "confidence_score": r.confidence_score,
+                        }
+                    ],
+                }
+                for i, r in enumerate(records_with_embeddings)
+            ]
+
+        try:
+            # Perform clustering
+            kmeans = MiniBatchKMeans(
+                n_clusters=n_clusters, random_state=0, n_init=10
+            ).fit(embeddings)
+            labels = kmeans.labels_
+
+            # Group memories by cluster
+            clusters: Dict[int, List[Dict[str, Any]]] = {i: [] for i in range(n_clusters)}
+            for i, record in enumerate(records_with_embeddings):
+                clusters[labels[i]].append(
+                    {
+                        "record_id": record.record_id,
+                        "namespace": record.namespace,
+                        "key": record.key,
+                        "content": record.content,
+                        "memory_type": record.memory_type.value,
+                        "agent_id": record.agent_id,
+                        "document_id": record.document_id,
+                        "metadata": record.metadata,
+                        "importance_score": record.importance_score,
+                        "confidence_score": record.confidence_score,
+                    }
+                )
+
+            return [{"cluster_id": k, "memories": v} for k, v in clusters.items()]
+        except Exception as e:
+            logger.error(f"Error during memory clustering: {e}", exc_info=True)
+            return []
+
+    async def summarize_memories(
+        self,
+        memory_records: List[MemoryRecord],
+        summary_type: str = "concise",
+        target_length: int = 150,
+    ) -> Optional[MemoryRecord]:
+        """
+        Summarizes a list of memory records into a new, condensed memory record.
+        Uses deterministic truncation when no external summarizer is configured.
+        """
+        if not memory_records:
+            return None
+
+        # Combine content from multiple memory records
+        combined_content = "\n".join([rec.content for rec in memory_records])
+
+        # Deterministic fallback summarization for runtime safety.
+        summary_content = f"Summary of {len(memory_records)} memories (type: {summary_type}, length: {target_length}):\n" \
+                          f"{combined_content[:target_length*2]}..." # Simple truncation for now
+
+        # Create a new MemoryRecord for the summary
+        summary_record = MemoryRecord(
+            record_id=str(uuid.uuid4()),
+            namespace=memory_records[0].namespace, # Inherit namespace from first record
+            key=f"summary_of_{len(memory_records)}_memories_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            content=summary_content,
+            memory_type=MemoryType.SUMMARY, # New MemoryType for summaries
+            agent_id="system_summarizer",
+            document_id=memory_records[0].document_id if memory_records[0].document_id else None,
+            metadata={
+                "original_record_ids": [rec.record_id for rec in memory_records],
+                "summary_type": summary_type,
+                "target_length": target_length,
+            },
+            importance_score=0.7,
+            confidence_score=0.9,
+        )
+        
+        # Store the new summary record
+        await self.store(summary_record)
+        
+        logger.debug(f"Created summary memory record {summary_record.record_id}")
+        return summary_record
+
 
     async def close(self) -> None:
         async with self._lock:

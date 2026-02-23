@@ -30,6 +30,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QFont, QPalette, QColor
 
+from gui.core.path_config import project_root_path
+
 class StatCard(QFrame):
     """Styled stat card widget"""
     def __init__(self, title, value="0", color="#00ff88"):
@@ -75,7 +77,7 @@ class DatabaseManager:
     
     def _initialize_database_paths(self) -> Dict[str, str]:
         """Initialize database paths relative to project root"""
-        base_dir = os.getcwd()
+        base_dir = str(project_root_path())
         # Create tools/data if it doesn't exist (for file_tracker)
         tools_data = os.path.join(base_dir, "tools", "data")
         os.makedirs(tools_data, exist_ok=True)
@@ -805,26 +807,26 @@ class RealtimeDatabaseMonitor(QMainWindow):
         api_calls = 0
         tokens_used = 0
         cost = 0.0
-        
-        # Determine log path based on platform
-        if self.db_manager.current_platform == "Windows":
-            log_path = r'E:\Coding_Project\bulk_analysis_monitor.log'
+
+        env_log_path = (os.getenv("SMART_DOC_MONITOR_LOG_PATH") or "").strip()
+        if env_log_path:
+            log_path = env_log_path
         else:
-            log_path = '/mnt/e/Coding_Project/bulk_analysis_monitor.log'
-        
+            log_path = str(project_root_path() / "logs" / "bulk_analysis_monitor.log")
+
         try:
-            with open(log_path, 'r') as f:
+            with open(log_path, "r", encoding="utf-8") as f:
                 log_content = f.read()
                 if " API Calls:" in log_content:
-                    lines = log_content.split('\n')
+                    lines = log_content.split("\n")
                     for line in lines:
                         if " API Calls:" in line and "" in line:
                             api_calls = int(line.split('')[1].split()[0])
                         elif " Total Tokens:" in line:
-                            tokens_used = int(line.split(':')[1].strip().replace(',', ''))
+                            tokens_used = int(line.split(":")[1].strip().replace(",", ""))
                         elif " Total Cost:" in line:
-                            cost = float(line.split('$')[1].strip())
-        except:
+                            cost = float(line.split("$")[1].strip())
+        except Exception:
             pass
         
         return api_calls, tokens_used, cost

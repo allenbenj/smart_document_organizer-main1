@@ -1,7 +1,7 @@
-Controlled Hardening Protocol for Software Development
-This is not a feature sprint.
-This is disciplined stabilization.
-The objective: eliminate drift, eliminate reactive patching, eliminate unverified claims.
+#Controlled Hardening Protocol for Software Development
+#This is not a feature sprint.
+#This is disciplined stabilization.
+#The objective: eliminate drift, eliminate reactive patching, eliminate unverified claims.
 Operating Rule
 Development proceeds in strict, single hardening phases.
 No overlapping initiatives.

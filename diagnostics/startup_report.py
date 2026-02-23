@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, List
 
+from diagnostics import data_integrity # Import the new data_integrity module
+
 
 def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -139,6 +141,27 @@ def migration_snapshot() -> dict:
         return {"available": False, "count": 0, "failed": [], "items": [], "error": str(e)}
 
 
+def data_integrity_checks_snapshot() -> dict:
+    unified_memory_db_path = Path("databases") / "unified_memory.db"
+    file_index_db_path = Path("databases") / "file_index.db"
+
+    orphaned_memory_links_check = data_integrity.check_orphaned_memory_links(
+        unified_memory_db_path, file_index_db_path
+    )
+    # Add other checks here as they are implemented
+    
+    overall_status = "healthy"
+    if orphaned_memory_links_check["status"] != "healthy":
+        overall_status = "unhealthy"
+
+    return {
+        "overall_status": overall_status,
+        "checks": {
+            "orphaned_memory_links": orphaned_memory_links_check,
+        }
+    }
+
+
 def build_startup_report(
     *,
     app: Any,
@@ -171,6 +194,7 @@ def build_startup_report(
         "environment": environment_snapshot(),
         "build": build_info(),
         "migrations": migration_snapshot(),
+        "data_integrity": data_integrity_checks_snapshot(), # Add data integrity checks here
         "security": {
             "api_key_required": api_key_enabled,
             "rate_limiter": {

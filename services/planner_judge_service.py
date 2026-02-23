@@ -103,3 +103,24 @@ class PlannerJudgeService:
         )
         self._judge_runs[judge_id] = judge
         return judge
+
+    def get_planner_run(self, run_id: str) -> PlannerRun:
+        if run_id not in self._planner_runs:
+            raise KeyError(f"planner run not found: {run_id}")
+        return self._planner_runs[run_id]
+
+    def get_judge_run(self, run_id: str) -> JudgeRun:
+        if run_id not in self._judge_runs:
+            raise KeyError(f"judge run not found: {run_id}")
+        return self._judge_runs[run_id]
+
+    def get_latest_judge_for_planner(self, planner_run_id: str) -> JudgeRun:
+        candidates = [
+            run
+            for run in self._judge_runs.values()
+            if run.planner_run_id == planner_run_id
+        ]
+        if not candidates:
+            raise KeyError(f"judge run not found for planner run: {planner_run_id}")
+        candidates.sort(key=lambda item: item.created_at)
+        return candidates[-1]

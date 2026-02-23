@@ -79,6 +79,13 @@ class LegalEntityType(Enum):
             "Prosecuting attorney - look for 'DA', 'District Attorney', 'State Attorney'.",
         )
     )
+    DEFENDANT = _EntityMetaHelper(
+        (
+            "Defendant",
+            ["name", "case_id_reference", "charges"],
+            "Accused party in a criminal case - look for 'defendant', 'accused', or named respondent.",
+        )
+    )
     DEFENSECOUNSEL = _EntityMetaHelper(
         (
             "DefenseCounsel",

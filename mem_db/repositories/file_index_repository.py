@@ -173,6 +173,16 @@ class FileIndexRepository(BaseRepository):
                 out.append(item)
             return out
 
+    def update_indexed_file_metadata(self, file_id: int, metadata_json: str) -> bool:
+        """Update only the metadata_json field for a given file_id."""
+        with self.connection() as conn:
+            cursor = conn.execute(
+                "UPDATE files_index SET metadata_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (metadata_json, file_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+
     def replace_file_chunks(self, file_id: int, chunks: List[Dict[str, Any]]) -> List[int]:
         chunk_ids: List[int] = []
         with self.connection() as conn:

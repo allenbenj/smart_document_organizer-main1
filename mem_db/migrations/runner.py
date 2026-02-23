@@ -10,6 +10,10 @@ from typing import Any, Dict, List
 MIGRATION_MODULES = [
     "mem_db.migrations.versions.0001_baseline",
     "mem_db.migrations.versions.0002_legacy_schema_upgrades",
+    "mem_db.migrations.versions.0003_manager_knowledge_jurisdiction",
+    "mem_db.migrations.versions.0004_learning_path_storage",
+    "mem_db.migrations.versions.0005_memory_code_links",
+    "mem_db.migrations.versions.0006_ai_model_version",
 ]
 
 

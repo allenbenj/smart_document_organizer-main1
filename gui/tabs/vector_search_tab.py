@@ -20,32 +20,38 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from typing import Optional, Any # Added Optional and Any
+import logging
+import json
 
 try:
     import requests
+    import requests.exceptions
 except ImportError:
     requests = None  # type: ignore
 
 from ..services import api_client
+from gui.core.base_tab import BaseTab
+
+logger = logging.getLogger(__name__)
 
 
-class VectorSearchTab(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.init_ui()
+class VectorSearchTab(BaseTab):
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Vector Search", asyncio_thread, parent)
+        self.setup_ui()
         # Defer the API call so the UI appears immediately
         QTimer.singleShot(0, self._refresh_status_banner)
 
-    def init_ui(self):
-        layout = QVBoxLayout()
+    def setup_ui(self):
         self.status_banner = QLabel("")
         self.status_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.status_banner.setStyleSheet("QLabel { color: #c0392b; margin: 6px; }")
-        layout.addWidget(self.status_banner)
+        self.main_layout.addWidget(self.status_banner)
         title = QLabel("Vector Search")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
 
         input_group = QGroupBox("Query Text")
         input_layout = QVBoxLayout()
@@ -77,10 +83,9 @@ class VectorSearchTab(QWidget):
         results_layout.addWidget(self.results_table)
         results_group.setLayout(results_layout)
 
-        layout.addWidget(input_group)
-        layout.addWidget(actions_group)
-        layout.addWidget(results_group)
-        self.setLayout(layout)
+        self.main_layout.addWidget(input_group)
+        self.main_layout.addWidget(actions_group)
+        self.main_layout.addWidget(results_group)
 
         # Connect button signals here so they are always wired up
         self.search_btn.clicked.connect(self.do_search)
@@ -101,8 +106,8 @@ class VectorSearchTab(QWidget):
                 )
                 self.status_banner.show()
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Error refreshing vector status banner: %s", e)
         self.status_banner.setText("")
         self.status_banner.hide()
 
@@ -129,5 +134,11 @@ class VectorSearchTab(QWidget):
                 self.results_table.setItem(
                     i, 2, QTableWidgetItem(str(item.get("document_type", "")))
                 )
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
+            QMessageBox.critical(self, "Search Error", f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            QMessageBox.critical(self, "Search Error", f"Invalid API response: {e}")
+        except RuntimeError as e: # Catch custom RuntimeError
             QMessageBox.critical(self, "Search Error", str(e))
+        except Exception as e:
+            QMessageBox.critical(self, "Search Error", f"An unexpected error occurred: {e}")

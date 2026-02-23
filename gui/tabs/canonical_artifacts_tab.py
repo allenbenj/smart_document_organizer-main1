@@ -16,22 +16,21 @@ from PySide6.QtWidgets import (
 )
 
 from ..services import api_client
+from gui.core.base_tab import BaseTab
 
 
-class CanonicalArtifactsTab(QWidget):
+class CanonicalArtifactsTab(BaseTab):
     """GUI connector for immutable canonical artifacts and lineage events."""
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Canonical Artifacts", asyncio_thread, parent)
         self._setup_ui()
         self._connect_signals()
 
-    def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
-
+    def setup_ui(self) -> None:
         title = QLabel("Canonical Artifacts")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
 
         ingest_group = QGroupBox("Ingest Immutable Artifact")
         ingest_layout = QVBoxLayout(ingest_group)
@@ -52,7 +51,7 @@ class CanonicalArtifactsTab(QWidget):
 
         self.ingest_button = QPushButton("Ingest Canonical Artifact")
         ingest_layout.addWidget(self.ingest_button)
-        layout.addWidget(ingest_group)
+        self.main_layout.addWidget(ingest_group)
 
         lineage_group = QGroupBox("Lineage")
         lineage_layout = QVBoxLayout(lineage_group)
@@ -78,13 +77,13 @@ class CanonicalArtifactsTab(QWidget):
         button_row.addWidget(self.load_lineage_button)
         lineage_layout.addLayout(button_row)
 
-        layout.addWidget(lineage_group)
+        self.main_layout.addWidget(lineage_group)
 
         self.output = QTextBrowser()
         self.output.setOpenExternalLinks(False)
-        layout.addWidget(self.output)
+        self.main_layout.addWidget(self.output)
 
-    def _connect_signals(self) -> None:
+    def connect_signals(self) -> None:
         self.ingest_button.clicked.connect(self.ingest_canonical_artifact)
         self.append_lineage_button.clicked.connect(self.append_lineage_event)
         self.load_lineage_button.clicked.connect(self.load_lineage)

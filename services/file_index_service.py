@@ -581,6 +581,7 @@ class FileIndexService:
         max_files: int = 5000,
         max_depth: Optional[int] = None,
         max_runtime_seconds: Optional[float] = None,
+        start_after_path: Optional[str] = None,
         follow_symlinks: bool = False,
         progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
         should_stop: Optional[Callable[[], bool]] = None,
@@ -600,6 +601,8 @@ class FileIndexService:
         effective_exts = {e.lower() for e in (allowed_exts or DEFAULT_DOC_EXTS)}
         started_monotonic = time.monotonic()
         visited_dirs: set[str] = set()
+        cursor = normalize_runtime_path(start_after_path or "") if start_after_path else ""
+        last_processed_path: Optional[str] = None
 
         for root in roots:
             root_norm = normalize_runtime_path(root)
@@ -649,7 +652,17 @@ class FileIndexService:
 
             for dirpath, dirnames, filenames in walker:
                 if max_runtime_seconds is not None and (time.monotonic() - started_monotonic) >= float(max_runtime_seconds):
-                    return {"success": True, "indexed": indexed, "errors": errors, "scanned": scanned, "skipped": skipped, "truncated": True, "runtime_budget_hit": True, "dedupe": self.db.refresh_exact_duplicate_relationships()}
+                    return {
+                        "success": True,
+                        "indexed": indexed,
+                        "errors": errors,
+                        "scanned": scanned,
+                        "skipped": skipped,
+                        "truncated": True,
+                        "runtime_budget_hit": True,
+                        "next_cursor": last_processed_path or cursor or None,
+                        "dedupe": self.db.refresh_exact_duplicate_relationships(),
+                    }
 
                 try:
                     real_dir = os.path.realpath(dirpath)
@@ -665,6 +678,8 @@ class FileIndexService:
                     depth = 0 if rel == "." else rel.count(os.sep) + 1
                     if depth >= int(max_depth):
                         dirnames[:] = []
+                dirnames.sort()
+                filenames.sort()
 
                 for name in filenames:
                     if should_stop and should_stop():
@@ -675,6 +690,7 @@ class FileIndexService:
                             "scanned": scanned,
                             "truncated": False,
                             "cancelled": True,
+                            "next_cursor": last_processed_path or cursor or None,
                             "dedupe": self.db.refresh_exact_duplicate_relationships(),
                         }
 
@@ -685,6 +701,7 @@ class FileIndexService:
                             "errors": errors,
                             "scanned": scanned,
                             "truncated": True,
+                            "next_cursor": last_processed_path or cursor or None,
                             "dedupe": self.db.refresh_exact_duplicate_relationships(),
                         }
 
@@ -692,10 +709,14 @@ class FileIndexService:
                     if progress_cb and scanned % 100 == 0:
                         progress_cb({"stage": "index", "scanned": scanned, "indexed": indexed, "errors": errors})
                     p = Path(dirpath) / name
+                    p_str = normalize_runtime_path(str(p))
+                    if cursor and p_str <= cursor:
+                        skipped += 1
+                        continue
+                    last_processed_path = p_str
                     if p.is_symlink() and not follow_symlinks:
                         skipped += 1
                         continue
-                    p_str = str(p)
                     ext = p.suffix.lower()
                     if ext not in effective_exts:
                         continue
@@ -805,6 +826,7 @@ class FileIndexService:
             "scanned": scanned,
             "skipped": skipped,
             "truncated": False,
+            "next_cursor": None,
             "dedupe": dedupe,
         }
 

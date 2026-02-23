@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from typing import Any, Optional
 
 try:
     import requests
@@ -26,19 +27,19 @@ except ImportError:
     requests = None  # type: ignore
 
 from ..services import api_client
+from gui.core.base_tab import BaseTab
 
 
-class ExpertPromptsTab(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.init_ui()
+class ExpertPromptsTab(BaseTab):
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Expert Prompts", asyncio_thread, parent)
+        self.setup_ui()
 
-    def init_ui(self):
-        layout = QVBoxLayout()
+    def setup_ui(self):
         title = QLabel("Expert Prompt Builder")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
 
         form_group = QGroupBox("Build Prompt")
         form_layout = QVBoxLayout()
@@ -85,9 +86,8 @@ class ExpertPromptsTab(QWidget):
         result_layout.addWidget(self.prompt_view)
         result_group.setLayout(result_layout)
 
-        layout.addWidget(form_group)
-        layout.addWidget(result_group)
-        self.setLayout(layout)
+        self.main_layout.addWidget(form_group)
+        self.main_layout.addWidget(result_group)
 
         self.gen_btn.clicked.connect(self.generate)
         self.clear_btn.clicked.connect(

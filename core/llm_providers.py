@@ -17,6 +17,7 @@ import httpx
 class LLMProviderEnum(str, Enum):
     XAI = "xai"
     DEEPSEEK = "deepseek"
+    OLLAMA = "ollama"
 
     @classmethod
     def _missing_(cls, value: object) -> "LLMProviderEnum | None":
@@ -133,6 +134,19 @@ class LLMManager:
                 payload["temperature"] = temperature
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             url = f"{base_url.rstrip('/')}/chat/completions"
+        elif active_provider is LLMProviderEnum.OLLAMA:
+            base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/api").strip()
+            payload = {
+                "model": model or os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b"),
+                "prompt": prompt,
+                "stream": False,
+            }
+            if system_prompt:
+                payload["system"] = system_prompt
+            if temperature is not None:
+                payload["options"] = {"temperature": temperature}
+            headers = {"Content-Type": "application/json"}
+            url = f"{base_url.rstrip('/')}/generate"
         else:
             raise ValueError(f"Unsupported provider: {active_provider}")
 
@@ -174,6 +188,8 @@ class LLMManager:
             data = response.json()
             if active_provider is LLMProviderEnum.DEEPSEEK:
                 content = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            elif active_provider is LLMProviderEnum.OLLAMA:
+                content = data.get("response", "")
             else:
                 content = self._extract_output_text(data)
             return LLMCompletion(
@@ -235,6 +251,19 @@ class LLMManager:
                 payload["temperature"] = temperature
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             url = f"{base_url.rstrip('/')}/chat/completions"
+        elif active_provider is LLMProviderEnum.OLLAMA:
+            base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/api").strip()
+            payload = {
+                "model": model or os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b"),
+                "prompt": prompt,
+                "stream": False,
+            }
+            if system_prompt:
+                payload["system"] = system_prompt
+            if temperature is not None:
+                payload["options"] = {"temperature": temperature}
+            headers = {"Content-Type": "application/json"}
+            url = f"{base_url.rstrip('/')}/generate"
         else:
             raise ValueError(f"Unsupported provider: {active_provider}")
 
@@ -244,6 +273,8 @@ class LLMManager:
             data = response.json()
             if active_provider is LLMProviderEnum.DEEPSEEK:
                 content = (((data or {}).get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            elif active_provider is LLMProviderEnum.OLLAMA:
+                content = data.get("response", "")
             else:
                 content = self._extract_output_text(data)
             return LLMCompletion(

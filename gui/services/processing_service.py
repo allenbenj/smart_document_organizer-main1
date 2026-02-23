@@ -11,6 +11,9 @@ from enum import Enum
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+import logging
+
+logger = logging.getLogger(__name__)
 
 from . import api_client
 
@@ -63,7 +66,8 @@ class DocumentProcessingService:
             try:
                 callback(job)
             except Exception as e:
-                print(f"[ProcessingService] Observer error: {e}")
+                # Log the exception, but don't re-raise as one observer's failure shouldn't stop others
+                logger.exception("[ProcessingService] Observer error for job %s: %s", job.id, e)
 
     async def run_batch(self, files: List[str], options: Optional[Dict] = None) -> str:
         """

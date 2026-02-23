@@ -64,6 +64,7 @@ class ProductionAgentManager(
 
         self._init_lock = threading.Lock()
         self._async_init_lock: Optional[asyncio.Lock] = None
+        self._initialization_task: Optional[asyncio.Task[None]] = None
 
         if PRODUCTION_AGENTS_AVAILABLE:
             self.logger.info("ProductionAgentManager created. Call initialize() to start.")
@@ -71,14 +72,13 @@ class ProductionAgentManager(
             self.logger.error("Production agents are not available; manager disabled")
 
     async def initialize(self) -> bool:
-        """Initialize the production agent system exactly once."""
+        """Initialize the production agent system exactly once (supporting background boot)."""
         if self.is_initialized:
             return True
 
         with self._init_lock:
-            if self._initialization_started:
-                return self.is_initialized
-            self._initialization_started = True
+            if not self._initialization_started:
+                self._initialization_started = True
 
         if self._async_init_lock is None:
             self._async_init_lock = asyncio.Lock()
@@ -88,8 +88,12 @@ class ProductionAgentManager(
                 return True
 
             if PRODUCTION_AGENTS_AVAILABLE:
-                await self._initialize_production_system()
-                return self.is_initialized
+                # Trigger background initialization once; callers can poll is_initialized.
+                if self._initialization_task is None or self._initialization_task.done():
+                    self._initialization_task = asyncio.create_task(
+                        self._initialize_production_system(),
+                    )
+                return True # Report success to let API start
 
             self.logger.error("Production agents not available")
             return False

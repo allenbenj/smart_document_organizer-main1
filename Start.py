@@ -826,7 +826,7 @@ def _is_headless_runtime() -> bool:
     has_display = bool(os.getenv("DISPLAY")) or bool(os.getenv("WAYLAND_DISPLAY"))
     if not has_display:
         return True
-    return _is_wsl_runtime()
+    return False
 
 
 def _resolve_launch_mode(
@@ -1099,6 +1099,26 @@ if __name__ == "__main__":
 
     if selected_mode == "backend":
         import uvicorn  # noqa: E402
+        
+        # --- Port Sovereignty: Self-Healing Port Lock ---
+        def _clear_port(port: int):
+            import subprocess
+            if os.name != "nt":
+                return
+            try:
+                # Find PIDs on the target port
+                cmd = f"netstat -ano | findstr :{port} | findstr LISTENING"
+                output = subprocess.check_output(cmd, shell=True).decode()
+                for line in output.splitlines():
+                    if "LISTENING" in line:
+                        pid = line.strip().split()[-1]
+                        if pid and int(pid) > 0:
+                            logger.info(f"Port {port} occupied by PID {pid}. Reclaiming...")
+                            subprocess.run(f"taskkill /F /PID {pid}", shell=True, check=False)
+            except Exception:
+                pass # Port likely clear or netstat failed
+
+        _clear_port(8000)
 
         logger.info("Starting backend API on port 8000 (profile=%s)...", STARTUP_PROFILE)
         uvicorn.run(app, host="0.0.0.0", port=8000)
@@ -1137,8 +1157,11 @@ if __name__ == "__main__":
         os.environ["GUI_SKIP_WSL_BACKEND_START"] = "1"
         logger.info("Starting GUI dashboard...")
         try:
-            from gui.gui_dashboard import main as gui_main  # noqa: E402
-
+            try:
+                from gui.professional_manager import main as gui_main  # noqa: E402
+            except ImportError:
+                # Legacy compatibility path while gui_dashboard wrapper still exists.
+                from gui.gui_dashboard import launch_professional_manager as gui_main  # type: ignore # noqa: E402
             gui_main()
         except Exception:
             logger.exception("Failed to start GUI dashboard")

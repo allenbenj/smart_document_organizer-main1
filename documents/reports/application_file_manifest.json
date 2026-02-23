@@ -1,0 +1,186 @@
+[
+  {
+    "path": "Start.py",
+    "purpose": "main entry point; parses CLI flags, configures logging/env, initializes FastAPI app and optionally launches GUI"
+  },
+  {
+    "path": "launch.py",
+    "purpose": "helper for programmatic startup; builds subprocess commands used by tests and installers"
+  },
+  {
+    "path": "config/configuration_manager.py",
+    "purpose": "loads .env and other configuration sources; exposes typed settings objects"
+  },
+  {
+    "path": "config/extraction_patterns.py",
+    "purpose": "contains regex/heuristics for document text extraction"
+  },
+  {
+    "path": "config/file_tagging_rules.json",
+    "purpose": "static rules used to tag/organize incoming documents"
+  },
+  {
+    "path": "core/llm_providers.py",
+    "purpose": "abstraction over external LLM APIs (xAI, OpenAI, etc.)"
+  },
+  {
+    "path": "core/load_template.py",
+    "purpose": "utility to lazily import/instantiate models and pipelines"
+  },
+  {
+    "path": "core/ml_optimization.py",
+    "purpose": "logic for tuning model parameters and caching"
+  },
+  {
+    "path": "core/refactor_tools.py",
+    "purpose": "assist with automatic code refactoring tasks"
+  },
+  {
+    "path": "core/service_integration.py",
+    "purpose": "startup registrations for background services/agents"
+  },
+  {
+    "path": "core/tracing.py",
+    "purpose": "OpenTelemetry instrumentation helpers"
+  },
+  {
+    "path": "core/workflow.py",
+    "purpose": "defines workflow engine and step management"
+  },
+  {
+    "path": "agents/production_agent_manager.py",
+    "purpose": "manages lifecycle of production agents (document_processor, entity_extractor, etc.)"
+  },
+  {
+    "path": "agents/memory.py",
+    "purpose": "persist and recall conversation or document memory"
+  },
+  {
+    "path": "routes/health.py",
+    "purpose": "FastAPI health/startup endpoints"
+  },
+  {
+    "path": "routes/pipeline.py",
+    "purpose": "HTTP endpoints that wrap pipeline execution"
+  },
+  {
+    "path": "routes/documents.py",
+    "purpose": "API for uploading, processing and querying documents"
+  },
+  {
+    "path": "routes/agents.py",
+    "purpose": "agent control endpoints (start/stop/list)"
+  },
+  {
+    "path": "routes/files.py",
+    "purpose": "static file serving and download helpers"
+  },
+  {
+    "path": "routes/organization.py",
+    "purpose": "endpoints related to document organization tasks"
+  },
+  {
+    "path": "routes/knowledge.py",
+    "purpose": "knowledge-base browsing/search endpoints"
+  },
+  {
+    "path": "routes/taskmaster.py",
+    "purpose": "asynchronous task management API"
+  },
+  {
+    "path": "utils/file_scanner.py",
+    "purpose": "walks directories and identifies document types"
+  },
+  {
+    "path": "utils/ingestion.py",
+    "purpose": "extracts text from PDFs, images, Office files, etc."
+  },
+  {
+    "path": "utils/classification.py",
+    "purpose": "assigns documents to categories using rules and ML"
+  },
+  {
+    "path": "utils/service_access.py",
+    "purpose": "client wrappers for internal services (e.g., vector store)"
+  },
+  {
+    "path": "utils/ml_optimizer.py",
+    "purpose": "tunes and selects best-performing ML models"
+  },
+  {
+    "path": "utils/logging.py",
+    "purpose": "centralized logging configuration and helpers"
+  },
+  {
+    "path": "utils/constants.py",
+    "purpose": "global constants used across the application"
+  },
+  {
+    "path": "utils/config_models.py",
+    "purpose": "Pydantic models for configuration structures"
+  },
+  {
+    "path": "utils/external_integration.py",
+    "purpose": "wrapper code for third-party services and APIs"
+  },
+  {
+    "path": "gui/gui_dashboard.py",
+    "purpose": "PySide6 GUI entry point for the desktop interface"
+  },
+  {
+    "path": "gui/agent_manager.py",
+    "purpose": "GUI tab for managing agents"
+  },
+  {
+    "path": "gui/db_monitor.py",
+    "purpose": "visualization of the internal database state"
+  },
+  {
+    "path": "gui/contradictions_tab.py",
+    "purpose": "tab showing conflicting information discovered by agents"
+  },
+  {
+    "path": "gui/memory_review_tab.py",
+    "purpose": "interface for reviewing stored memory entries"
+  },
+  {
+    "path": "gui/memory_analytics_tab.py",
+    "purpose": "analytics view for memory usage and patterns"
+  },
+  {
+    "path": "gui/professional_manager.py",
+    "purpose": "manages professional/legal persona settings"
+  },
+  {
+    "path": "gui/violations_tab.py",
+    "purpose": "displays policy violations detected during processing"
+  },
+  {
+    "path": "gui/open_memory_review.py",
+    "purpose": "utility to open memory items from other tabs"
+  },
+  {
+    "path": "tools/ai/ai_organizer.py",
+    "purpose": "stand-alone script that classifies/organizes documents via an AI model"
+  },
+  {
+    "path": "diagnostics/backend_startup_log.py",
+    "purpose": "helper that logs every step of FastAPI/Uvicorn startup"
+  },
+  {
+    "path": "diagnostics/runtime_policy_guard.py",
+    "purpose": "enforces runtime policy rules during execution"
+  },
+  {
+    "path": "diagnostics/import_analyzer.py",
+    "purpose": "analyzes import graphs for startup optimization"
+  },
+  {
+    "path": "diagnostics/engine.py",
+    "purpose": "core of the diagnostic logging/tracing framework"
+  },
+  {
+    "path": "services/…",
+    "purpose": "miscellaneous background services (e.g., memory service, vector store) each in its own module"
+  }
+]

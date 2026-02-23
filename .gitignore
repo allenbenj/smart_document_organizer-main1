@@ -45,3 +45,6 @@ logs/
 # Local environment
 .env
 .env.local
+
+# Local model artifacts
+/models/

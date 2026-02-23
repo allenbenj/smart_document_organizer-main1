@@ -2,45 +2,49 @@
 
 This document provides essential guidelines for agentic coding agents working on the Smart Document Organizer repository. It includes build/lint/test commands, code style guidelines, and best practices to ensure consistent, high-quality code contributions.
 ALWAYS USE THE BEST SKILLS WHEN YOU NEED THEM
-## Table of Contents
-1. [Build Commands](#build-commands)
-2. [Lint Commands](#lint-commands)
-3. [Test Commands](#test-commands)
-4. [Code Style Guidelines](#code-style-guidelines)
-5. [Additional Rules](#additional-rules)
 
-## Build Commands
+You must always do the following:
+    "Before making edits, gather and summarize context.",
+    "Document assumptions before applying nontrivial changes.",
+    "Break large tasks into verifiable subtasks.",
+    "Prefer explicit and minimal code changes.",
+    "When refactoring, preserve observable behavior.",
+    "Evaluate edge cases and error handling paths.",
+    "Produce structured design outlines for architectural work.",
+    "Think before editing.",
+    "Plan before refactoring.",
+    "Evaluate impact radius of every change.",
+    "Prefer clarity over cleverness.",
+    "Avoid introducing hidden state.",
+    "Avoid silent failures.",
+    "Never remove logging without reason.",
+    "Validate assumptions explicitly."
+End of mandatory Guidance
+
 
 ### Python Environment Setup
 - Install dependencies: `pip install -r requirements.txt`
 - For development: `pip install -e .` (if pyproject.toml supports editable installs)
 - Use Python 3.11+ as specified in the codebase
 
-### Build the Application
-- No explicit build step required for this Python application
-- For packaging: `python -m build` (requires build package)
-- Run the app: `python Start.py` or `python -m smart_document_organizer` (check pyproject.toml for entry points)
 
-### Docker Build (if applicable)
-- Build image: `docker build -t smart-document-organizer .`
-- Run container: `docker run -p 8000:8000 smart-document-organizer`
-
-## Lint Commands
 
 ### Ruff (Primary Linter and Formatter)
+When asked to Lint or Format this is the process:
 - Lint all files: `ruff check .`
 - Fix auto-fixable issues: `ruff check --fix .`
 - Format code: `ruff format .`
 - Lint specific file: `ruff check path/to/file.py`
 - Check imports: `ruff check --select I .`
 
+These are reccomended:
 ### MyPy (Type Checking)
 - Type check all files: `mypy .`
 - Type check specific file: `mypy path/to/file.py`
 - Strict mode: `mypy --strict .`
 
 ### Other Tools
-- Check for security issues: `bandit -r .`
+
 - Check for unused imports: `ruff check --select F401 .`
 
 ## Test Commands
@@ -250,7 +254,7 @@ ALWAYS USE THE BEST SKILLS WHEN YOU NEED THEM
   ```
 
 ### API Design
-- Use FastAPI for web APIs
+- Use PydQ for GUI design
 - Use Pydantic models for request/response validation
 - Return structured responses with success/error fields
 - Use HTTP status codes appropriately
@@ -299,13 +303,6 @@ ALWAYS USE THE BEST SKILLS WHEN YOU NEED THEM
           return dict(row) if row else None
   ```
 
-### Security
-- Validate all inputs
-- Use parameterized queries for database operations
-- Avoid logging sensitive data
-- Use secure defaults
-- Sanitize file paths and names
-
 ### Performance
 - Avoid unnecessary computations in loops
 - Use efficient data structures
@@ -325,20 +322,6 @@ ALWAYS USE THE BEST SKILLS WHEN YOU NEED THEM
 - Write tests before or alongside code
 - Review code changes thoroughly
 
-## Additional Rules
-
-### No Cursor Rules Found
-- No `.cursor/rules/` directory or `.cursorrules` file was found in the repository.
-
-### No Copilot Rules Found
-- No `.github/copilot-instructions.md` file was found in the repository.
-
-### Repository-Specific Notes
-- This is a Python-based document processing application
-- Uses FastAPI for web services
-- Employs agent-based architecture for document analysis
-- Focuses on organization and processing of documents
-- Includes machine learning components for text analysis
 
 ### Best Practices
 - Always run tests before committing

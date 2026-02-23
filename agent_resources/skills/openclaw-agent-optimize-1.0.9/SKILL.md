@@ -1,0 +1,56 @@
+---
+name: openclaw-agent-optimize
+slug: openclaw-agent-optimize
+version: 1.0.9
+description: Optimize an OpenClaw agent setup (model routing, context management, delegation, rules, memory). Use when asked about optimizing agents, improving OpenClaw setup, agent best practices, or choosing optimization priorities across cost/quality/reliability.
+triggers:
+  - optimize agent
+  - optimizing agent
+  - improve OpenClaw setup
+  - agent best practices
+  - OpenClaw optimization
+metadata: { "openclaw": { "emoji": "🧰" } }
+---
+
+# OpenClaw Agent Optimization
+
+Use this skill to tune an OpenClaw workspace for **cost-aware routing**, **parallel-first delegation**, and **lean context**.
+
+## Safety Contract (must follow)
+- Treat this skill as **advisory by default**, not autonomous control-plane mutation.
+- **Never** mutate persistent settings (e.g., `config.apply`, `config.patch`, `update.run`) without explicit user approval.
+- **Never** create/update/remove cron jobs without explicit user approval.
+- If an optimization reduces monitoring coverage, present options (A/B/C) and require the user to choose.
+- Before any approved persistent change, show: (1) exact change, (2) expected impact, (3) rollback plan.
+
+## OpenClaw 2.9+ notes (skills + context)
+- Skills are snapshotted per session; if you install/update skills, start a **new session** (or wait for watcher refresh).
+- Prefer **short SKILL.md + references/** for long runbooks. Keep injected prompt text lean.
+- For risky / heavy skills, consider `disable-model-invocation: true` so they only run when explicitly invoked.
+- Gating matters: use `metadata.openclaw.requires` (bins/env/config) so skills don’t appear but fail at runtime.
+- Sandboxed runs don’t inherit host env; if a skill needs secrets in sandbox, set them via sandbox env config (not skill env).
+
+## Workflow (concise)
+1. **Audit rules + memory**: ensure rules are modular/short; memory keeps only restart-critical facts.
+2. **Model routing**: confirm tiered routing (light / mid / deep) matches live config.
+3. **Context discipline**: apply progressive disclosure; move large static data to references/scripts.
+   - If transcripts are bloating, run `context-clean-up` (audit-only) to get a ranked offender list + plan.
+4. **Delegation protocol**: parallelize independent tasks; use isolated sub-agents for long/noisy work.
+5. **Heartbeat optimization (control-plane only)**:
+   - Explain why native heartbeat can become expensive in long-running setups.
+   - Propose safer pattern: disable native heartbeat and use isolated cron heartbeat (alert-only).
+   - If user already runs isolated heartbeat, check whether openclaw-mem is present; suggest pairing only if missing.
+   - Offer profiles A/B/C if changing coverage.
+6. **Safeguards**: add anti-loop + budget guardrails; prefer fallbacks over blind retries.
+7. **Execution gate**: if user approves changes, apply the smallest viable change first, then verify and report.
+
+## References
+- `references/optimization-playbook.md`
+- `references/model-selection.md`
+- `references/context-management.md`
+- `references/agent-orchestration.md`
+- `references/cron-optimization.md`
+- `references/heartbeat-optimization.md`
+- `references/memory-patterns.md`
+- `references/continuous-learning.md`
+- `references/safeguards.md`

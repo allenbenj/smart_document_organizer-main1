@@ -16,8 +16,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+import json
+
 try:
     import requests  # noqa: E402
+    import requests.exceptions # New import
 except Exception:
     requests = None
 
@@ -63,8 +66,10 @@ class ViolationsTab(QWidget):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     self.text_input.setPlainText(f.read())
-            except Exception as e:
-                QMessageBox.critical(self, "Error", str(e))
+            except (FileNotFoundError, PermissionError, IOError) as e:
+                QMessageBox.critical(self, "File Error", f"Could not load file: {e}")
+            except Exception as e: # Catch any other unexpected errors
+                QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")
 
     def run(self):  # noqa: C901
         try:
@@ -79,5 +84,9 @@ class ViolationsTab(QWidget):
                 "POST", "/api/agents/violations", timeout=15.0, json={"text": txt}
             )
             self.output.setPlainText(str(result))
-        except Exception as e:
-            QMessageBox.critical(self, "Error", str(e))
+        except requests.exceptions.RequestException as e:
+            QMessageBox.critical(self, "API Error", f"Failed to connect to API: {e}")
+        except json.JSONDecodeError as e:
+            QMessageBox.critical(self, "API Error", f"Invalid JSON response from API: {e}")
+        except Exception as e: # Catch any other unexpected errors
+            QMessageBox.critical(self, "Error", f"An unexpected error occurred: {e}")

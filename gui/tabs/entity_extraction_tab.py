@@ -1,684 +1,325 @@
 """
-Entity Extraction Tab - GUI component for entity extraction operations
-
-This tab provides the interface for extracting entities from documents
-using the legal AI agents.
+Entity Extraction Tab - Modern High-Resolution Interface
+Consolidates multi-model extraction with interactive curation.
 """
 
 import json
-from typing import TYPE_CHECKING
+import os
+import time
+from datetime import datetime
+from typing import Any, Optional
 
-if TYPE_CHECKING:
-    import PySide6.QtWidgets as _QtWidgets  # noqa: F401
-    import PySide6.QtCore as _QtCore        # noqa: F401
-    import PySide6.QtGui as _QtGui          # noqa: F401
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QFont, QColor
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, 
+    QPushButton, QComboBox, QCheckBox, QGroupBox, QProgressBar, 
+    QSplitter, QTableWidget, QTableWidgetItem, QMessageBox, 
+    QFileDialog, QLineEdit, QHeaderView, QAbstractItemView
+)
 
-try:
-    from PySide6.QtWidgets import (  # noqa: E402
-        QWidget,
-        QVBoxLayout,
-        QHBoxLayout,
-        QLabel,
-        QTextEdit,
-        QPushButton,
-        QComboBox,
-        QCheckBox,
-        QGroupBox,
-        QProgressBar,
-        QSplitter,
-        QListWidget,
-        QListWidgetItem,
-        QMessageBox,
-        QFileDialog,
-        QLineEdit,
-    )
-    from PySide6.QtCore import Qt, Signal, QThread  # noqa: E402
-    from PySide6.QtGui import (  # noqa: E402
-        QFont,
-        QPalette,
-        QColor,
-        QTextCharFormat,
-        QTextCursor,
-    )
-except ImportError:
-    # Fallback for systems without PySide6
-    QWidget = object
-    QVBoxLayout = QHBoxLayout = QLabel = QTextEdit = QPushButton = object
-    QComboBox = QCheckBox = QGroupBox = QProgressBar = QSplitter = object
-    QListWidget = QListWidgetItem = QMessageBox = QFileDialog = QLineEdit = object
-    Qt = QThread = Signal = object
-    QFont = QPalette = QColor = QTextCharFormat = QTextCursor = object
-
-from .status_presenter import TabStatusPresenter  # noqa: E402
-from ..ui import JobStatusWidget, ResultsSummaryBox  # noqa: E402
-from .default_paths import get_default_dialog_dir  # noqa: E402
-from ..services import api_client  # noqa: E402
-from .workers import (  # noqa: E402
+from .status_presenter import TabStatusPresenter
+from ..ui import JobStatusWidget, ResultsSummaryBox
+from .default_paths import get_default_dialog_dir
+from ..services import api_client
+from .workers import (
     EntityExtractionFolderWorker,
     EntityExtractionWorker,
     FetchOntologyWorker,
 )
+from gui.core.base_tab import BaseTab
 
-
-class EntityExtractionTab(QWidget):
-    """Tab for entity extraction operations."""
-
-    # Signals
+class EntityExtractionTab(BaseTab):
     extraction_completed = Signal(dict)
     extraction_error = Signal(str)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.worker = None
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Entity Extraction", asyncio_thread, parent)
         self.ontology_worker = None
         self.current_results = None
         self.setup_ui()
         self.connect_signals()
-        # self.fetch_ontology() - Defer until backend is ready
-
-    def fetch_ontology(self):
-        """Fetch ontology entities dynamically."""
-        self.ontology_worker = FetchOntologyWorker()
-        self.ontology_worker.finished_ok.connect(self.populate_entity_types)
-        self.ontology_worker.finished_err.connect(lambda e: print(f"Ontology fetch error: {e}"))
-        self.ontology_worker.start()
-
-    def on_backend_ready(self):
-        """Load ontology labels when backend is confirmed online."""
-        try:
-            self.fetch_ontology()
-        except Exception as e:
-            print(f"[EntityExtractionTab] on_backend_ready error: {e}")
-
-    def populate_entity_types(self, items: list):
-        """Populate combo box with fetched ontology entities."""
-        current_text = self.entity_types_combo.currentText()
-        self.entity_types_combo.clear()
-        self.entity_types_combo.addItem("All")
-        
-        # items is a list of dicts: {"label": "Person", "attributes": [...], "prompt_hint": ...}
-        # We'll use the label for the combo box
-        labels = sorted([item.get("label", str(item)) for item in items])
-        self.entity_types_combo.addItems(labels)
-        
-        # Restore previous selection if possible, else default to "All"
-        index = self.entity_types_combo.findText(current_text)
-        if index >= 0:
-            self.entity_types_combo.setCurrentIndex(index)
-        else:
-            self.entity_types_combo.setCurrentText("All")
 
     def setup_ui(self):
-        """Setup the user interface."""
-        layout = QVBoxLayout(self)
-
-        # Title
-        title = QLabel("Entity Extraction")
-        title.setFont(QFont("Arial", 14, QFont.Bold))
-        layout.addWidget(title)
-
-        # Main splitter
-        splitter = QSplitter(Qt.Horizontal)
-        layout.addWidget(splitter)
-
-        # Left panel - Input
-        left_widget = QWidget()
-        left_layout = QVBoxLayout(left_widget)
-
-        # File/Folder Selection
-        file_group = QGroupBox("File Input")
-        file_layout = QVBoxLayout(file_group)
+        """Setup the modern, high-resolution user interface."""
+        # Header
+        title = QLabel("Legal Entity Extraction & Curation")
+        title.setFont(QFont("Arial", 16, QFont.Bold))
+        self.main_layout.addWidget(title)
         
-        # File selection
-        file_row = QHBoxLayout()
-        file_row.addWidget(QLabel("File:"))
-        self.file_path = QLineEdit()
-        self.file_path.setPlaceholderText("Select a file to extract entities from...")
-        file_row.addWidget(self.file_path)
-        self.browse_file_btn = QPushButton("Browse File")
-        self.browse_file_btn.clicked.connect(self.browse_file)
-        file_row.addWidget(self.browse_file_btn)
-        file_layout.addLayout(file_row)
-        
-        # Folder selection
-        folder_row = QHBoxLayout()
-        folder_row.addWidget(QLabel("Folder:"))
-        self.folder_path = QLineEdit()
-        self.folder_path.setPlaceholderText("Or select a folder to process all files...")
-        folder_row.addWidget(self.folder_path)
-        self.browse_folder_btn = QPushButton("Browse Folder")
-        self.browse_folder_btn.clicked.connect(self.browse_folder)
-        folder_row.addWidget(self.browse_folder_btn)
-        file_layout.addLayout(folder_row)
-        self.folder_path.setToolTip("Select a folder to process supported files.")
-        
-        left_layout.addWidget(file_group)
+        header_desc = QLabel("Multi-model ensemble (Oracle, GLiNER, Patterns) with Knowledge Graph grounding.")
+        header_desc.setStyleSheet("color: #666; font-style: italic;")
+        self.main_layout.addWidget(header_desc)
 
-        # Input group
-        input_group = QGroupBox("Or Enter Text Directly")
+        # Primary Splitter
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_layout.addWidget(self.main_splitter)
+
+        # LEFT: Config & Input
+        left_container = QWidget()
+        left_layout = QVBoxLayout(left_container)
+
+        # 1. Input
+        input_group = QGroupBox("1. Intelligence Input")
         input_layout = QVBoxLayout(input_group)
+        
+        path_row = QHBoxLayout()
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText("Select file or folder...")
+        path_row.addWidget(self.path_input)
+        self.browse_btn = QPushButton("Browse...")
+        path_row.addWidget(self.browse_btn)
+        input_layout.addLayout(path_row)
 
         self.input_text = QTextEdit()
-        self.input_text.setPlaceholderText("Enter text to extract entities from...")
-        self.input_text.setMaximumHeight(120)
+        self.input_text.setPlaceholderText("Or paste legal text directly...")
+        self.input_text.setMaximumHeight(150)
         input_layout.addWidget(self.input_text)
-
-        # Entity types selection
-        types_layout = QHBoxLayout()
-        types_layout.addWidget(QLabel("Entity Types:"))
-
-        self.entity_types_combo = QComboBox()
-        self.entity_types_combo.addItem("All")
-        self.entity_types_combo.setCurrentText("All")
-        types_layout.addWidget(self.entity_types_combo)
-
-        self.custom_types_checkbox = QCheckBox("Custom Types")
-        types_layout.addWidget(self.custom_types_checkbox)
-        self.custom_types_checkbox.setEnabled(False)
-        self.custom_types_checkbox.setChecked(False)
-        self.custom_types_checkbox.setVisible(False)
-        self.custom_types_checkbox.setToolTip(
-            "Custom types are disabled in this phase. Use ontology entity labels."
-        )
-        types_layout.addStretch()
-
-        input_layout.addLayout(types_layout)
-
-        model_layout = QHBoxLayout()
-        model_layout.addWidget(QLabel("Model:"))
-        self.model_combo = QComboBox()
-        self.model_combo.addItems(
-            ["Auto", "GLiNER", "Patterns"]
-        )
-        self.model_combo.setCurrentText("Auto")
-        self.model_combo.setToolTip(
-            "Choose a verified extraction engine. Unverified model options are hidden."
-        )
-        model_layout.addWidget(self.model_combo)
-        model_layout.addStretch()
-        input_layout.addLayout(model_layout)
         left_layout.addWidget(input_group)
 
-        # Control buttons
-        button_layout = QHBoxLayout()
+        # 2. Strategy
+        config_group = QGroupBox("2. Extraction Strategy")
+        config_layout = QVBoxLayout(config_group)
+        
+        type_row = QHBoxLayout()
+        type_row.addWidget(QLabel("Target Ontology:"))
+        self.entity_types_combo = QComboBox()
+        self.entity_types_combo.addItem("All")
+        type_row.addWidget(self.entity_types_combo, 1)
+        config_layout.addLayout(type_row)
 
-        self.extract_button = QPushButton("Extract Entities")
-        self.extract_button.setStyleSheet("""
-            QPushButton {
-                background-color: #4CAF50;
-                color: white;
-                padding: 8px 16px;
-                border: none;
-                border-radius: 4px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QPushButton:pressed {
-                background-color: #3d8b40;
-            }
-        """)
-        button_layout.addWidget(self.extract_button)
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel("Ensemble Engine:"))
+        self.model_combo = QComboBox()
+        self.model_combo.addItems(["Auto (Ensemble)", "GLiNER Oracle", "Regex Patterns", "LLM Enhanced"])
+        model_row.addWidget(self.model_combo, 1)
+        config_layout.addLayout(model_row)
+        
+        self.kb_grounding_cb = QCheckBox("Enable Knowledge Graph Grounding")
+        self.kb_grounding_cb.setChecked(True)
+        config_layout.addWidget(self.kb_grounding_cb)
+        left_layout.addWidget(config_group)
 
-        self.clear_button = QPushButton("Clear")
-        button_layout.addWidget(self.clear_button)
-
-        button_layout.addStretch()
-        left_layout.addLayout(button_layout)
-
-        # Progress bar
+        # 3. Execution
+        exec_group = QGroupBox("3. Execution")
+        exec_layout = QVBoxLayout(exec_group)
+        self.extract_button = QPushButton("⚡ RUN EXTRACTION")
+        self.extract_button.setMinimumHeight(50)
+        self.extract_button.setStyleSheet("background-color: #2e7d32; color: white; font-weight: bold; font-size: 14px;")
+        exec_layout.addWidget(self.extract_button)
+        
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
-        left_layout.addWidget(self.progress_bar)
+        exec_layout.addWidget(self.progress_bar)
+        
+        self.status_label = QLabel("Ready") # The QLabel for status is still needed for BaseTab to set text/style
+        exec_layout.addWidget(self.status_label) # The QLabel for status is still needed for BaseTab to set text/style
+        
+        self.job_status = JobStatusWidget("Extraction Job")
+        exec_layout.addWidget(self.job_status)
+        left_layout.addWidget(exec_group)
+        left_layout.addStretch()
+        
+        self.main_splitter.addWidget(left_container)
 
-        self.status_label = QLabel("Ready")
-        left_layout.addWidget(self.status_label)
-        self.status = TabStatusPresenter(self, self.status_label, source="Entity Extraction")
-        self.job_status = JobStatusWidget("Entity Extraction Job")
-        left_layout.addWidget(self.job_status)
+        # RIGHT: Results
+        right_container = QWidget()
+        right_layout = QVBoxLayout(right_container)
 
-        self.results_summary = ResultsSummaryBox()
-        left_layout.addWidget(self.results_summary)
-
-        splitter.addWidget(left_widget)
-
-        # Right panel - Results
-        right_widget = QWidget()
-        right_layout = QVBoxLayout(right_widget)
-
-        # Results group
-        results_group = QGroupBox("Extracted Entities")
+        results_group = QGroupBox("4. Extracted Findings (Editable)")
         results_layout = QVBoxLayout(results_group)
+        
+        table_tools = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Filter findings...")
+        table_tools.addWidget(self.search_input)
+        self.bulk_approve_btn = QPushButton("Approve Selection")
+        table_tools.addWidget(self.bulk_approve_btn)
+        results_layout.addLayout(table_tools)
 
-        self.results_list = QListWidget()
-        self.results_list.setAlternatingRowColors(True)
-        results_layout.addWidget(self.results_list)
-
-        # Results info
-        self.results_info = QLabel("No entities extracted yet.")
+        self.results_table = QTableWidget(0, 5)
+        self.results_table.setHorizontalHeaderLabels(["Entity Text", "Type", "Conf", "Method", "Status"])
+        self.results_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.results_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.results_table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.results_table.setAlternatingRowColors(True)
+        self.results_table.setSortingEnabled(True)
+        results_layout.addWidget(self.results_table)
+        
+        self.results_info = QLabel("No entities extracted.")
         results_layout.addWidget(self.results_info)
-
         right_layout.addWidget(results_group)
 
-        # Export buttons
-        export_layout = QHBoxLayout()
-
-        self.export_json_button = QPushButton("Export JSON")
-        self.export_json_button.setEnabled(False)
-        export_layout.addWidget(self.export_json_button)
-
-        self.export_csv_button = QPushButton("Export CSV")
-        self.export_csv_button.setEnabled(False)
-        export_layout.addWidget(self.export_csv_button)
-
-        export_layout.addStretch()
-        right_layout.addLayout(export_layout)
-
-        splitter.addWidget(right_widget)
-
-        # Set splitter proportions
-        splitter.setSizes([400, 400])
+        export_group = QGroupBox("5. Export & Knowledge Transfer")
+        export_layout = QHBoxLayout(export_group)
+        self.sync_btn = QPushButton("📤 Sync to Agent Memory")
+        self.sync_btn.setStyleSheet("background-color: #1565c0; color: white;")
+        export_layout.addWidget(self.sync_btn)
+        self.export_json_btn = QPushButton("💾 Export JSON")
+        export_layout.addWidget(self.export_json_btn)
+        self.clear_btn = QPushButton("🗑️ Clear Workspace")
+        export_layout.addWidget(self.clear_btn)
+        right_layout.addWidget(export_group)
+        
+        self.main_splitter.addWidget(right_container)
+        self.main_splitter.setSizes([400, 800])
 
     def connect_signals(self):
-        """Connect UI signals to handlers."""
+        self.browse_btn.clicked.connect(self.browse_general)
         self.extract_button.clicked.connect(self.start_extraction)
-        self.clear_button.clicked.connect(self.clear_results)
-        self.export_json_button.clicked.connect(self.export_json)
-        self.export_csv_button.clicked.connect(self.export_csv)
-        self.results_list.itemSelectionChanged.connect(self.highlight_selected_entity)
+        self.search_input.textChanged.connect(self.filter_table)
+        self.bulk_approve_btn.clicked.connect(self.approve_table_selection)
+        self.sync_btn.clicked.connect(self.sync_to_memory)
+        self.export_json_btn.clicked.connect(self.export_json)
+        self.clear_btn.clicked.connect(self.clear_results)
 
-    def browse_file(self):
-        """Browse for a single file."""
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Document",
-            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
-            "All Files (*);;Text Files (*.txt);;PDF Files (*.pdf);;Word Files (*.docx);;Markdown (*.md)",
-        )
-        if file_path:
-            self.file_path.setText(file_path)
-            self.folder_path.clear()
-            self.input_text.clear()
+    def fetch_ontology(self):
+        self.ontology_worker = FetchOntologyWorker()
+        self.ontology_worker.finished_ok.connect(self.populate_entity_types)
+        self.ontology_worker.start()
 
-    def browse_folder(self):
-        """Browse for a folder."""
-        folder_path = QFileDialog.getExistingDirectory(
-            self,
-            "Select Folder",
-            get_default_dialog_dir(self.folder_path.text() or self.file_path.text()),
-        )
-        if folder_path:
-            self.folder_path.setText(folder_path)
-            self.file_path.clear()
-            self.input_text.clear()
+    def populate_entity_types(self, items: list):
+        current = self.entity_types_combo.currentText()
+        self.entity_types_combo.clear()
+        self.entity_types_combo.addItem("All")
+        labels = sorted([item.get("label", str(item)) for item in items])
+        self.entity_types_combo.addItems(labels)
+        idx = self.entity_types_combo.findText(current)
+        if idx >= 0: self.entity_types_combo.setCurrentIndex(idx)
+
+    def on_backend_ready(self):
+        self.fetch_ontology()
+
+    def browse_general(self):
+        res = QMessageBox.question(self, "Browse Selection", "Process a single FILE?\n(Click No to select a FOLDER)", 
+                                 QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+        if res == QMessageBox.Yes:
+            path, _ = QFileDialog.getOpenFileName(self, "Select Document", get_default_dialog_dir(), 
+                                                "Legal Docs (*.pdf *.docx *.txt *.md);;All Files (*)")
+            if path: self.path_input.setText(path)
+        elif res == QMessageBox.No:
+            path = QFileDialog.getExistingDirectory(self, "Select Folder", get_default_dialog_dir())
+            if path: self.path_input.setText(path)
 
     def start_extraction(self):
-        """Start entity extraction process."""
         text = self.input_text.toPlainText().strip()
-        file_path = self.file_path.text().strip()
-        folder_path = self.folder_path.text().strip()
-        
-        if not text and not file_path and not folder_path:
-            self.status.warn("Please enter text, select a file, or select a folder.")
+        path = self.path_input.text().strip()
+        if not text and not path:
+            self.status.warn("Input required.")
             return
-        # Get entity types
-        entity_types = None
-        if not self.custom_types_checkbox.isChecked():
-            selected = self.entity_types_combo.currentText()
-            if selected != "All":
-                entity_types = [selected]
-
-        if self.worker is not None and self.worker.isRunning():
-            self.status.warn("Extraction already running. Please wait for completion.")
-            return
-
-        # Show progress
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setRange(0, 0)  # Indeterminate progress
-        self.extract_button.setEnabled(False)
-        self.extract_button.setText("Extracting...")
-
-        # Start worker thread
-        extraction_type = entity_types[0] if entity_types else "All"
-        self.job_status.set_status("running", "Extraction in progress")
-        self.status.loading("Extracting entities...")
+        is_folder = os.path.isdir(path) if path else False
+        selected_type = self.entity_types_combo.currentText()
+        extraction_type = selected_type if selected_type != "All" else "All"
         options = {
-            "entity_types": entity_types or [],
-            "custom_types": False,
-            "extraction_model": self.model_combo.currentText().strip().lower(),
+            "entity_types": [] if selected_type == "All" else [selected_type],
+            "extraction_model": self.model_combo.currentText().split(" ")[0].lower(),
+            "grounding_enabled": self.kb_grounding_cb.isChecked()
         }
-        if folder_path:
-            self.worker = EntityExtractionFolderWorker(
-                folder_path=folder_path,
-                extraction_type=extraction_type,
-                options=options,
-            )
+        self.extract_button.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.job_status.set_status("running", "Extracting...")
+        self.status.loading("Running legal ensemble...")
+
+        worker_instance = None
+        if is_folder:
+            worker_instance = EntityExtractionFolderWorker(path, extraction_type, options)
         else:
-            self.worker = EntityExtractionWorker(
-                asyncio_thread=None,
-                file_path=file_path,
-                text_input=text,
-                extraction_type=extraction_type,
-                options=options,
-            )
-        self.worker.result_ready.connect(self.on_extraction_finished)
-        self.worker.error_occurred.connect(self.on_extraction_error)
-        self.worker.start()
+            # Pass self.asyncio_thread to the worker if it expects it
+            worker_instance = EntityExtractionWorker(self.asyncio_thread, path, text, extraction_type, options)
+        
+        # Connect signals
+        if worker_instance:
+            worker_instance.result_ready.connect(self.on_extraction_finished)
+            # BaseTab handles error_occurred, so no need to connect directly
+            self.start_worker(worker_instance) # Use BaseTab's start_worker
 
     def on_extraction_finished(self, results):
-        """Handle successful extraction completion."""
-        synced_count, sync_errors = self._sync_entities_to_manager_memory(results)
         self.current_results = results
         self.display_results(results)
-        self.cleanup_worker()
-        stats = (
-            results.get("extraction_stats", {})
-            if isinstance(results.get("extraction_stats"), dict)
-            else {}
-        )
-        files_failed = int(stats.get("files_failed", 0) or 0)
-        if files_failed > 0:
-            self.status.warn(
-                f"Extraction completed with {files_failed} file failures. Check results JSON for file_errors."
-            )
-            QMessageBox.warning(
-                self,
-                "Partial Failure",
-                f"Extraction completed with {files_failed} failed files.\n"
-                "Open exported JSON to inspect extraction_stats.file_errors.",
-            )
-
-        self.job_status.set_status("success", "Completed")
-        self.results_summary.set_summary(
-            "Entity extraction completed successfully",
-            (
-                f"Displayed in Extracted Entities; synced {synced_count} to Agent Memory"
-                if synced_count > 0
-                else "Displayed in Extracted Entities (export JSON/CSV optional)"
-            ),
-            "Run Console",
-        )
-        if sync_errors:
-            self.status.warn(
-                f"Entity extraction complete with {sync_errors} memory sync failures."
-            )
-            QMessageBox.warning(
-                self,
-                "Memory Sync Partial Failure",
-                f"Extraction finished, but {sync_errors} entities failed to sync into Agent Memory.",
-            )
-        elif synced_count > 0:
-            self.status.info(f"Synced {synced_count} entities into Agent Memory.")
-        self.status.success("Entity extraction complete")
-
-        # Emit signal
-        self.extraction_completed.emit(results)
-
-    def _sync_entities_to_manager_memory(self, results: dict) -> tuple[int, int]:
-        """Mirror extracted entities into manager_knowledge for Knowledge Graph edits."""
-        entities = results.get("entities")
-        if not isinstance(entities, list) or not entities:
-            return 0, 0
-
-        synced = 0
-        failed = 0
-        for entity in entities:
-            if not isinstance(entity, dict):
-                failed += 1
-                continue
-            term = str(entity.get("text") or "").strip()
-            if not term:
-                failed += 1
-                continue
-
-            label = str(entity.get("label") or entity.get("entity_type") or "").strip()
-            confidence_raw = entity.get("confidence", entity.get("confidence_score", 0.5))
-            try:
-                confidence = float(confidence_raw)
-            except Exception:
-                confidence = 0.5
-
-            payload = {
-                "term": term,
-                "category": label.lower() if label else "entity",
-                "canonical_value": term,
-                "ontology_entity_id": label or None,
-                "attributes": {
-                    "start_pos": entity.get("start_pos", entity.get("start")),
-                    "end_pos": entity.get("end_pos", entity.get("end")),
-                    "extraction_method": entity.get("extraction_method"),
-                },
-                "source": "entity_extraction_tab",
-                "confidence": confidence,
-                "status": "proposed",
-                "verified": False,
-            }
-            try:
-                api_client.upsert_manager_knowledge_item(payload)
-                synced += 1
-            except Exception:
-                failed += 1
-
-        return synced, failed
-
-    def on_extraction_error(self, error_msg):
-        """Handle extraction error."""
-        self.job_status.set_status("failed", "Extraction failed")
-        self.results_summary.set_summary(
-            f"Entity extraction failed: {error_msg}",
-            "No output generated",
-            "Run Console",
-        )
-        self.status.error(f"Failed to extract entities: {error_msg}")
-        self.results_info.setText(f"Extraction failed: {error_msg}")
-        QMessageBox.critical(
-            self,
-            "Entity Extraction Failed",
-            str(error_msg),
-        )
-        self.cleanup_worker()
-
-        # Emit signal
-        self.extraction_error.emit(error_msg)
-
-    def cleanup_worker(self):
-        """Clean up worker thread."""
-        if self.worker:
-            self.worker.deleteLater()
-            self.worker = None
-
-        self.progress_bar.setVisible(False)
+        self.job_status.set_status("success", "Complete")
+        self.status.success(f"Found {len(results.get('entities', []))} entities.")
         self.extract_button.setEnabled(True)
-        self.extract_button.setText("Extract Entities")
+        self.progress_bar.setVisible(False)
+
+
 
     def display_results(self, results):
-        """Display extraction results."""
-        self.results_list.clear()
-        if isinstance(results.get("source_text"), str):
-            self.input_text.setPlainText(results.get("source_text", ""))
-        if results.get("error"):
-            self.results_info.setText(f"Extraction failed: {results.get('error')}")
-            self.export_json_button.setEnabled(False)
-            self.export_csv_button.setEnabled(False)
-            return
-
+        self.results_table.setSortingEnabled(False)
         entities = results.get("entities", [])
-        if not entities:
-            stats = (
-                results.get("extraction_stats", {})
-                if isinstance(results.get("extraction_stats"), dict)
-                else {}
-            )
-            methods = stats.get("extraction_methods_used", [])
-            files_total = stats.get("files_total")
-            files_processed = stats.get("files_processed")
-            files_failed = stats.get("files_failed")
-            file_errors = stats.get("file_errors", [])
-            diagnostic_parts = []
-            if files_total is not None:
-                diagnostic_parts.append(
-                    f"files={files_processed or 0}/{files_total}, failed={files_failed or 0}"
-                )
-            if isinstance(methods, list):
-                diagnostic_parts.append(
-                    f"methods={','.join(str(m) for m in methods) if methods else 'none'}"
-                )
-            if isinstance(file_errors, list) and file_errors:
-                first = file_errors[0]
-                if isinstance(first, dict):
-                    diagnostic_parts.append(
-                        f"first_error={first.get('error', 'unknown')}"
-                    )
-            diag = " | ".join(diagnostic_parts) if diagnostic_parts else "no diagnostics"
-            self.results_info.setText(f"No entities found ({diag}).")
-            self.export_json_button.setEnabled(False)
-            self.export_csv_button.setEnabled(False)
-            return
+        self.results_table.setRowCount(len(entities))
+        for i, ent in enumerate(entities):
+            text_item = QTableWidgetItem(ent.get("text", ""))
+            type_item = QTableWidgetItem(ent.get("entity_type", ""))
+            conf = float(ent.get("confidence", 0.5))
+            conf_item = QTableWidgetItem(f"{conf:.2f}")
+            if conf > 0.8: conf_item.setForeground(QColor("#2e7d32"))
+            elif conf < 0.6: conf_item.setForeground(QColor("#c62828"))
+            method_item = QTableWidgetItem(ent.get("extraction_method", "unknown"))
+            status_item = QTableWidgetItem("Pending")
+            self.results_table.setItem(i, 0, text_item)
+            self.results_table.setItem(i, 1, type_item)
+            self.results_table.setItem(i, 2, conf_item)
+            self.results_table.setItem(i, 3, method_item)
+            self.results_table.setItem(i, 4, status_item)
+            text_item.setData(Qt.UserRole, ent)
+        self.results_table.setSortingEnabled(True)
+        self.results_info.setText(f"Ensemble Extraction: {len(entities)} items identified.")
 
-        # Display entities
-        for entity in entities:
-            label = entity.get("label") or entity.get("entity_type", "")
-            item_text = f"{entity.get('text', '')} ({label})"
-            confidence = entity.get("confidence")
-            if confidence is None:
-                confidence = entity.get("confidence_score", 0)
-            if confidence > 0:
-                item_text += f" - {confidence:.2f}"
+    def filter_table(self, text):
+        for i in range(self.results_table.rowCount()):
+            match = any(text.lower() in (self.results_table.item(i, j).text().lower() if self.results_table.item(i, j) else "") 
+                       for j in range(self.results_table.columnCount()))
+            self.results_table.setRowHidden(i, not match)
 
-            item = QListWidgetItem(item_text)
-            item.setData(Qt.UserRole, entity)
-            self.results_list.addItem(item)
+    def approve_table_selection(self):
+        for idx in self.results_table.selectionModel().selectedRows():
+            self.results_table.setItem(idx.row(), 4, QTableWidgetItem("Approved ✅"))
+            self.results_table.item(idx.row(), 4).setForeground(QColor("#2e7d32"))
 
-        # Update info
-        self.results_info.setText(f"Found {len(entities)} entities.")
-        stats = results.get("extraction_stats", {})
-        if isinstance(stats, dict):
-            methods = stats.get("extraction_methods_used")
-            files_total = stats.get("files_total")
-            files_processed = stats.get("files_processed")
-            files_failed = stats.get("files_failed")
-            suffix_parts = []
-            if files_total is not None:
-                suffix_parts.append(
-                    f"files {files_processed or 0}/{files_total} processed"
-                )
-            if files_failed is not None:
-                suffix_parts.append(f"{files_failed} failed")
-            if isinstance(methods, list) and methods:
-                suffix_parts.append(f"methods: {', '.join(methods)}")
-            if suffix_parts:
-                self.results_info.setText(
-                    f"Found {len(entities)} entities ({'; '.join(suffix_parts)})."
-                )
-        self.export_json_button.setEnabled(True)
-        self.export_csv_button.setEnabled(True)
+    def sync_to_memory(self):
+        if not self.current_results: return
+        self.status.loading("Syncing to Agent Memory...")
+        count, failed = self._sync_entities_to_manager_memory(self.current_results)
+        if count > 0: self.status.success(f"Synced {count} entities.")
+        else: self.status.error("Sync failed.")
 
-    def clear_results(self):
-        """Clear all results and input."""
-        self.input_text.clear()
-        self.file_path.clear()
-        self.folder_path.clear()
-        self.results_list.clear()
-        self.results_info.setText("No entities extracted yet.")
-        self.export_json_button.setEnabled(False)
-        self.export_csv_button.setEnabled(False)
-        self.current_results = None
-        self.job_status.reset()
-        self.results_summary.set_summary("No run yet", "N/A", "Run Console")
-
-    def _entity_span(self, entity: dict) -> tuple[int | None, int | None]:
-        """Resolve character offsets from extractor payload."""
-        start = entity.get("start_pos")
-        end = entity.get("end_pos")
-        if start is None:
-            start = entity.get("start")
-        if end is None:
-            end = entity.get("end")
-        try:
-            s = int(start)
-            e = int(end)
-        except Exception:
-            return None, None
-        if s < 0 or e <= s:
-            return None, None
-        return s, e
-
-    def highlight_selected_entity(self):
-        """Highlight selected entity span in source text."""
-        selected = self.results_list.selectedItems()
-        if not selected:
-            return
-        entity = selected[0].data(Qt.UserRole)
-        if not isinstance(entity, dict):
-            return
-        span = self._entity_span(entity)
-        if not span[0] and span[0] != 0:
-            self.status.warn("No provenance span available for selected entity.")
-            return
-        start, end = span
-        text = self.input_text.toPlainText()
-        if end > len(text):
-            end = len(text)
-        if start >= end:
-            self.status.warn("Invalid span for selected entity.")
-            return
-
-        cursor = self.input_text.textCursor()
-        cursor.select(QTextCursor.Document)
-        cursor.setCharFormat(QTextCharFormat())
-
-        fmt = QTextCharFormat()
-        fmt.setBackground(QColor("#fff176"))
-        cursor.setPosition(start)
-        cursor.setPosition(end, QTextCursor.KeepAnchor)
-        cursor.setCharFormat(fmt)
-        self.input_text.setTextCursor(cursor)
-        self.status.info(f"Highlighted chars {start}-{end} for selected entity.")
+    def _sync_entities_to_manager_memory(self, results: dict) -> tuple[int, int]:
+        entities = results.get("entities", [])
+        synced, failed = 0, 0
+        for ent in entities:
+            term = str(ent.get("text", "")).strip()
+            if not term: continue
+            proposal = {
+                "namespace": "legal_entities",
+                "key": f"entity_{int(time.time())}_{synced}",
+                "content": json.dumps(ent),
+                "memory_type": "entity",
+                "agent_id": "entity_tab",
+                "document_id": results.get("document_id", "manual"),
+                "metadata": {"entity_type": ent.get("entity_type")},
+                "confidence_score": float(ent.get("confidence", 0.5)),
+                "status": "pending",
+                "created_at": datetime.now().isoformat()
+            }
+            try:
+                api_client.post("/api/agents/memory/proposals", json=proposal)
+                synced += 1
+            except Exception: failed += 1
+        return synced, failed
 
     def export_json(self):
-        """Export results to JSON file."""
-        if not self.current_results:
-            return
+        if not self.current_results: return
+        file_path, _ = QFileDialog.getSaveFileName(self, "Save JSON", "", "JSON (*.json)")
+        if file_path:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(self.current_results, f, indent=2)
+            self.status.success("Exported.")
 
-        try:
-            from PySide6.QtWidgets import QFileDialog  # noqa: E402
-            file_path, _ = QFileDialog.getSaveFileName(
-                self, "Save JSON", "", "JSON files (*.json)"
-            )
-            if file_path:
-                with open(file_path, 'w', encoding='utf-8') as f:
-                    json.dump(self.current_results, f, indent=2, ensure_ascii=False)
-                QMessageBox.information(self, "Export Successful", "Results exported to JSON.")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to export JSON: {e}")
-
-    def export_csv(self):
-        """Export results to CSV file."""
-        if not self.current_results:
-            return
-
-        try:
-            import csv  # noqa: E402
-            from PySide6.QtWidgets import QFileDialog  # noqa: E402
-
-            file_path, _ = QFileDialog.getSaveFileName(
-                self, "Save CSV", "", "CSV files (*.csv)"
-            )
-            if file_path:
-                entities = self.current_results.get("entities", [])
-                with open(file_path, 'w', newline='', encoding='utf-8') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["Text", "Label", "Confidence", "Start", "End"])
-                    for entity in entities:
-                        start, end = self._entity_span(entity)
-                        writer.writerow([
-                            entity.get("text", ""),
-                            entity.get("label") or entity.get("entity_type", ""),
-                            entity.get("confidence", entity.get("confidence_score", 0)),
-                            start if start is not None else "",
-                            end if end is not None else "",
-                        ])
-                QMessageBox.information(self, "Export Successful", "Results exported to CSV.")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", f"Failed to export CSV: {e}")
+    def clear_results(self):
+        self.results_table.setRowCount(0)
+        self.input_text.clear()
+        self.path_input.clear()
+        self.current_results = None
+        self.job_status.reset()
+        self.status.info("Workspace cleared.")

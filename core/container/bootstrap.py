@@ -73,7 +73,11 @@ async def configure(services: Any, app: Any) -> None:
         memory_manager,
         aliases=["memory_manager", "unified_memory_manager", "memory"],
     )
-    memory_service = MemoryService(memory_manager=memory_manager, config_manager=cfg)
+    memory_service = MemoryService(
+        memory_manager=memory_manager,
+        config_manager=cfg,
+        database_manager=db,
+    )
     await services.register_instance(
         MemoryService,
         memory_service,
@@ -99,9 +103,9 @@ async def configure(services: Any, app: Any) -> None:
 
     llm_manager = LLMManager(
         api_key=os.getenv("XAI_API_KEY", "").strip() or None,
-        provider=os.getenv("LLM_PROVIDER", "xai"),
-        default_model=os.getenv("LLM_MODEL", "grok-4-fast-reasoning"),
-        base_url=os.getenv("XAI_BASE_URL", "https://api.x.ai/v1"),
+        provider=os.getenv("LLM_PROVIDER", "xai").strip().lower(),
+        default_model=os.getenv("LLM_MODEL", "grok-4-fast-reasoning").strip(),
+        base_url=os.getenv("XAI_BASE_URL", "https://api.x.ai/v1").strip(),
     )
     await services.register_instance(
         LLMManager,

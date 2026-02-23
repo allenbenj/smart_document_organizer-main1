@@ -19,21 +19,32 @@ from .org_utils import get_existing_runtime_roots, get_scope_prefixes
 logger = logging.getLogger(__name__)
 
 class LoadProposalsWorker(QThread):
-    finished_ok = Signal(list)
+    finished_ok = Signal(dict)
     finished_err = Signal(str)
 
-    def __init__(self, job_id: str, root_prefix: Optional[str] = None, status: Optional[str] = None):
+    def __init__(
+        self,
+        job_id: str,
+        root_prefix: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ):
         super().__init__()
         self.job_id = job_id
         self.root_prefix = root_prefix
         self.status = status
+        self.limit = max(1, int(limit))
+        self.offset = max(0, int(offset))
 
     def run(self):
         try:
             organization_service.update_job(self.job_id, status=OrgJobStatus.RUNNING, message="Loading proposals...")
             result = api_client.get_organization_proposals(
                 root_prefix=self.root_prefix, 
-                status=self.status
+                status=self.status,
+                limit=self.limit,
+                offset=self.offset,
             )
             
             # ApiClient already normalized this to include 'items'
@@ -42,15 +53,41 @@ class LoadProposalsWorker(QThread):
             # Fallback if no proposed found
             if not items and self.status == "proposed":
                 organization_service.update_job(self.job_id, message="No pending found, checking all...")
-                result = api_client.get_organization_proposals(root_prefix=self.root_prefix)
+                result = api_client.get_organization_proposals(
+                    root_prefix=self.root_prefix,
+                    limit=self.limit,
+                    offset=self.offset,
+                )
                 items = result.get("items", [])
 
-            organization_service.update_job(self.job_id, status=OrgJobStatus.SUCCESS, results=items)
-            self.finished_ok.emit(items)
+            payload = {
+                "items": items,
+                "total": int(result.get("total", len(items)) or 0),
+                "limit": int(result.get("limit", self.limit) or self.limit),
+                "offset": int(result.get("offset", self.offset) or self.offset),
+            }
+            organization_service.update_job(self.job_id, status=OrgJobStatus.SUCCESS, results=payload)
+            self.finished_ok.emit(payload)
+        except requests.exceptions.RequestException as e:
+            error_msg = f"API connection error loading proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
+        except json.JSONDecodeError as e:
+            error_msg = f"Invalid API response loading proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
+        except RuntimeError as e:
+            error_msg = f"Runtime error loading proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
         except Exception as e:
-            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=str(e))
-            self.finished_err.emit(str(e))
-
+            error_msg = f"An unexpected error occurred loading proposals: {e}"
+            logger.exception(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
 class GenerateProposalsWorker(QThread):
     finished_ok = Signal(dict)
     finished_err = Signal(str)
@@ -68,8 +105,12 @@ class GenerateProposalsWorker(QThread):
             # 1. Indexing stabilization (Blocking loop moved to background)
             if self.root:
                 self.progress_update.emit("Stabilizing index...")
-                self._index_scope_until_stable(self.root)
-            
+                try:
+                    self._index_scope_until_stable(self.root)
+                except Exception as e:
+                    logger.error(f"Error during index stabilization: {e}")
+                    raise # Re-raise to be caught by the outer block
+
             if self.isInterruptionRequested():
                 organization_service.update_job(self.job_id, status=OrgJobStatus.CANCELLED)
                 return
@@ -80,10 +121,26 @@ class GenerateProposalsWorker(QThread):
             
             organization_service.update_job(self.job_id, status=OrgJobStatus.SUCCESS, results=out)
             self.finished_ok.emit(out)
+        except requests.exceptions.RequestException as e:
+            error_msg = f"API connection error generating proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
+        except json.JSONDecodeError as e:
+            error_msg = f"Invalid API response generating proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
+        except RuntimeError as e:
+            error_msg = f"Runtime error generating proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
         except Exception as e:
-            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=str(e))
-            self.finished_err.emit(str(e))
-
+            error_msg = f"An unexpected error occurred generating proposals: {e}"
+            logger.exception(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
     def _index_scope_until_stable(self, root: str, max_cycles: int = 5) -> None:
         """Helper for background indexing."""
         scan = self._scan_scope_files(root)
@@ -93,7 +150,14 @@ class GenerateProposalsWorker(QThread):
 
         target_files = int(scan.get("files_with_ext", 0))
         allowed_exts = scan.get("allowed_exts") or None
-        max_files = max(int(scan.get("total_files", 0)) + 1000, 20000)
+        scanned_all = bool(scan.get("scanned_all", True))
+        # For very large folders, avoid unbounded pre-scan costs and index in bounded passes.
+        if scanned_all:
+            max_files = max(int(scan.get("total_files", 0)) + 1000, 20000)
+        else:
+            max_files = 120000
+            target_files = 0
+            max_cycles = min(max_cycles, 3)
 
         prev_total = -1
         cycles_run = 0
@@ -120,23 +184,63 @@ class GenerateProposalsWorker(QThread):
         if not self.isInterruptionRequested():
             api_client.post("/files/refresh?run_watches=false&stale_after_hours=1&use_taskmaster=false", json={}, timeout=180.0)
 
-    def _scan_scope_files(self, root: str) -> dict:
+    def _scan_scope_files(
+        self,
+        root: str,
+        max_scan_files: int = 20000,
+        max_scan_dirs: int = 5000,
+    ) -> dict:
         runtime_roots = get_existing_runtime_roots(root)
         total_files = 0
         files_with_ext = 0
         ext_set = set()
+        scanned_all = True
         for scan_root in runtime_roots:
             scan_path = Path(scan_root)
-            if not scan_path.exists(): continue
-            for _, _, filenames in os.walk(str(scan_path)):
-                for name in filenames:
-                    total_files += 1
-                    ext = Path(name).suffix.lower().strip()
-                    if ext:
-                        files_with_ext += 1
-                        ext_set.add(ext)
-        return {"runtime_roots": runtime_roots, "total_files": total_files, "files_with_ext": files_with_ext, "allowed_exts": list(ext_set)}
+            if not scan_path.exists():
+                continue
 
+            stack = [scan_path]
+            scanned_dirs = 0
+            while stack:
+                if scanned_dirs >= max_scan_dirs or total_files >= max_scan_files:
+                    scanned_all = False
+                    break
+                current = stack.pop()
+                scanned_dirs += 1
+                try:
+                    with os.scandir(current) as it:
+                        subdirs: list[Path] = []
+                        for entry in it:
+                            if entry.is_dir(follow_symlinks=False):
+                                subdirs.append(Path(entry.path))
+                                continue
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                            total_files += 1
+                            ext = Path(entry.name).suffix.lower().strip()
+                            if ext:
+                                files_with_ext += 1
+                                ext_set.add(ext)
+                            if total_files >= max_scan_files:
+                                scanned_all = False
+                                break
+                        subdirs.sort(key=lambda p: p.name.lower(), reverse=True)
+                        stack.extend(subdirs)
+                except (OSError, IOError) as e:
+                    logger.warning(f"File system error during scanning '{current}': {e}")
+                    continue
+                except Exception as e:
+                    logger.exception(f"An unexpected error occurred during scanning '{current}': {e}")
+                    continue
+
+        return {
+            "runtime_roots": runtime_roots,
+            "total_files": total_files,
+            "files_with_ext": files_with_ext,
+            "allowed_exts": list(ext_set),
+            "scanned_all": scanned_all,
+        }
     def _count_indexed_for_scope(self, root: str) -> int:
         best_total = 0
         for prefix in get_scope_prefixes(root):
@@ -160,14 +264,37 @@ class ApplyProposalsWorker(QThread):
             out = api_client.apply_organization_proposals(root_prefix=self.root)
             
             # Index refresh after apply
-            api_client.post("/files/refresh?run_watches=false&stale_after_hours=1&use_taskmaster=false", json={}, timeout=120.0)
-            
+            try:
+                api_client.post("/files/refresh?run_watches=false&stale_after_hours=1&use_taskmaster=false", json={}, timeout=120.0)
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Failed to refresh index after applying proposals: {e}")
+            except json.JSONDecodeError as e:
+                logger.warning(f"Invalid API response during index refresh after applying proposals: {e}")
+            except Exception as e:
+                logger.exception(f"Unexpected error during index refresh after applying proposals: {e}")
+
             organization_service.update_job(self.job_id, status=OrgJobStatus.SUCCESS, results=out)
             self.finished_ok.emit(out)
+        except requests.exceptions.RequestException as e:
+            error_msg = f"API connection error applying proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
+        except json.JSONDecodeError as e:
+            error_msg = f"Invalid API response applying proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
+        except RuntimeError as e:
+            error_msg = f"Runtime error applying proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
         except Exception as e:
-            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=str(e))
-            self.finished_err.emit(str(e))
-
+            error_msg = f"An unexpected error occurred applying proposals: {e}"
+            logger.exception(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
 class ClearProposalsWorker(QThread):
     finished_ok = Signal(dict)
     finished_err = Signal(str)
@@ -183,9 +310,26 @@ class ClearProposalsWorker(QThread):
             out = api_client.clear_organization_proposals(root_prefix=self.root)
             organization_service.update_job(self.job_id, status=OrgJobStatus.SUCCESS, results=out)
             self.finished_ok.emit(out)
+        except requests.exceptions.RequestException as e:
+            error_msg = f"API connection error clearing proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
+        except json.JSONDecodeError as e:
+            error_msg = f"Invalid API response clearing proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
+        except RuntimeError as e:
+            error_msg = f"Runtime error clearing proposals: {e}"
+            logger.error(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
         except Exception as e:
-            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=str(e))
-            self.finished_err.emit(str(e))
+            error_msg = f"An unexpected error occurred clearing proposals: {e}"
+            logger.exception(error_msg)
+            organization_service.update_job(self.job_id, status=OrgJobStatus.FAILED, error=error_msg)
+            self.finished_err.emit(error_msg)
 
 class BulkActionWorker(QThread):
     finished_ok = Signal(dict)
@@ -235,10 +379,29 @@ class BulkActionWorker(QThread):
                 
                 success_count += 1
                 organization_service.record_item_success(self.job_id, pid)
+            except requests.exceptions.RequestException as e:
+                fail_count += 1
+                err_msg = f"API connection error for proposal #{pid}: {e}"
+                logger.error(err_msg)
+                errors.append(err_msg)
+                organization_service.record_item_failure(self.job_id, pid, err_msg)
+            except json.JSONDecodeError as e:
+                fail_count += 1
+                err_msg = f"Invalid API response for proposal #{pid}: {e}"
+                logger.error(err_msg)
+                errors.append(err_msg)
+                organization_service.record_item_failure(self.job_id, pid, err_msg)
+            except RuntimeError as e:
+                fail_count += 1
+                err_msg = f"Runtime error for proposal #{pid}: {e}"
+                logger.error(err_msg)
+                errors.append(err_msg)
+                organization_service.record_item_failure(self.job_id, pid, err_msg)
             except Exception as e:
                 fail_count += 1
-                err_msg = str(e)
-                errors.append(f"#{pid}: {err_msg}")
+                err_msg = f"An unexpected error occurred for proposal #{pid}: {e}"
+                logger.exception(err_msg)
+                errors.append(err_msg)
                 organization_service.record_item_failure(self.job_id, pid, err_msg)
 
         results = {"success": success_count, "failed": fail_count, "errors": errors}

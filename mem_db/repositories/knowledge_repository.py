@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from mem_db.knowledge.normalization import normalize_category, normalize_ontology_entity_id
+
 from .base import BaseRepository
 
 
@@ -24,6 +26,12 @@ class KnowledgeRepository(BaseRepository):
             except Exception:
                 item[key] = fallback
         item["verified"] = bool(item.get("verified"))
+        item["category"] = normalize_category(item.get("category"))
+        item["ontology_entity_id"] = normalize_ontology_entity_id(
+            item.get("ontology_entity_id")
+        )
+        # API compatibility: manager_knowledge persists "term"; expose "content" alias.
+        item["content"] = item.get("term")
         return item
 
     def add_proposal(
@@ -110,6 +118,7 @@ class KnowledgeRepository(BaseRepository):
         canonical_value: Optional[str] = None,
         ontology_entity_id: Optional[str] = None,
         framework_type: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
         components: Optional[Dict[str, Any]] = None,
         legal_use_cases: Optional[List[Dict[str, Any]]] = None,
         preferred_perspective: Optional[str] = None,
@@ -122,12 +131,12 @@ class KnowledgeRepository(BaseRepository):
         resolution_evidence: Optional[str] = None,
         resolution_date: Optional[str] = None,
         next_review_date: Optional[str] = None,
-        related_frameworks: Optional[List[str]] = None,
+        related_frameworks: Optional[List[Any]] = None,
         aliases: Optional[List[str]] = None,
         description: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
         relations: Optional[List[Dict[str, Any]]] = None,
-        sources: Optional[List[str]] = None,
+        sources: Optional[List[Any]] = None,
         notes: Optional[str] = None,
         source: Optional[str] = None,
         confidence: float = 0.5,
@@ -136,21 +145,29 @@ class KnowledgeRepository(BaseRepository):
         verified_by: Optional[str] = None,
         user_notes: Optional[str] = None,
     ) -> int:
+        term = str(term or "").strip()
+        category = normalize_category(category)
+        canonical_value = (
+            str(canonical_value or "").strip() if canonical_value is not None else None
+        )
+        ontology_entity_id = normalize_ontology_entity_id(ontology_entity_id)
+
         with self.connection() as conn:
             conn.execute(
                 """
                 INSERT INTO manager_knowledge (
                     term, category, canonical_value, ontology_entity_id,
-                    framework_type, components_json, legal_use_cases_json, preferred_perspective, is_canonical,
+                    framework_type, jurisdiction, components_json, legal_use_cases_json, preferred_perspective, is_canonical,
                     issue_category, severity, impact_description, root_cause_json, fix_status,
                     resolution_evidence, resolution_date, next_review_date, related_frameworks_json,
                     aliases_json, description, attributes_json, relations_json, sources_json,
                     notes, source, confidence, status, verified, verified_by, user_notes, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(term, category) DO UPDATE SET
                     canonical_value=excluded.canonical_value,
                     ontology_entity_id=excluded.ontology_entity_id,
                     framework_type=excluded.framework_type,
+                    jurisdiction=excluded.jurisdiction,
                     components_json=excluded.components_json,
                     legal_use_cases_json=excluded.legal_use_cases_json,
                     preferred_perspective=excluded.preferred_perspective,
@@ -179,7 +196,7 @@ class KnowledgeRepository(BaseRepository):
                     updated_at=CURRENT_TIMESTAMP
                 """,
                 (
-                    term, category, canonical_value, ontology_entity_id, framework_type,
+                    term, category, canonical_value, ontology_entity_id, framework_type, jurisdiction,
                     json.dumps(components or {}), json.dumps(legal_use_cases or []), preferred_perspective,
                     1 if is_canonical else 0, issue_category, severity, impact_description,
                     json.dumps(root_cause or []), fix_status, resolution_evidence, resolution_date,
@@ -205,22 +222,25 @@ class KnowledgeRepository(BaseRepository):
         limit: int = 100,
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
+        normalized_category = normalize_category(category) if category else None
         with self.connection() as conn:
             where = []
             params: List[Any] = []
             if status:
                 where.append("status = ?")
                 params.append(status)
-            if category:
+            if normalized_category:
                 where.append("category = ?")
-                params.append(category)
+                params.append(normalized_category)
             if query:
                 where.append("(term LIKE ? OR canonical_value LIKE ? OR notes LIKE ?)")
                 q = f"%{query}%"
                 params.extend([q, q, q])
             where_clause = f"WHERE {' AND '.join(where)}" if where else ""
             rows = conn.execute(
-                f"SELECT * FROM manager_knowledge {where_clause} ORDER BY updated_at DESC, created_at DESC LIMIT ? OFFSET ?",
+                # Keep row placement stable in editable tables; avoid post-save jumps caused by
+                # updated_at resorting.
+                f"SELECT * FROM manager_knowledge {where_clause} ORDER BY id ASC LIMIT ? OFFSET ?",
                 [*params, limit, offset],
             ).fetchall()
             out: List[Dict[str, Any]] = []
@@ -242,8 +262,31 @@ class KnowledgeRepository(BaseRepository):
         self,
         knowledge_id: int,
         *,
+        term: Optional[str] = None,
+        category: Optional[str] = None,
         canonical_value: Optional[str] = None,
         ontology_entity_id: Optional[str] = None,
+        framework_type: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
+        components: Optional[Dict[str, Any]] = None,
+        legal_use_cases: Optional[List[Dict[str, Any]]] = None,
+        preferred_perspective: Optional[str] = None,
+        is_canonical: Optional[bool] = None,
+        issue_category: Optional[str] = None,
+        severity: Optional[str] = None,
+        impact_description: Optional[str] = None,
+        root_cause: Optional[List[Dict[str, Any]]] = None,
+        fix_status: Optional[str] = None,
+        resolution_evidence: Optional[str] = None,
+        resolution_date: Optional[str] = None,
+        next_review_date: Optional[str] = None,
+        related_frameworks: Optional[List[Any]] = None,
+        aliases: Optional[List[str]] = None,
+        description: Optional[str] = None,
+        attributes: Optional[Dict[str, Any]] = None,
+        relations: Optional[List[Dict[str, Any]]] = None,
+        sources: Optional[List[Any]] = None,
+        source: Optional[str] = None,
         confidence: Optional[float] = None,
         status: Optional[str] = None,
         verified: Optional[bool] = None,
@@ -253,12 +296,81 @@ class KnowledgeRepository(BaseRepository):
     ) -> bool:
         updates: list[str] = []
         params: list[Any] = []
+        if term is not None:
+            updates.append("term = ?")
+            params.append(str(term).strip())
+        if category is not None:
+            updates.append("category = ?")
+            params.append(normalize_category(category))
         if canonical_value is not None:
             updates.append("canonical_value = ?")
-            params.append(canonical_value)
+            params.append(str(canonical_value).strip())
         if ontology_entity_id is not None:
             updates.append("ontology_entity_id = ?")
-            params.append(ontology_entity_id)
+            params.append(normalize_ontology_entity_id(ontology_entity_id))
+        if framework_type is not None:
+            updates.append("framework_type = ?")
+            params.append(framework_type)
+        if jurisdiction is not None:
+            updates.append("jurisdiction = ?")
+            params.append(jurisdiction)
+        if components is not None:
+            updates.append("components_json = ?")
+            params.append(json.dumps(components))
+        if legal_use_cases is not None:
+            updates.append("legal_use_cases_json = ?")
+            params.append(json.dumps(legal_use_cases))
+        if preferred_perspective is not None:
+            updates.append("preferred_perspective = ?")
+            params.append(preferred_perspective)
+        if is_canonical is not None:
+            updates.append("is_canonical = ?")
+            params.append(1 if is_canonical else 0)
+        if issue_category is not None:
+            updates.append("issue_category = ?")
+            params.append(issue_category)
+        if severity is not None:
+            updates.append("severity = ?")
+            params.append(severity)
+        if impact_description is not None:
+            updates.append("impact_description = ?")
+            params.append(impact_description)
+        if root_cause is not None:
+            updates.append("root_cause_json = ?")
+            params.append(json.dumps(root_cause))
+        if fix_status is not None:
+            updates.append("fix_status = ?")
+            params.append(fix_status)
+        if resolution_evidence is not None:
+            updates.append("resolution_evidence = ?")
+            params.append(resolution_evidence)
+        if resolution_date is not None:
+            updates.append("resolution_date = ?")
+            params.append(resolution_date)
+        if next_review_date is not None:
+            updates.append("next_review_date = ?")
+            params.append(next_review_date)
+        if related_frameworks is not None:
+            updates.append("related_frameworks_json = ?")
+            params.append(json.dumps(related_frameworks))
+        if aliases is not None:
+            updates.append("aliases_json = ?")
+            params.append(json.dumps(aliases))
+        if description is not None:
+            updates.append("description = ?")
+            params.append(description)
+        if attributes is not None:
+            updates.append("attributes_json = ?")
+            params.append(json.dumps(attributes))
+        if relations is not None:
+            updates.append("relations_json = ?")
+            params.append(json.dumps(relations))
+        if sources is not None:
+            updates.append("sources_json = ?")
+            params.append(json.dumps(sources))
+        if source is not None:
+            updates.append("source = ?")
+            params.append(source)
         if confidence is not None:
             updates.append("confidence = ?")
             params.append(float(confidence))
@@ -302,6 +414,9 @@ class KnowledgeRepository(BaseRepository):
             return (cur.rowcount or 0) > 0
 
     def set_ontology_link(self, knowledge_id: int, ontology_entity_id: str) -> bool:
+        normalized_ontology_id = normalize_ontology_entity_id(ontology_entity_id)
+        if not normalized_ontology_id:
+            return False
         with self.connection() as conn:
             cur = conn.execute(
                 """
@@ -309,7 +424,7 @@ class KnowledgeRepository(BaseRepository):
                 SET ontology_entity_id = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (ontology_entity_id, knowledge_id),
+                (normalized_ontology_id, knowledge_id),
             )
             conn.commit()
             return cur.rowcount > 0
@@ -329,10 +444,11 @@ class KnowledgeRepository(BaseRepository):
             return cur.rowcount > 0
 
     def has_term(self, term: str, category: Optional[str] = None) -> bool:
+        normalized_category = normalize_category(category) if category else None
         with self.connection() as conn:
             row = conn.execute(
                 "SELECT 1 FROM manager_knowledge WHERE term = ? AND (? IS NULL OR category = ?) LIMIT 1",
-                (term, category, category),
+                (term, normalized_category, normalized_category),
             ).fetchone()
             return row is not None
 

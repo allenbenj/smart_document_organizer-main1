@@ -7,6 +7,9 @@ Shared helper methods for organization workflows.
 import os
 import re
 from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 
 def normalize_root_scope(path_str: str) -> str:
     """Normalize folder path for consistent API usage."""
@@ -47,7 +50,10 @@ def validate_canonical_path(path_str: str) -> str:
                     break
             if not matched:
                 current = current / part
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                f"Error during canonical path validation for part '{part}' in '{current}': {e}"
+            )
             current = current / part
             
     return normalize_root_scope(str(current))
@@ -91,6 +97,7 @@ def get_existing_runtime_roots(root: str) -> list[str]:
             p = Path(canonical)
             if p.exists() and p.is_dir():
                 existing.append(canonical)
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Error checking runtime root '{candidate}': {e}")
             continue
     return existing

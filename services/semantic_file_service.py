@@ -5,14 +5,19 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from mem_db.database import DatabaseManager
 
+logger = logging.getLogger(__name__)
+
 
 class SemanticFileService:
+    _embedding_model_cache: Dict[str, Any] = {}
+
     def __init__(self, db: DatabaseManager):
         self.db = db
 
@@ -81,6 +86,47 @@ class SemanticFileService:
             start = max(start + 1, end - overlap)
         return chunks
 
+    @classmethod
+    def _resolve_local_model_path(cls, model_name: str) -> Optional[Path]:
+        raw = (model_name or "").strip()
+        if not raw:
+            return None
+        direct = Path(raw)
+        if direct.exists() and direct.is_dir():
+            return direct
+        local = Path("models") / raw
+        if local.exists() and local.is_dir():
+            return local
+        return None
+
+    @classmethod
+    def _load_embedding_model(cls, model_name: str) -> Any:
+        key = (model_name or "").strip()
+        if not key:
+            raise ValueError("embedding model name is required")
+        if key in cls._embedding_model_cache:
+            return cls._embedding_model_cache[key]
+
+        from sentence_transformers import SentenceTransformer
+
+        model_path = cls._resolve_local_model_path(key)
+        if model_path:
+            model = SentenceTransformer(str(model_path))
+        else:
+            model = SentenceTransformer(key)
+
+        cls._embedding_model_cache[key] = model
+        return model
+
+    def _compute_embeddings(self, texts: List[str], embedding_model: str) -> List[List[float]]:
+        model_name = (embedding_model or "").strip() or "local-hash-v1"
+        if model_name.lower() == "local-hash-v1":
+            return [self._deterministic_embedding(t) for t in texts]
+
+        model = self._load_embedding_model(model_name)
+        vectors = model.encode(texts, normalize_embeddings=True)
+        return [list(map(float, row)) for row in vectors]
+
     @staticmethod
     def _extract_tables(content: str, ext: str) -> List[Dict[str, Any]]:
         if ext not in {".csv", ".tsv"}:
@@ -147,13 +193,25 @@ class SemanticFileService:
 
         chunk_ids = self.db.replace_file_chunks(file_id, chunk_payload)
 
+        texts = [str(chunk.get("content") or "") for chunk in chunk_payload]
+        try:
+            embeddings = self._compute_embeddings(texts, embedding_model)
+            effective_model = embedding_model
+        except Exception as e:
+            logger.warning(
+                "Embedding model '%s' unavailable, falling back to local-hash-v1: %s",
+                embedding_model,
+                e,
+            )
+            embeddings = [self._deterministic_embedding(t) for t in texts]
+            effective_model = "local-hash-v1"
+
         embeddings_created = 0
-        for chunk_id, chunk in zip(chunk_ids, chunk_payload):
-            emb = self._deterministic_embedding(str(chunk.get("content") or ""))
+        for chunk_id, emb in zip(chunk_ids, embeddings):
             self.db.upsert_chunk_embedding(
                 file_id=file_id,
                 chunk_id=chunk_id,
-                embedding_model=embedding_model,
+                embedding_model=effective_model,
                 embedding=emb,
             )
             embeddings_created += 1
@@ -167,5 +225,5 @@ class SemanticFileService:
             "chunks": len(chunk_ids),
             "embeddings": embeddings_created,
             "tables": table_count,
-            "embedding_model": embedding_model,
+            "embedding_model": effective_model,
         }

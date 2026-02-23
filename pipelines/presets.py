@@ -93,4 +93,101 @@ def get_presets() -> List[Dict[str, Any]]:
             ],
             "context": {"path": "<fill path to document>"},
         },
+        {
+            "name": "Adversarial Shadow Mode",
+            "description": "Synthetic litigation: DA simulation (MECE) triggers parallel Defense refutation using REBEL and NLI models.",
+            "steps": [
+                {"name": "process_document", "options": {"id": "p1"}},
+                {
+                    "name": "shadow_da_simulation",
+                    "options": {
+                        "id": "da_sim",
+                        "depends_on": ["p1"],
+                        "model": "rebel-large",
+                        "principle": "MECE"
+                    }
+                },
+                {
+                    "name": "refutation_search",
+                    "options": {
+                        "id": "defense_refute",
+                        "depends_on": ["da_sim"],
+                        "model": "nli-deberta-v3-base"
+                    }
+                }
+            ],
+            "context": {"path": "<fill path to document>"},
+        },
+        {
+            "name": "Toulmin Verification",
+            "description": "Ensures logical traceability by forcing mapping of Data, Warrant, and Backing with NLI validation gates.",
+            "steps": [
+                {"name": "process_document", "options": {"id": "p1"}},
+                {
+                    "name": "extract_claims",
+                    "options": {"id": "claims", "depends_on": ["p1"]}
+                },
+                {
+                    "name": "toulmin_mapping",
+                    "options": {
+                        "id": "toulmin",
+                        "depends_on": ["claims"],
+                        "validation_gate": 0.85,
+                        "model": "nli-deberta-v3-base"
+                    }
+                }
+            ],
+            "context": {"path": "<fill path to document>"},
+        },
+        {
+            "name": "Self-Correcting Motion Drafting Loop",
+            "description": "Consumes facts, drafts a motion, runs Adversarial Shadow Mode + Toulmin Verification, then reassesses the final product.",
+            "steps": [
+                {"name": "process_document", "options": {"id": "p1"}},
+                {
+                    "name": "expert_prompt",
+                    "options": {
+                        "id": "draft",
+                        "depends_on": ["p1"],
+                        "agent_name": "Ava _Legal Writer_",
+                        "task_type": "motion_drafting"
+                    }
+                },
+                {
+                    "name": "shadow_da_simulation",
+                    "options": {
+                        "id": "da_sim",
+                        "depends_on": ["draft"],
+                        "model": "rebel-large",
+                        "principle": "MECE"
+                    }
+                },
+                {
+                    "name": "refutation_search",
+                    "options": {
+                        "id": "defense_refute",
+                        "depends_on": ["da_sim"],
+                        "model": "nli-deberta-v3-base"
+                    }
+                },
+                {
+                    "name": "toulmin_mapping",
+                    "options": {
+                        "id": "toulmin",
+                        "depends_on": ["defense_refute"],
+                        "validation_gate": 0.85,
+                        "model": "nli-deberta-v3-base"
+                    }
+                },
+                {
+                    "name": "reassess_motion",
+                    "options": {
+                        "id": "final_polish",
+                        "depends_on": ["toulmin"],
+                        "persona": "Aria _Appellate Specialist_"
+                    }
+                }
+            ],
+            "context": {"path": "<fill path to document>"},
+        },
     ]

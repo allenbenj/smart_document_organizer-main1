@@ -9,6 +9,9 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from mem_db.database import get_database_manager
 from mem_db.knowledge import get_knowledge_manager
+from services.jurisdiction_service import jurisdiction_service
+from services.provenance_service import get_provenance_service, ProvenanceService # New import
+from services.contracts.aedis_models import ProvenanceRecord # New import for type hinting
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +20,10 @@ class KnowledgeService:
     Service for Knowledge Graph interactions.
     Encapsulates logic from routes/knowledge.py.
     """
-    def __init__(self, knowledge_manager=None):
+    def __init__(self, knowledge_manager=None, provenance_service: Optional[ProvenanceService] = None):
         self.knowledge_manager = knowledge_manager or get_knowledge_manager()
         self.db = get_database_manager()
+        self.provenance_service = provenance_service or get_provenance_service() # New service
 
     def _check_available(self) -> bool:
         """Checks if manager is available."""
@@ -66,7 +70,8 @@ class KnowledgeService:
                          attributes: Dict[str, Any] = None,
                          content: str = None,
                          jurisdiction: str = None,
-                         legal_domain: str = None) -> Dict[str, Any]:
+                         legal_domain: str = None,
+                         provenance_record: Optional[ProvenanceRecord] = None) -> Dict[str, Any]:
         """
         Add an entity to the graph.
         """
@@ -77,12 +82,18 @@ class KnowledgeService:
         if legal_domain:
             metadata.setdefault("legal_domain", legal_domain)
 
+        resolved_jurisdiction = jurisdiction_service.resolve(
+            jurisdiction,
+            metadata=metadata,
+        )
+
         ent_id = await self.knowledge_manager.add_entity(
             name=name,
             entity_type=entity_type,
             content=content,
-            jurisdiction=jurisdiction,
+            jurisdiction=resolved_jurisdiction,
             metadata=metadata,
+            provenance_record=provenance_record, # Pass through provenance
         )
 
         return {"id": ent_id}
@@ -106,7 +117,8 @@ class KnowledgeService:
                                source_id: str,
                                target_id: str,
                                relation_type: str,
-                               properties: Dict[str, Any] = None) -> Dict[str, Any]:
+                               properties: Dict[str, Any] = None,
+                               provenance_record: Optional[ProvenanceRecord] = None) -> Dict[str, Any]:
         """Add a relationship between entities."""
         if not self._check_available():
             raise RuntimeError("Knowledge manager unavailable")
@@ -116,6 +128,7 @@ class KnowledgeService:
             target_id=target_id,
             relation_type=relation_type,
             metadata=properties or {},
+            provenance_record=provenance_record, # Pass through provenance
         )
         return {"id": rel_id}
 
@@ -341,6 +354,18 @@ class KnowledgeService:
         kind = str(prop.get("proposal_type") or "")
         data = prop.get("payload_json") or {}
 
+        # Extract provenance from the payload
+        provenance_data = data.pop("provenance", None)
+        provenance_record: Optional[ProvenanceRecord] = None
+        if provenance_data:
+            try:
+                provenance_record = ProvenanceRecord(**provenance_data)
+            except Exception as e:
+                logger.warning(f"Could not parse provenance record from proposal {proposal_id}: {e}")
+                # Decide policy: fail-closed or proceed without provenance?
+                # For now, proceed without, but log warning.
+                # If we need fail-closed here, we'd raise ProvenanceGateError.
+
         if kind == "entity":
             res = await self.add_entity(
                 name=data.get("name"),
@@ -349,6 +374,7 @@ class KnowledgeService:
                 content=data.get("content"),
                 jurisdiction=data.get("jurisdiction"),
                 legal_domain=data.get("legal_domain"),
+                provenance_record=provenance_record, # Pass through provenance
             )
             self.db.knowledge_update_proposal_status(proposal_id, status="approved")
             return {"approved": True, "created": res}
@@ -359,6 +385,7 @@ class KnowledgeService:
                 target_id=data.get("target_id"),
                 relation_type=data.get("relation_type"),
                 properties=data.get("properties"),
+                provenance_record=provenance_record, # Pass through provenance
             )
             self.db.knowledge_update_proposal_status(proposal_id, status="approved")
             return {"approved": True, "created": res}

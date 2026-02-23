@@ -3,7 +3,7 @@ import os
 import hashlib
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -16,6 +16,7 @@ class AIFileSystemBuilder:
         self.deepseek_key = os.getenv('DEEPSEEK_API_KEY')
         self.xai_key = os.getenv('XAI_API_KEY')
         self.ollama_url = "http://localhost:11434/api/chat" # Added from another script for consistency
+        self.current_ai_model_version = os.getenv("CURRENT_AI_MODEL_VERSION", "ollama-phi3-mini-v2") # New: Current model version
 
     # --- THIS IS THE METHOD THAT WAS INCORRECTLY INDENTED ---
     # It is now correctly inside the class.
@@ -179,23 +180,36 @@ class AIFileSystemBuilder:
         except Exception as e:
             return f"Exception: {e}"
     
-    def analyze_files_with_ai(self, batch_size=25):
+    def analyze_files_with_ai(self, batch_size=25, files_to_analyze=None):
         """Use AI team to analyze discovered files"""
         print(" Starting AI analysis of files...")
         
         conn = sqlite3.connect(self.new_db_path)
         cursor = conn.cursor()
         
-        # Get files that need analysis
-        cursor.execute("""
-        SELECT file_path, file_name, file_extension, content 
-        FROM files 
-        WHERE content IS NOT NULL 
-        AND length(content) > 10 
-        AND file_extension IN ('.py', '.js', '.md', '.txt', '.json', '.yaml', '.yml', '.sql', '.sh', '.html', '.css')
-        LIMIT ?
-        """, (batch_size,))
-        
+        if files_to_analyze is None:
+            # Get files that need analysis (not yet analyzed or stale)
+            cursor.execute("""
+            SELECT f.file_path, f.file_name, f.file_extension, f.content 
+            FROM files f
+            LEFT JOIN file_analysis fa ON f.file_path = fa.file_path
+            WHERE f.content IS NOT NULL 
+            AND length(f.content) > 10 
+            AND f.file_extension IN ('.py', '.js', '.md', '.txt', '.json', '.yaml', '.yml', '.sql', '.sh', '.html', '.css')
+            AND (fa.file_path IS NULL OR fa.ai_model_used != ? OR fa.analysis_timestamp < ?)
+            LIMIT ?
+            """, (self.current_ai_model_version, (datetime.now() - timedelta(days=90)).timestamp(), batch_size)) # New/stale analysis check
+        else:
+            # Analyze specific files if provided
+            placeholders = ','.join('?' for _ in files_to_analyze)
+            cursor.execute(f"""
+            SELECT file_path, file_name, file_extension, content 
+            FROM files 
+            WHERE file_path IN ({placeholders})
+            AND content IS NOT NULL 
+            AND length(content) > 10 
+            """, files_to_analyze)
+            
         files = cursor.fetchall()
         conn.close()
         
@@ -234,6 +248,43 @@ NOTES: [additional insights, max 200 chars]
         print(f" Analyzed {analyzed_count} files!")
         return analyzed_count
     
+    def reanalyze_stale_files(self, current_model_version: str, stale_days: int = 90, batch_size: int = 50):
+        """
+        Identifies and re-analyzes files that are either analyzed with an older model version
+        or whose analysis is older than stale_days.
+        """
+        print(f" Checking for stale analysis with model version '{current_model_version}' and stale days {stale_days}...")
+        
+        conn = sqlite3.connect(self.new_db_path)
+        cursor = conn.cursor()
+        
+        # Identify files with stale analysis
+        stale_cutoff_timestamp = (datetime.now() - timedelta(days=stale_days)).timestamp()
+        
+        cursor.execute("""
+        SELECT f.file_path
+        FROM files f
+        JOIN file_analysis fa ON f.file_path = fa.file_path
+        WHERE fa.ai_model_used != ? OR fa.analysis_timestamp < ?
+        LIMIT ?
+        """, (current_model_version, stale_cutoff_timestamp, batch_size))
+        
+        files_to_reanalyze = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        
+        if not files_to_reanalyze:
+            print(" No stale files found for re-analysis.")
+            return 0
+        
+        print(f" Found {len(files_to_reanalyze)} stale files. Re-analyzing...")
+        
+        # Re-analyze identified files
+        reanalyzed_count = self.analyze_files_with_ai(files_to_analyze=files_to_reanalyze)
+        
+        print(f" Re-analyzed {reanalyzed_count} files successfully!")
+        return reanalyzed_count
+
+
     def parse_analysis(self, result, file_path, file_name, file_ext):
         """Parse AI analysis into structured data"""
         analysis = {
@@ -246,7 +297,7 @@ NOTES: [additional insights, max 200 chars]
             'dependencies': '',
             'complexity_score': 5,
             'analysis_notes': result[:200],
-            'ai_model_used': 'ollama-phi3-mini'
+            'ai_model_used': self.current_ai_model_version # Use the builder's current model version
         }
         
         # Parse structured response
@@ -353,8 +404,8 @@ Please provide:
 2. Technology stack analysis
 3. Code organization insights
 4. Potential improvement areas
-5. System complexity evaluation
-6. Key components identification
+4. System complexity evaluation
+5. Key components identification
 
 Make it professional and actionable for developers.
 """

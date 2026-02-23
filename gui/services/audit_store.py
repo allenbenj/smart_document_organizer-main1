@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from threading import Lock
@@ -220,8 +221,12 @@ class OrganizationAuditStore:
             item = dict(r)
             try:
                 item["payload"] = json.loads(item.get("payload_json") or "{}")
-            except Exception:
-                item["payload"] = {}
+            except json.JSONDecodeError:
+                logging.warning("Failed to decode payload_json for event ID %s", item.get("id"))
+                item["payload"] = {"_error": "JSON decode failed"}
+            except Exception as e:
+                logging.exception("Unexpected error processing event ID %s: %s", item.get("id"), e)
+                item["payload"] = {"_error": f"Unexpected error: {e}"}
             out.append(item)
         return out
 
@@ -245,7 +250,11 @@ class OrganizationAuditStore:
             item = dict(r)
             try:
                 item["payload"] = json.loads(item.get("payload_json") or "{}")
-            except Exception:
-                item["payload"] = {}
+            except json.JSONDecodeError:
+                logging.warning("Failed to decode payload_json for learning case ID %s", item.get("id"))
+                item["payload"] = {"_error": "JSON decode failed"}
+            except Exception as e:
+                logging.exception("Unexpected error processing learning case ID %s: %s", item.get("id"), e)
+                item["payload"] = {"_error": f"Unexpected error: {e}"}
             out.append(item)
         return out

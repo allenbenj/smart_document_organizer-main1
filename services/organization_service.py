@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 import difflib
+import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,8 +16,10 @@ from core.llm_providers import LLMManager
 from mem_db.database import DatabaseManager
 from services.organization_llm import OrganizationLLMPolicy, OrganizationPromptAdapter
 from services.organization_naming_rules import OrganizationNamingRules
-from services.provenance_service import provenance_service
+from services.provenance_service import ProvenanceGateError, get_provenance_service
 from services.contracts.aedis_models import ProvenanceRecord, EvidenceSpan
+
+logger = logging.getLogger(__name__)
 
 
 class OrganizationService:
@@ -25,9 +28,10 @@ class OrganizationService:
     _llm_fail_count: int = 0
     _llm_circuit_open_until: float = 0.0
 
-    def __init__(self, db: DatabaseManager):
+    def __init__(self, db: DatabaseManager, provenance_service: Optional[ProvenanceService] = None):
         self.db = db
         self.naming_rules = OrganizationNamingRules()
+        self.provenance_service = provenance_service or get_provenance_service() # New service
         self.llm_manager = LLMManager(
             api_key=os.getenv("XAI_API_KEY", "").strip() or None,
             provider="xai",
@@ -72,6 +76,20 @@ class OrganizationService:
             safe_name = "document"
         return self._normalize_naming_rules(safe_folder, safe_name)
 
+    @staticmethod
+    def _validate_source_sha256(rec: Dict[str, Any]) -> str:
+        raw = str(rec.get("sha256") or "").strip().lower()
+        file_id = rec.get("id")
+        if not raw:
+            raise RuntimeError(
+                f"organization_missing_source_sha256: file_id={file_id}"
+            )
+        if not re.fullmatch(r"[a-f0-9]{64}", raw):
+            raise RuntimeError(
+                f"organization_invalid_source_sha256: file_id={file_id}"
+            )
+        return raw
+
     def _normalize_naming_rules(self, folder: str, filename: str) -> tuple[str, str]:
         """Apply configurable global naming policy for folder + filename."""
         try:
@@ -88,12 +106,14 @@ class OrganizationService:
         current_path: str,
         preview: str,
         known_folders: Optional[List[str]] = None,
+        semantic_summary: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         prompt = OrganizationPromptAdapter.build_proposal_prompt(
             file_name=file_name,
             current_path=current_path,
             preview=preview,
             known_folders=known_folders or [],
+            semantic_summary=semantic_summary,
         )
 
         def _parse_json_maybe(text: str) -> Dict[str, Any]:
@@ -552,6 +572,7 @@ class OrganizationService:
             meta = rec.get("metadata_json") or {}
             preview = str(meta.get("preview") or "")
             row_status = str(rec.get("status") or "").strip().lower()
+            source_sha256 = self._validate_source_sha256(rec)
             llm = self._llm_suggest(
                 provider=provider_name,
                 model=model_name,
@@ -559,6 +580,7 @@ class OrganizationService:
                 current_path=str(rec.get("normalized_path") or ""),
                 preview=preview,
                 known_folders=known_folders,
+                semantic_summary=rec.get("metadata_json", {}).get("semantic_analysis_summary", None),
             )
             if not llm.get("proposed_folder") or not llm.get("proposed_filename"):
                 raise RuntimeError(
@@ -639,32 +661,49 @@ class OrganizationService:
                     except (ValueError, TypeError):
                         continue
                 
-                # If no spans provided by LLM, create a contextual file-level span (0-preview_len)
+                # If no spans provided by LLM, require deterministic contextual evidence.
                 if not spans:
+                    fallback_text = preview.strip() or name.strip() or str(
+                        rec.get("normalized_path") or ""
+                    ).strip()
+                    if not fallback_text:
+                        raise RuntimeError(
+                            f"organization_missing_evidence_context: file_id={rec.get('id')}"
+                        )
                     spans.append(EvidenceSpan(
                         artifact_row_id=int(rec.get("id")),
                         start_char=0,
-                        end_char=len(preview),
-                        quote=preview[:100] + "..." if len(preview) > 100 else preview
+                        end_char=len(fallback_text),
+                        quote=(
+                            f"{fallback_text[:100]}..."
+                            if len(fallback_text) > 100
+                            else fallback_text
+                        ),
                     ))
 
                 prov_record = ProvenanceRecord(
                     source_artifact_row_id=int(rec.get("id")),
-                    source_sha256=str(rec.get("sha256") or "0"*64), # Temporary until Phase 1 active
+                    source_sha256=source_sha256,
                     captured_at=datetime.now(timezone.utc),
                     extractor=f"organizer:{provider_name}:{model_name}",
                     spans=spans,
                     notes=f"Auto-generated proposal for {name}"
                 )
                 
-                prov_id = provenance_service.record_provenance(
+                prov_id = get_provenance_service().record_provenance(
                     prov_record, 
                     target_type="organization_proposal", 
                     target_id=str(pid)
                 )
                 proposal["metadata"]["provenance_id"] = prov_id
+            except (ProvenanceGateError, RuntimeError) as prov_err:
+                logger.error(f"Provenance gate failed for proposal {pid}: {prov_err}. Deleting proposal.")
+                self.db.organization_delete_proposal(pid) # Delete the proposal if provenance fails
+                raise # Re-raise to fail the generation for this proposal
             except Exception as prov_err:
-                logger.warning(f"Failed to record provenance for proposal {pid}: {prov_err}")
+                logger.exception(f"An unexpected error occurred while recording provenance for proposal {pid}: {prov_err}. Deleting proposal.")
+                self.db.organization_delete_proposal(pid) # Delete the proposal if provenance fails
+                raise # Re-raise to fail the generation for this proposal
 
             rows.append(proposal)
             created += 1

@@ -18,7 +18,10 @@ Key Features:
 
 import json
 import os
-from typing import Any
+import re
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Optional
 
 try:
     import requests
@@ -72,14 +75,16 @@ except ImportError:
     QDropEvent = Any  # type: ignore[misc,assignment]
 
 from .status_presenter import TabStatusPresenter  # noqa: E402
+from gui.core.base_tab import BaseTab
 if PYSIDE6_AVAILABLE:
     from ..ui import JobStatusWidget, ResultsSummaryBox, DocumentPreviewWidget  # noqa: E402
 from .workers import UploadManyFilesWorker  # noqa: E402
 from ..services.processing_service import processing_service, JobStatus, ProcessingJob
 from ..services import api_client
+from gui.core.path_config import project_root_path
 
 
-class DocumentProcessingTab(QWidget):  # type: ignore[misc]
+class DocumentProcessingTab(BaseTab):  # type: ignore[misc]
     """
     Tab for document content extraction and processing.
     
@@ -93,9 +98,8 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
     processing_completed = Signal(dict)  # type: ignore[misc]
     processing_error = Signal(str)  # type: ignore[misc]
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.worker = None
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Document Processing", asyncio_thread, parent)
         self.current_results = None
         self.current_job_id = None
         self.selected_files = [] # List of absolute paths
@@ -134,12 +138,10 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         
     def setup_ui(self):
         """Setup the user interface."""
-        layout = QVBoxLayout(self)
-
         # Title
         title = QLabel("Document Processing")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
 
         # Description
         desc = QLabel(
@@ -148,11 +150,11 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         )
         desc.setWordWrap(True)
         desc.setStyleSheet("color: #666; padding: 5px 0;")
-        layout.addWidget(desc)
+        self.main_layout.addWidget(desc)
 
         # Main splitter
         splitter = QSplitter(Qt.Horizontal)
-        layout.addWidget(splitter)
+        self.main_layout.addWidget(splitter)
 
         # Left panel - Input
         left_widget = QWidget()
@@ -313,7 +315,7 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         self.status_label.setStyleSheet("padding: 5px; background-color: #f5f5f5; border-radius: 3px;")
         left_layout.addWidget(self.status_label)
         
-        self.status = TabStatusPresenter(self, self.status_label, source="Document Processing")
+        # self.status is now handled by BaseTab
         
         if PYSIDE6_AVAILABLE:
             self.job_status = JobStatusWidget("Document Processing Job")
@@ -607,20 +609,19 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         self.status.info(f"Processing {len(self.selected_files)} document(s)...")
 
         # Create worker with job context
-        self.worker = UploadManyFilesWorker(
+        worker = UploadManyFilesWorker(
             paths=self.selected_files,
             options=options,
             job_id=self.current_job_id,
         )
 
         # Connect signals to explicit methods to ensure thread safety
-        self.worker.progress_update.connect(self._on_worker_progress)
-        self.worker.finished_ok.connect(self._on_worker_finished)
-        self.worker.finished_err.connect(self._on_worker_error)
-        self.worker.finished.connect(self.cleanup_worker)
-
+        worker.progress_update.connect(self._on_worker_progress)
+        worker.finished_ok.connect(self._on_worker_finished)
+        # BaseTab now handles finished_err and finished signals automatically
+        
         # Start processing
-        self.worker.start()
+        self.start_worker(worker)
 
     def _on_worker_progress(self, pct, msg):
         """Handle progress updates from worker on the UI thread."""
@@ -658,6 +659,7 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
             
             self.stop_button.setEnabled(False)
             self.status.warn("Stop requested. Waiting for worker to finish...")
+            self.stop_worker() # Use BaseTab's stop_worker
 
     def on_progress_update(self, message: str):
         """Handle progress updates from worker."""
@@ -667,6 +669,11 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         """Handle processing completion."""
         # Results are already normalized by ApiClient
         self.current_results = results
+
+        output_dir, output_written, output_errors = self._write_results_to_output_folder(
+            results,
+            list(self.selected_files),
+        )
         
         # Hide progress bar
         self.progress_bar.setVisible(False)
@@ -688,13 +695,20 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         files_count = len(results.get("items", []))
         success_count = int(results.get("processed_count", 0))
         failed_count = int(results.get("failed_count", 0))
+        output_note = ""
+        if output_written:
+            output_note = f" | output: {output_written} file(s) -> {output_dir}"
+        elif output_errors:
+            output_note = f" | output save failed for {output_errors} file(s)"
         if failed_count > 0:
             self.status.warn(
                 f"Processed {success_count}/{files_count} document(s) "
-                f"({failed_count} failed)"
+                f"({failed_count} failed){output_note}"
             )
         else:
-            self.status.success(f"✓ Successfully processed {files_count} document(s)")
+            self.status.success(
+                f"✓ Successfully processed {files_count} document(s){output_note}",
+            )
 
     def on_processing_error(self, error_msg):
         """Handle processing errors."""
@@ -721,11 +735,7 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         # Emit error signal
         self.processing_error.emit(error_msg)
 
-    def cleanup_worker(self):
-        """Clean up worker thread after processing completes."""
-        if self.worker:
-            self.worker.deleteLater()
-            self.worker = None
+
 
     # -------------------------------------------------------------------------
     # Results Display
@@ -850,6 +860,93 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
         """
         return html
 
+    def _write_results_to_output_folder(
+        self,
+        results: dict[str, Any],
+        input_paths: list[str],
+    ) -> tuple[str, int, int]:
+        """
+        Persist run output to a timestamped folder.
+
+        Assumptions:
+        - Save output by default so users can inspect artifacts after GUI closes.
+        - One run folder per processing job to avoid overwriting prior outputs.
+        """
+        base_dir = os.getenv("SMART_DOC_PROCESSING_OUTPUT_DIR", "").strip()
+        if not base_dir:
+            if input_paths:
+                parent_dirs = [str(Path(p).resolve().parent) for p in input_paths if p]
+                if parent_dirs:
+                    try:
+                        base_dir = os.path.commonpath(parent_dirs)
+                    except ValueError:
+                        base_dir = parent_dirs[0]
+            if not base_dir:
+                base_dir = str(project_root_path() / "output" / "document_processing")
+        run_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = Path(base_dir) / f"processing_output_{run_stamp}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        items = results.get("items", [])
+        written = 0
+        errors = 0
+
+        for idx, item in enumerate(items, start=1):
+            file_name = str(item.get("filename") or f"item_{idx}")
+            safe_name = self._safe_output_name(file_name)
+            item_json_path = run_dir / f"{idx:03d}_{safe_name}.json"
+            item_txt_path = run_dir / f"{idx:03d}_{safe_name}.txt"
+
+            try:
+                with item_json_path.open("w", encoding="utf-8") as f:
+                    json.dump(item, f, indent=2, ensure_ascii=False)
+
+                with item_txt_path.open("w", encoding="utf-8") as f:
+                    if item.get("error"):
+                        f.write("Status: ERROR\n")
+                        f.write(f"Error: {item.get('error')}\n")
+                    else:
+                        f.write("Status: SUCCESS\n")
+                        metadata = item.get("metadata") or {}
+                        if isinstance(metadata, dict) and metadata:
+                            f.write("\nMetadata:\n")
+                            for key, value in metadata.items():
+                                if value:
+                                    f.write(f"- {key}: {value}\n")
+                        summary = str(item.get("summary") or "").strip()
+                        if summary:
+                            f.write("\nSummary:\n")
+                            f.write(summary + "\n")
+                        content = str(item.get("content") or "")
+                        if content:
+                            f.write("\nContent:\n")
+                            f.write(content + "\n")
+                written += 2
+            except Exception:
+                errors += 1
+
+        summary_path = run_dir / "run_summary.json"
+        summary_payload = {
+            "generated_at": datetime.now().isoformat(),
+            "processed_count": int(results.get("processed_count", 0)),
+            "failed_count": int(results.get("failed_count", 0)),
+            "items_count": len(items),
+            "output_files_written": written,
+            "output_write_errors": errors,
+            "results": results,
+        }
+        with summary_path.open("w", encoding="utf-8") as f:
+            json.dump(summary_payload, f, indent=2, ensure_ascii=False)
+        written += 1
+
+        return str(run_dir), written, errors
+
+    @staticmethod
+    def _safe_output_name(raw_name: str) -> str:
+        stem = Path(raw_name).stem or "item"
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._")
+        return safe[:80] or "item"
+
     # -------------------------------------------------------------------------
     # Export
     # -------------------------------------------------------------------------
@@ -942,12 +1039,7 @@ class DocumentProcessingTab(QWidget):  # type: ignore[misc]
                 f"Failed to export text:\n{e}"
             )
 
-    def closeEvent(self, event):
-        """Cleanup on close."""
-        if self.worker:
-            self.worker.requestInterruption()
-            self.worker.wait(1000)
-        super().closeEvent(event)
+
 
 
 # Legacy alias for backward compatibility

@@ -35,6 +35,8 @@ from mem_db.repositories.organization_repository import OrganizationRepository
 from mem_db.repositories.persona_repository import PersonaRepository
 from mem_db.repositories.taskmaster_repository import TaskMasterRepository
 from mem_db.repositories.watch_repository import WatchRepository
+from mem_db.repositories.analysis_version_repository import AnalysisVersionRepository
+from mem_db.repositories.learning_path_repository import LearningPathRepository
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -102,6 +104,8 @@ class DatabaseManager:
         self.file_index_repo = FileIndexRepository(self.get_connection)
         self.watch_repo = WatchRepository(self.get_connection)
         self.document_repo = DocumentRepository(self.get_connection)
+        self.analysis_version_repo = AnalysisVersionRepository(self.get_connection)
+        self.learning_path_repo = LearningPathRepository(self.get_connection)
 
         logger.info(f"Database initialized at: {self.db_path}")
 
@@ -495,6 +499,7 @@ class DatabaseManager:
                     canonical_value TEXT,
                     ontology_entity_id TEXT,
                     framework_type TEXT,
+                    jurisdiction TEXT,
                     components_json TEXT,
                     legal_use_cases_json TEXT,
                     preferred_perspective TEXT,
@@ -685,6 +690,51 @@ class DatabaseManager:
             """)
 
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS aedis_analysis_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    analysis_id TEXT NOT NULL UNIQUE,
+                    artifact_row_id INTEGER NOT NULL,
+                    version INTEGER NOT NULL,
+                    parent_version INTEGER,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    payload_json TEXT,
+                    audit_deltas_json TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (artifact_row_id) REFERENCES files_index(id) ON DELETE CASCADE
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS aedis_learning_paths (
+                    path_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    objective_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    ontology_version INTEGER NOT NULL DEFAULT 1,
+                    heuristic_snapshot_json TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS aedis_learning_path_steps (
+                    path_id TEXT NOT NULL,
+                    step_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    instruction TEXT NOT NULL,
+                    objective_id TEXT NOT NULL,
+                    heuristic_ids_json TEXT,
+                    evidence_spans_json TEXT,
+                    difficulty INTEGER NOT NULL DEFAULT 1,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    step_order INTEGER NOT NULL DEFAULT 1,
+                    PRIMARY KEY (path_id, step_id),
+                    FOREIGN KEY (path_id) REFERENCES aedis_learning_paths(path_id) ON DELETE CASCADE
+                )
+            """)
+
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS workflow_jobs (
                     job_id TEXT PRIMARY KEY,
                     workflow TEXT NOT NULL DEFAULT 'memory_first_v2',
@@ -851,10 +901,19 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_org_actions_file_id ON organization_actions(file_id)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learning_path_steps_path_order ON aedis_learning_path_steps(path_id, step_order)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_learning_path_steps_path_completed ON aedis_learning_path_steps(path_id, completed)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_workflow_jobs_status_updated ON workflow_jobs(status, updated_at)"
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_workflow_jobs_idempotency_key ON workflow_jobs(idempotency_key)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_aedis_analysis_versions_analysis_id ON aedis_analysis_versions(analysis_id)"
             )
 
             # Full-text search baseline over chunk titles/content
@@ -909,6 +968,9 @@ class DatabaseManager:
             rationale=rationale,
         )
 
+    def organization_delete_proposal(self, proposal_id: int) -> bool:
+        return self.organization_repo.delete_proposal(proposal_id)
+
     def organization_add_feedback(self, feedback: Dict[str, Any]) -> int:
         return self.organization_repo.add_feedback(feedback)
 
@@ -923,6 +985,65 @@ class DatabaseManager:
 
     def organization_stats(self) -> Dict[str, Any]:
         return self.organization_repo.stats()
+
+    # Analysis Version Operations
+    def add_analysis_version(self, analysis_version_data: Dict[str, Any]) -> int:
+        return self.analysis_version_repo.add_analysis_version(analysis_version_data)
+
+    def get_analysis_version(self, analysis_id: str) -> Optional[Dict[str, Any]]:
+        return self.analysis_version_repo.get_analysis_version(analysis_id)
+
+    def update_analysis_version(
+        self,
+        analysis_id: str,
+        *,
+        status: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        audit_deltas: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        return self.analysis_version_repo.update_analysis_version(
+            analysis_id, status=status, payload=payload, audit_deltas=audit_deltas
+        )
+
+    def list_analysis_versions(
+        self,
+        *,
+        artifact_row_id: Optional[int] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        return self.analysis_version_repo.list_analysis_versions(
+            artifact_row_id=artifact_row_id, status=status, limit=limit, offset=offset
+        )
+
+    def delete_analysis_version(self, analysis_id: str) -> bool:
+        return self.analysis_version_repo.delete_analysis_version(analysis_id)
+
+    # Learning Path Operations
+    def learning_path_upsert(self, path_data: Dict[str, Any]) -> bool:
+        return self.learning_path_repo.upsert_path(path_data)
+
+    def learning_path_get(self, path_id: str) -> Optional[Dict[str, Any]]:
+        return self.learning_path_repo.get_path(path_id)
+
+    def learning_path_update_step_completion(
+        self,
+        *,
+        path_id: str,
+        step_id: str,
+        completed: bool,
+        updated_at: str,
+    ) -> bool:
+        return self.learning_path_repo.update_step_completion(
+            path_id=path_id,
+            step_id=step_id,
+            completed=completed,
+            updated_at=updated_at,
+        )
+
+    def learning_path_list_recommended_steps(self, path_id: str) -> List[Dict[str, Any]]:
+        return self.learning_path_repo.list_recommended_steps(path_id)
 
     # Document CRUD Operations
 
@@ -1261,6 +1382,7 @@ class DatabaseManager:
         canonical_value: Optional[str] = None,
         ontology_entity_id: Optional[str] = None,
         framework_type: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
         components: Optional[Dict[str, Any]] = None,
         legal_use_cases: Optional[List[Dict[str, Any]]] = None,
         preferred_perspective: Optional[str] = None,
@@ -1273,12 +1395,12 @@ class DatabaseManager:
         resolution_evidence: Optional[str] = None,
         resolution_date: Optional[str] = None,
         next_review_date: Optional[str] = None,
-        related_frameworks: Optional[List[str]] = None,
+        related_frameworks: Optional[List[Any]] = None,
         aliases: Optional[List[str]] = None,
         description: Optional[str] = None,
         attributes: Optional[Dict[str, Any]] = None,
         relations: Optional[List[Dict[str, Any]]] = None,
-        sources: Optional[List[str]] = None,
+        sources: Optional[List[Any]] = None,
         notes: Optional[str] = None,
         source: Optional[str] = None,
         confidence: float = 0.5,
@@ -1293,6 +1415,7 @@ class DatabaseManager:
             canonical_value=canonical_value,
             ontology_entity_id=ontology_entity_id,
             framework_type=framework_type,
+            jurisdiction=jurisdiction,
             components=components,
             legal_use_cases=legal_use_cases,
             preferred_perspective=preferred_perspective,
@@ -1347,8 +1470,31 @@ class DatabaseManager:
         self,
         knowledge_id: int,
         *,
+        term: Optional[str] = None,
+        category: Optional[str] = None,
         canonical_value: Optional[str] = None,
         ontology_entity_id: Optional[str] = None,
+        framework_type: Optional[str] = None,
+        jurisdiction: Optional[str] = None,
+        components: Optional[Dict[str, Any]] = None,
+        legal_use_cases: Optional[List[Dict[str, Any]]] = None,
+        preferred_perspective: Optional[str] = None,
+        is_canonical: Optional[bool] = None,
+        issue_category: Optional[str] = None,
+        severity: Optional[str] = None,
+        impact_description: Optional[str] = None,
+        root_cause: Optional[List[Dict[str, Any]]] = None,
+        fix_status: Optional[str] = None,
+        resolution_evidence: Optional[str] = None,
+        resolution_date: Optional[str] = None,
+        next_review_date: Optional[str] = None,
+        related_frameworks: Optional[List[Any]] = None,
+        aliases: Optional[List[str]] = None,
+        description: Optional[str] = None,
+        attributes: Optional[Dict[str, Any]] = None,
+        relations: Optional[List[Dict[str, Any]]] = None,
+        sources: Optional[List[Any]] = None,
+        source: Optional[str] = None,
         confidence: Optional[float] = None,
         status: Optional[str] = None,
         verified: Optional[bool] = None,
@@ -1358,8 +1504,31 @@ class DatabaseManager:
     ) -> bool:
         return self.knowledge_repo.update_item(
             knowledge_id,
+            term=term,
+            category=category,
             canonical_value=canonical_value,
             ontology_entity_id=ontology_entity_id,
+            framework_type=framework_type,
+            jurisdiction=jurisdiction,
+            components=components,
+            legal_use_cases=legal_use_cases,
+            preferred_perspective=preferred_perspective,
+            is_canonical=is_canonical,
+            issue_category=issue_category,
+            severity=severity,
+            impact_description=impact_description,
+            root_cause=root_cause,
+            fix_status=fix_status,
+            resolution_evidence=resolution_evidence,
+            resolution_date=resolution_date,
+            next_review_date=next_review_date,
+            related_frameworks=related_frameworks,
+            aliases=aliases,
+            description=description,
+            attributes=attributes,
+            relations=relations,
+            sources=sources,
+            source=source,
             confidence=confidence,
             status=status,
             verified=verified,

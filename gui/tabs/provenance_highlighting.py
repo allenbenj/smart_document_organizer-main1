@@ -32,7 +32,7 @@ except ImportError:
     QWidget = object  # type: ignore
 
 from .status_presenter import TabStatusPresenter
-from services.provenance_service import get_provenance_service
+from gui.services import api_client
 from services.contracts.aedis_models import ProvenanceRecord
 
 logger = logging.getLogger(__name__)
@@ -180,8 +180,9 @@ class ProvenanceHighlightingTab(QWidget):  # type: ignore[misc]
 
         self.status.loading(f"Fetching provenance for {t_id}...")
         try:
-            service = get_provenance_service()
-            record = service.get_provenance_for_artifact(t_type, t_id)
+            payload = api_client.get_provenance_for_target(t_type, t_id)
+            item = payload.get("item", {}) if isinstance(payload, dict) else {}
+            record = ProvenanceRecord.model_validate(item) if item else None
             if not record:
                 self.status.warn("No provenance record found for this artifact")
                 return
@@ -189,9 +190,12 @@ class ProvenanceHighlightingTab(QWidget):  # type: ignore[misc]
             self.current_records = [record]
             self.update_record_list()
             self.status.success(f"Loaded provenance for {t_id}")
+        except RuntimeError as e:
+            logger.error(f"Service runtime error while loading provenance for {t_id}: {e}")
+            self.status.error(f"Service error: {e}")
         except Exception as e:
-            self.status.error(f"Failed to load provenance: {e}")
-
+            logger.exception(f"An unexpected error occurred while loading provenance for {t_id}: {e}")
+            self.status.error(f"An unexpected error occurred: {e}")
     def update_record_list(self):
         """Populate the record list widget."""
         self.record_list.clear()

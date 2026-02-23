@@ -7,23 +7,22 @@ in the background to keep the GUI responsive.
 
 import mimetypes
 import os  # noqa: E402
-from typing import Optional  # noqa: E402
-
+import json
+from typing import Optional # noqa: E402
 from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
     import PySide6.QtWidgets as _QtWidgets  # noqa: F401
     import PySide6.QtCore as _QtCore        # noqa: F401
     import PySide6.QtGui as _QtGui          # noqa: F401
-
 from PySide6.QtCore import QThread, Signal  # noqa: E402
-
 try:
     import requests  # noqa: E402
+    import requests.exceptions
 except ImportError:
     requests = None
 
 from ..services import api_client
+from ..utils import extract_content_from_response
 
 class SemanticAnalysisWorker(QThread):
     """Worker thread for semantic analysis operations."""
@@ -58,12 +57,7 @@ class SemanticAnalysisWorker(QThread):
             if not content and self.file_path:
                 # Upload the file to get content
                 resp = api_client.process_document(self.file_path)
-                data = resp.get("data", {})
-                if isinstance(data, dict):
-                    # Check for nested value (v2 schema)
-                    if "value" in data and isinstance(data["value"], dict):
-                        data = data["value"]
-                    content = data.get("content") or data.get("text") or ""
+                content = extract_content_from_response(resp)
 
             if not content:
                 raise RuntimeError("No content to analyze")
@@ -75,8 +69,14 @@ class SemanticAnalysisWorker(QThread):
                 "deep_analysis": self.deep_analysis
             })
             self.result_ready.emit(body.get("data") or {})
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e: # Catch custom RuntimeError
             self.error_occurred.emit(str(e))
+        except Exception as e:
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")
 
 
 class EntityExtractionWorker(QThread):
@@ -114,8 +114,14 @@ class EntityExtractionWorker(QThread):
             body = resp.json()
             self.result_ready.emit(body.get("data") or {})
 
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e: # Catch custom RuntimeError
             self.error_occurred.emit(str(e))
+        except Exception as e:
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")
 
 
 class LegalReasoningWorker(QThread):
@@ -154,9 +160,14 @@ class LegalReasoningWorker(QThread):
             body = resp.json()
             self.result_ready.emit(body.get("data") or {})
 
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e: # Catch custom RuntimeError
             self.error_occurred.emit(str(e))
-
+        except Exception as e:
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")
 
 class DocumentProcessingWorker(QThread):
     """Worker thread for document processing operations."""
@@ -198,5 +209,13 @@ class DocumentProcessingWorker(QThread):
 
             self.result_ready.emit({"results": results})
 
-        except Exception as e:
+        except (IOError, mimetypes.MimeTypesError) as e:
+            self.error_occurred.emit(f"File processing error: {e}")
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e: # Catch custom RuntimeError
             self.error_occurred.emit(str(e))
+        except Exception as e:
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")

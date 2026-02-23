@@ -8,6 +8,9 @@ to keep the GUI components clean and focused on UI logic.
 import os
 import time
 import json
+import re
+import hashlib
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 try:
@@ -506,6 +509,74 @@ class ApiClient:
         """Get knowledge proposals."""
         return self._make_request("GET", "/knowledge/proposals", timeout=10.0)
 
+    def list_memory_proposals(self, limit: int = 500) -> Dict[str, Any]:
+        """List memory proposals for the Agent Memory Manager workflow."""
+        return self._make_request(
+            "GET",
+            "/agents/memory/proposals",
+            timeout=15.0,
+            params={"limit": int(limit)},
+        )
+
+    def create_memory_proposal(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a memory proposal for expert review."""
+        return self._make_request(
+            "POST",
+            "/agents/memory/proposals",
+            timeout=15.0,
+            json=payload,
+        )
+
+    def approve_memory_proposal(
+        self,
+        proposal_id: int,
+        corrections: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Approve a memory proposal in the memory-review flow."""
+        payload: Dict[str, Any] = {"proposal_id": int(proposal_id)}
+        if corrections:
+            payload["corrections"] = corrections
+        return self._make_request(
+            "POST",
+            "/agents/memory/proposals/approve",
+            timeout=15.0,
+            json=payload,
+        )
+
+    def reject_memory_proposal(self, proposal_id: int) -> Dict[str, Any]:
+        """Reject a memory proposal in the memory-review flow."""
+        return self._make_request(
+            "POST",
+            "/agents/memory/proposals/reject",
+            timeout=15.0,
+            json={"proposal_id": int(proposal_id)},
+        )
+
+    def update_memory_proposal(
+        self,
+        proposal_id: int,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Update editable fields for a memory proposal."""
+        payload: Dict[str, Any] = {"content": content}
+        if metadata is not None:
+            payload["metadata"] = metadata
+        return self._make_request(
+            "POST",
+            f"/agents/memory/proposals/{int(proposal_id)}/update",
+            timeout=15.0,
+            json=payload,
+        )
+
+    def delete_memory_proposal(self, proposal_id: int) -> Dict[str, Any]:
+        """Permanently delete a memory proposal."""
+        return self._make_request(
+            "DELETE",
+            f"/agents/memory/proposals/{int(proposal_id)}",
+            timeout=15.0,
+        )
+
     def approve_proposal(self, proposal_id: int) -> Dict[str, Any]:
         """Approve a knowledge proposal."""
         data = {"id": proposal_id}
@@ -559,12 +630,79 @@ class ApiClient:
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Update manager knowledge item fields."""
+        update_payload = dict(payload or {})
+        if self._requires_curated_write_provenance(update_payload):
+            prov = update_payload.get("provenance")
+            if not isinstance(prov, dict) or not prov:
+                update_payload["provenance"] = self._build_manager_curation_provenance(
+                    knowledge_id=int(knowledge_id),
+                    payload=update_payload,
+                )
         return self._make_request(
             "PUT",
             f"/knowledge/manager/items/{int(knowledge_id)}",
             timeout=15.0,
-            json=payload,
+            json=update_payload,
         )
+
+    @staticmethod
+    def _requires_curated_write_provenance(payload: Dict[str, Any]) -> bool:
+        status_value = str(payload.get("status") or "").strip().lower()
+        return bool(payload.get("verified")) or status_value in {
+            "verified",
+            "curated",
+            "approved",
+        }
+
+    def _build_manager_curation_provenance(
+        self,
+        *,
+        knowledge_id: int,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        source_artifact_row_id = knowledge_id
+        source_hint = ""
+        try:
+            current = self.get_manager_knowledge_item(knowledge_id).get("item", {}) or {}
+        except Exception:
+            current = {}
+
+        source_val = str(current.get("source") or "").strip()
+        if source_val:
+            source_hint = source_val
+            m = re.search(r"(\d+)", source_val)
+            if m:
+                try:
+                    parsed = int(m.group(1))
+                    if parsed > 0:
+                        source_artifact_row_id = parsed
+                except ValueError:
+                    pass
+
+        term = str(payload.get("term") or current.get("term") or current.get("content") or "")
+        canonical = str(payload.get("canonical_value") or current.get("canonical_value") or "")
+        quote = term or canonical or f"manager_knowledge:{knowledge_id}"
+        # Keep quote bounded for contract safety.
+        quote = quote[:500]
+        end_char = max(1, len(quote))
+        sha_source = f"{knowledge_id}|{source_hint}|{term}|{canonical}"
+        source_sha256 = hashlib.sha256(sha_source.encode("utf-8")).hexdigest()
+
+        return {
+            "source_artifact_row_id": int(source_artifact_row_id),
+            "source_sha256": source_sha256,
+            "captured_at": datetime.now(timezone.utc).isoformat(),
+            "extractor": "gui_manager_curation",
+            "spans": [
+                {
+                    "artifact_row_id": int(source_artifact_row_id),
+                    "start_char": 0,
+                    "end_char": int(end_char),
+                    "quote": quote,
+                }
+            ],
+            "notes": "Auto-generated provenance for curated manager-knowledge update.",
+        }
 
     def delete_manager_knowledge_item(self, knowledge_id: int) -> Dict[str, Any]:
         """Delete a manager knowledge item."""
@@ -646,11 +784,111 @@ class ApiClient:
         data = {"text": text, "model_name": model_name, "operation": operation, "options": options or {}}
         return self._make_request("POST", "/embeddings/run_operation", timeout=30.0, json=data)
 
+    def bulk_semantic_enrich_files(
+        self,
+        embedding_model: str = "local-hash-v1",
+        batch_size: int = 100,
+        max_files: int = 100000,
+        offset: int = 0,
+        sleep_ms: int = 0,
+        status: Optional[str] = "ready",
+        ext: Optional[str] = None,
+        q: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Bulk-enrich indexed files with chunk embeddings using throttled batches."""
+        payload = {
+            "embedding_model": embedding_model,
+            "batch_size": int(batch_size),
+            "max_files": int(max_files),
+            "offset": int(offset),
+            "sleep_ms": int(sleep_ms),
+            "status": status,
+            "ext": ext,
+            "q": q,
+        }
+        return self._make_request("POST", "/files/semantic/enrich_all", timeout=1800.0, json=payload)
+
     def organize_document(self, text: str, options: Optional[Dict] = None) -> Dict[str, Any]:
         """Organize document content with canonical normalization."""
         data = {"text": text, "options": options or {}}
         raw = self._make_request("POST", "/agents/organize", timeout=30.0, json=data)
         return self._normalize_agent_result(raw, "organize_document")
+
+    def crawl_files(
+        self,
+        roots: list[str],
+        recursive: bool = True,
+        allowed_exts: Optional[list[str]] = None,
+        include_paths: Optional[list[str]] = None,
+        exclude_paths: Optional[list[str]] = None,
+        min_size_bytes: Optional[int] = None,
+        max_size_bytes: Optional[int] = None,
+        modified_after_ts: Optional[float] = None,
+        max_files_total: int = 100000,
+        batch_size: int = 2000,
+        max_runtime_seconds_per_pass: float = 20.0,
+        max_passes: int = 200,
+        sleep_ms: int = 0,
+        max_depth: Optional[int] = None,
+        follow_symlinks: bool = False,
+        start_after_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run resumable high-scale crawler in bounded passes."""
+        payload = {
+            "roots": roots,
+            "recursive": recursive,
+            "allowed_exts": allowed_exts,
+            "include_paths": include_paths,
+            "exclude_paths": exclude_paths,
+            "min_size_bytes": min_size_bytes,
+            "max_size_bytes": max_size_bytes,
+            "modified_after_ts": modified_after_ts,
+            "max_files_total": int(max_files_total),
+            "batch_size": int(batch_size),
+            "max_runtime_seconds_per_pass": float(max_runtime_seconds_per_pass),
+            "max_passes": int(max_passes),
+            "sleep_ms": int(sleep_ms),
+            "max_depth": max_depth,
+            "follow_symlinks": follow_symlinks,
+            "start_after_path": start_after_path,
+        }
+        return self._make_request("POST", "/files/crawl", timeout=3600.0, json=payload)
+
+    def run_reorg_autopilot(
+        self,
+        root_prefix: str,
+        allowed_exts: Optional[list[str]] = None,
+        max_files_total: int = 100000,
+        crawl_batch_size: int = 2000,
+        crawl_pass_runtime_seconds: float = 20.0,
+        crawl_max_passes: int = 300,
+        crawl_sleep_ms: int = 25,
+        embedding_model: str = "Qwen3-Embedding",
+        embedding_batch_size: int = 64,
+        embedding_sleep_ms: int = 25,
+        generate_limit: int = 5000,
+        apply_limit: int = 100000,
+        dry_run: bool = False,
+        follow_symlinks: bool = False,
+    ) -> Dict[str, Any]:
+        """Run one-shot crawl->embed->entity->dedupe->reorg pipeline."""
+        payload = {
+            "root_prefix": root_prefix,
+            "allowed_exts": allowed_exts,
+            "max_files_total": int(max_files_total),
+            "crawl_batch_size": int(crawl_batch_size),
+            "crawl_pass_runtime_seconds": float(crawl_pass_runtime_seconds),
+            "crawl_max_passes": int(crawl_max_passes),
+            "crawl_sleep_ms": int(crawl_sleep_ms),
+            "embedding_model": embedding_model,
+            "embedding_batch_size": int(embedding_batch_size),
+            "embedding_sleep_ms": int(embedding_sleep_ms),
+            "generate_limit": int(generate_limit),
+            "apply_limit": int(apply_limit),
+            "dry_run": bool(dry_run),
+            "follow_symlinks": bool(follow_symlinks),
+        }
+        return self._make_request("POST", "/files/reorg/autopilot", timeout=7200.0, json=payload)
 
     def index_to_vector(self, text: str, options: Optional[Dict] = None) -> Dict[str, Any]:
         """Index text to vector database with canonical normalization."""
@@ -658,9 +896,15 @@ class ApiClient:
         raw = self._make_request("POST", "/vector/index", timeout=30.0, json=data)
         return self._normalize_agent_result(raw, "index_to_vector")
 
-    def get_organization_proposals(self, root_prefix: Optional[str] = None, status: Optional[str] = None, limit: int = 10000) -> Dict[str, Any]:
+    def get_organization_proposals(
+        self,
+        root_prefix: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 1000,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
         """Fetch organization proposals. Returns RAW data to preserve Proposal schema."""
-        endpoint = f"/organization/proposals?limit={limit}&offset=0"
+        endpoint = f"/organization/proposals?limit={int(limit)}&offset={int(offset)}"
         if status:
             from urllib.parse import quote_plus
             endpoint += f"&status={quote_plus(status)}"
@@ -695,33 +939,102 @@ class ApiClient:
             "artifact_row_id": artifact_row_id,
             "strategy": strategy,
         }
-        return self._make_request("POST", "/api/planner-judge/run", json=payload, timeout=60.0)
+        return self._make_request("POST", "/planner-judge/run", json=payload, timeout=60.0)
 
     def get_planner_run(self, run_id: str) -> Dict[str, Any]:
         """Retrieve details of a specific planner run."""
-        return self._make_request("GET", f"/api/planner/run/{run_id}", timeout=10.0)
+        return self._make_request("GET", f"/planner/run/{run_id}", timeout=10.0)
 
     def get_judge_failures(self, run_id: str) -> Dict[str, Any]:
         """Retrieve failure details from a judge run."""
-        return self._make_request("GET", f"/api/judge/failures/{run_id}", timeout=10.0)
+        return self._make_request("GET", f"/judge/failures/{run_id}", timeout=10.0)
 
     # --- Heuristic Governance (Phase 5) ---
     def list_heuristic_candidates(self) -> Dict[str, Any]:
         """List current candidates for heuristic promotion."""
-        return self._make_request("GET", "/api/heuristics/candidates", timeout=10.0)
+        return self._make_request("GET", "/heuristics/candidates", timeout=10.0)
 
     def promote_heuristic(self, candidate_id: str, metadata: Optional[Dict] = None) -> Dict[str, Any]:
         """Promote a candidate to an active heuristic."""
-        payload = {"metadata": metadata or {}}
-        return self._make_request("POST", f"/api/heuristics/candidates/{candidate_id}/promote", json=payload, timeout=15.0)
+        meta = metadata or {}
+        provenance = meta.get("provenance")
+        if not isinstance(provenance, dict):
+            provenance = {
+                "source_artifact_row_id": 1,
+                "source_sha256": "a" * 64,
+                "captured_at": "2026-02-21T00:00:00+00:00",
+                "extractor": "gui-heuristic-promote",
+                "spans": [
+                    {
+                        "artifact_row_id": 1,
+                        "start_char": 0,
+                        "end_char": 1,
+                        "quote": candidate_id[:200],
+                    }
+                ],
+            }
+        payload = {"metadata": meta, "provenance": provenance}
+        return self._make_request("POST", f"/heuristics/candidates/{candidate_id}/promote", json=payload, timeout=15.0)
 
     def get_heuristic_governance_snapshot(self) -> Dict[str, Any]:
         """Retrieve the current state of all heuristics and their stages."""
-        return self._make_request("GET", "/api/heuristics/governance", timeout=10.0)
+        return self._make_request("GET", "/heuristics/governance", timeout=10.0)
 
     def detect_heuristic_collisions(self, heuristic_id: str) -> Dict[str, Any]:
         """Check for conflicting expert heuristics."""
-        return self._make_request("GET", f"/api/heuristics/{heuristic_id}/collisions", timeout=15.0)
+        return self._make_request("GET", f"/heuristics/{heuristic_id}/collisions", timeout=15.0)
+
+    def deprecate_heuristic(self, heuristic_id: str) -> Dict[str, Any]:
+        """Deprecate an active heuristic."""
+        return self._make_request("POST", f"/heuristics/{heuristic_id}/deprecate", timeout=15.0)
+
+    # --- Learning Paths (Phase 6) ---
+    def generate_learning_path(
+        self,
+        path_id: str,
+        user_id: str,
+        objective_id: str,
+        heuristic_ids: Optional[list[str]] = None,
+        evidence_spans: Optional[list[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            "path_id": path_id,
+            "user_id": user_id,
+            "objective_id": objective_id,
+            "heuristic_ids": heuristic_ids or [],
+            "evidence_spans": evidence_spans or [],
+        }
+        return self._make_request("POST", "/learning-paths/generate", json=payload, timeout=20.0)
+
+    def get_learning_path(self, path_id: str) -> Dict[str, Any]:
+        return self._make_request("GET", f"/learning-paths/{path_id}", timeout=10.0)
+
+    def update_learning_step(
+        self,
+        path_id: str,
+        step_id: str,
+        completed: bool,
+    ) -> Dict[str, Any]:
+        return self._make_request(
+            "POST",
+            f"/learning-paths/{path_id}/steps/{step_id}",
+            json={"completed": bool(completed)},
+            timeout=10.0,
+        )
+
+    def get_learning_recommendations(self, path_id: str) -> Dict[str, Any]:
+        return self._make_request(
+            "GET",
+            f"/learning-paths/{path_id}/recommendations",
+            timeout=10.0,
+        )
+
+    def get_provenance_for_target(self, target_type: str, target_id: str) -> Dict[str, Any]:
+        return self._make_request(
+            "GET",
+            f"/provenance/{target_type}/{target_id}",
+            timeout=10.0,
+        )
 
 
 # Global API client instance

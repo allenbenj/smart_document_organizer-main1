@@ -119,12 +119,13 @@ class KnowledgeBaseBrowser(QWidget):
         try:
             self.status_label.setText("Loading...")
             
-            # Query the vector store or document index
-            # This would be your actual API endpoint for listing processed documents
-            response = api_client.get("/knowledge/documents?limit=100", timeout=10)
+            # Query documents index from the API documents route.
+            response = api_client.get("/documents", params={"limit": 100}, timeout=10)
             
-            if isinstance(response, dict):
-                self.documents_cache = response.get("documents", [])
+            if isinstance(response, list):
+                self.documents_cache = response
+            elif isinstance(response, dict):
+                self.documents_cache = response.get("documents", []) or response.get("items", [])
             else:
                 self.documents_cache = []
             

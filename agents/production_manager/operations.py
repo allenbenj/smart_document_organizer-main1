@@ -10,14 +10,41 @@ from agents.core.models import AgentResult, AgentType
 
 
 class OperationsMixin:
+    async def _ensure_initialized(self, *, timeout_seconds: float = 20.0) -> bool:
+        """Ensure production init has finished (or timed out) before running an operation."""
+        if self.is_initialized:
+            return True
+
+        if hasattr(self, "initialize"):
+            await self.initialize()
+
+        if self.is_initialized:
+            return True
+
+        init_task = getattr(self, "_initialization_task", None)
+        if init_task is not None and not init_task.done():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(init_task),
+                    timeout=max(0.1, float(timeout_seconds)),
+                )
+            except asyncio.TimeoutError:
+                self.logger.warning(
+                    "Production initialization did not complete within %.1fs",
+                    timeout_seconds,
+                )
+            except Exception as wait_err:
+                self.logger.warning("Initialization wait failed: %s", wait_err)
+
+        return bool(self.is_initialized)
+
     async def process_document(self, file_path: str, **kwargs) -> AgentResult:
         """Process a document using the Document Processor agent."""
         start_time = datetime.now()
 
         try:
-            if not self.is_initialized and hasattr(self, "initialize"):
-                await self.initialize()
-            if not self.is_initialized:
+            init_wait_seconds = float(kwargs.pop("init_wait_seconds", 20.0))
+            if not await self._ensure_initialized(timeout_seconds=init_wait_seconds):
                 return AgentResult(
                     success=False,
                     data={},

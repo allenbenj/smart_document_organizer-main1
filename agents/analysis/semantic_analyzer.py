@@ -454,6 +454,7 @@ class LegalSemanticAnalyzer(BaseAgent, LegalMemoryMixin):
                 raise ValueError(f"Unsupported task_data type: {type(task_data)}")
 
             document_id = str(raw_document_id or f"doc_{hash(text)}")
+            file_id = metadata.get("file_id", None) # Extract file_id from metadata
 
             if not text or not text.strip():
                 raise ValueError("No text content provided for semantic analysis")
@@ -481,7 +482,7 @@ class LegalSemanticAnalyzer(BaseAgent, LegalMemoryMixin):
                 self.stats["collective_intelligence_hits"] += 1
 
             # Step 4: Store analysis results in shared memory
-            await self._store_semantic_analysis(analysis_result, document_id, text)
+            await self._store_semantic_analysis(analysis_result, document_id, text, file_id)
 
             # Step 5: Update statistics
             self._update_statistics(analysis_result)
@@ -1157,11 +1158,11 @@ class LegalSemanticAnalyzer(BaseAgent, LegalMemoryMixin):
         return analysis_result
 
     async def _store_semantic_analysis(
-        self, analysis_result: SemanticAnalysisResult, document_id: str, text: str
+        self, analysis_result: SemanticAnalysisResult, document_id: str, text: str, file_id: Optional[int] = None
     ):
-        """Store semantic analysis results in shared memory"""
+        """Store semantic analysis results in shared memory and optionally update files_index metadata."""
 
-        # Store analysis results
+        # Store analysis results in shared memory
         analysis_data = {
             "document_summary": analysis_result.document_summary,
             "key_topics": [topic.__dict__ for topic in analysis_result.key_topics],
@@ -1174,9 +1175,10 @@ class LegalSemanticAnalyzer(BaseAgent, LegalMemoryMixin):
             "processing_time": analysis_result.processing_time,
         }
 
+        memory_key = f"semantic_analysis_{document_id}"
         await self.store_memory(
             namespace="semantic_analyses",
-            key=f"semantic_analysis_{document_id}",
+            key=memory_key,
             content=json.dumps(analysis_data),
             memory_type=MemoryType.ANALYSIS,
             metadata={
@@ -1192,6 +1194,38 @@ class LegalSemanticAnalyzer(BaseAgent, LegalMemoryMixin):
             importance_score=analysis_result.confidence_score,
             confidence_score=analysis_result.confidence_score,
         )
+
+        # Optionally update the files_index metadata with a summary of semantic analysis
+        if file_id is not None and self.services and hasattr(self.services, 'db'):
+            try:
+                # Retrieve current metadata to merge
+                current_file = self.services.db.file_index_repo.get_indexed_file(file_id)
+                current_metadata = json.loads(current_file.get("metadata_json", "{}")) if current_file else {}
+
+                # Create a semantic summary for metadata_json
+                semantic_summary = {
+                    "semantic_analysis_summary": {
+                        "document_summary": analysis_result.document_summary[:500], # Truncate for brevity
+                        "document_type": analysis_result.document_classification.document_type,
+                        "legal_domain": analysis_result.document_classification.legal_domain,
+                        "key_topics": [t.topic_name for t in analysis_result.key_topics[:3]], # Top 3 topics
+                        "confidence": analysis_result.confidence_score,
+                        "memory_key": memory_key # Reference to full analysis in memory
+                    }
+                }
+                
+                # Merge new semantic summary into existing metadata
+                current_metadata.update(semantic_summary)
+
+                # Update the indexed file's metadata_json
+                self.services.db.file_index_repo.update_indexed_file_metadata(
+                    file_id, 
+                    json.dumps(current_metadata)
+                )
+                logger.info(f"Updated files_index {file_id} with semantic summary metadata.")
+            except Exception as e:
+                logger.error(f"Failed to update files_index {file_id} with semantic summary: {e}")
+
 
     def _update_statistics(self, analysis_result: SemanticAnalysisResult):
         """Update processing statistics"""

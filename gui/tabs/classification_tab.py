@@ -5,6 +5,8 @@ This module provides the UI for text classification operations using
 various models and custom labels.
 """
 
+from typing import Any, Optional
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -31,19 +33,19 @@ except ImportError:
 
 from ..services import api_client
 from .default_paths import get_default_dialog_dir
+from gui.core.base_tab import BaseTab
 
 
-class ClassificationTab(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.init_ui()
+class ClassificationTab(BaseTab):
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Classification", asyncio_thread, parent)
+        self.setup_ui()
 
-    def init_ui(self):
-        layout = QVBoxLayout()
+    def setup_ui(self):
         title = QLabel("Text Classification")
         title.setFont(QFont("Arial", 14, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
 
         input_group = QGroupBox("Text Input")
         input_layout = QVBoxLayout()
@@ -112,10 +114,9 @@ class ClassificationTab(QWidget):
         results_layout.addWidget(self.table)
         results_group.setLayout(results_layout)
 
-        layout.addWidget(input_group)
-        layout.addWidget(actions_group)
-        layout.addWidget(results_group)
-        self.setLayout(layout)
+        self.main_layout.addWidget(input_group)
+        self.main_layout.addWidget(actions_group)
+        self.main_layout.addWidget(results_group)
 
         self.run_btn.clicked.connect(self.do_classify)
         self.clear_btn.clicked.connect(self.clear_all)

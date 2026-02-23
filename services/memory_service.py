@@ -14,6 +14,14 @@ from typing import Any, Dict, List, Optional
 
 from mem_db.memory import proposals_db
 from mem_db.memory.memory_interfaces import MemoryRecord, MemoryType
+from mem_db.database import DatabaseManager
+from services.contracts.aedis_models import ProvenanceRecord
+from services.jurisdiction_service import jurisdiction_service
+from services.provenance_service import (
+    ProvenanceGateError,
+    ProvenanceService,
+    get_provenance_service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +43,18 @@ class MemoryService:
     """
     Service for Memory Proposal interactions and Memory Management.
     """
-    def __init__(self, memory_manager: Any = None, config_manager: Any = None):
+    def __init__(
+        self,
+        memory_manager: Any = None,
+        config_manager: Any = None,
+        database_manager: Optional[DatabaseManager] = None,
+        db_manager: Optional[DatabaseManager] = None,
+        provenance_service: Optional[ProvenanceService] = None, # New param
+    ):
         self.memory_manager = memory_manager
         self.config_manager = config_manager
+        self.database_manager = database_manager or db_manager
+        self.provenance_service = provenance_service or get_provenance_service() # New service
         self._approved_index: Dict[str, str] = {}
         # Ensure schema exists
         try:
@@ -49,6 +66,81 @@ class MemoryService:
         """Post-init injection if needed."""
         self.memory_manager = memory_manager
         self.config_manager = config_manager
+
+    def _extract_term_from_payload(self, payload: Dict[str, Any]) -> str:
+        content = payload.get("content")
+        if isinstance(content, str):
+            raw = content.strip()
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        for k in ("term", "text", "label", "name"):
+                            v = str(parsed.get(k) or "").strip()
+                            if v:
+                                return v
+                except Exception:
+                    pass
+                return raw[:255]
+        return str(payload.get("key") or "unknown").strip() or "unknown"
+
+    @staticmethod
+    def _requires_claim_grade_provenance(proposal_data: Dict[str, Any]) -> bool:
+        memory_type = str(proposal_data.get("memory_type") or "").strip().lower()
+        metadata = proposal_data.get("metadata") or {}
+        claim_grade_flag = bool(metadata.get("claim_grade")) if isinstance(metadata, dict) else False
+        governed_types = {
+            "analysis",
+            "claim",
+            "evidence",
+            "fact",
+            "issue",
+            "argument",
+        }
+        return claim_grade_flag or memory_type in governed_types
+
+    def _upsert_manager_knowledge_from_payload(
+        self,
+        *,
+        payload: Dict[str, Any],
+        proposal_id: int,
+    ) -> Optional[int]:
+        """Promote approved proposal into manager_knowledge for curated table visibility."""
+        db = self.database_manager
+        if db is None:
+            return None
+        try:
+            md = payload.get("metadata") or {}
+            if not isinstance(md, dict):
+                md = {}
+            term = self._extract_term_from_payload(payload)
+            category = str(md.get("entity_type") or md.get("category") or "Case").strip() or "Case"
+            canonical = str(md.get("canonical_value") or term).strip() or term
+            ontology_entity_id = str(md.get("ontology_entity_id") or "").strip() or None
+            jurisdiction = jurisdiction_service.resolve(metadata=md)
+
+            source = str(md.get("source") or f"memory_proposal:{proposal_id}").strip()
+            confidence = float(payload.get("confidence_score", 1.0))
+            notes = str(md.get("note") or md.get("notes") or "Approved from memory proposal").strip()
+
+            return db.knowledge_upsert(
+                term=term,
+                category=category,
+                canonical_value=canonical,
+                ontology_entity_id=ontology_entity_id,
+                jurisdiction=jurisdiction,
+                confidence=confidence,
+                status="verified",
+                verified=True,
+                verified_by="expert_approval",
+                source=source,
+                notes=notes,
+                attributes=md if md else None,
+                user_notes=notes,
+            )
+        except Exception:
+            logger.exception("Failed to upsert manager_knowledge for proposal_id=%s", proposal_id)
+            return None
 
     async def _store_memory_record(self, payload_dict: Dict[str, Any]) -> Optional[str]:
         """Store a record into the main MemoryManager."""
@@ -122,12 +214,13 @@ class MemoryService:
     async def get_pending_proposals(self, limit: int = 500, offset: int = 0) -> List[Dict[str, Any]]:
         """Get memory proposals awaiting review."""
         try:
-            return proposals_db.list_proposals(limit=limit, offset=offset)
+            items = proposals_db.list_proposals(limit=limit, offset=offset)
+            return [x for x in items if str(x.get("status") or "").strip().lower() == "pending"]
         except Exception as e:
             logger.error(f"Error listing proposals: {e}")
             return []
 
-    async def create_proposal(self, proposal_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def create_proposal(self, proposal_data: Dict[str, Any], provenance_record: Optional[ProvenanceRecord] = None) -> Dict[str, Any]:
         """
         Create a new memory proposal.
         Auto-approves if confidence is high enough.
@@ -140,6 +233,18 @@ class MemoryService:
                  threshold = float(val)
         except Exception:
             pass
+
+        if self._requires_claim_grade_provenance(proposal_data) and provenance_record is None:
+            raise ProvenanceGateError(
+                "memory_claim_grade_provenance_required: include a valid provenance record"
+            )
+
+        if provenance_record is not None:
+            self.provenance_service.validate_write_gate(
+                provenance_record,
+                "memory_proposal",
+                "pending",
+            )
 
         # Prepare proposal dict
         proposal = {
@@ -159,9 +264,58 @@ class MemoryService:
         proposal["flags"] = self._auto_flags(proposal)
 
         stored_record_id: Optional[str] = None
-        
-        # Auto-approve logic only if memory_manager is present
-        if proposal["confidence_score"] >= threshold and self.memory_manager:
+        db_id: Optional[int] = None # Declare db_id here for scope
+
+        # Store in DB and then record provenance
+        try:
+            db_id = proposals_db.add_proposal(proposal)
+            proposal["id"] = db_id
+
+            if provenance_record:
+                # Enforce Provenance Gate and Record Provenance
+                try:
+                    self.provenance_service.validate_write_gate(
+                        provenance_record,
+                        "memory_proposal",
+                        str(db_id),
+                    )
+                    prov_id = self.provenance_service.record_provenance(
+                        provenance_record,
+                        "memory_proposal",
+                        str(db_id),
+                    )
+                    # Store prov_id in metadata of the proposal
+                    if "metadata" not in proposal:
+                        proposal["metadata"] = {}
+                    proposal["metadata"]["provenance_id"] = prov_id
+                    # Now update the proposal in DB with provenance_id
+                    proposals_db.update_proposal(db_id, content=None, metadata=proposal["metadata"])
+
+                except ProvenanceGateError as prov_err:
+                    logger.error(f"Provenance gate failed for memory proposal {db_id}: {prov_err}. Deleting proposal.")
+                    proposals_db.delete_proposal(db_id)
+                    raise # Re-raise to fail the creation
+                except Exception as prov_err:
+                    logger.exception(f"An unexpected error occurred while recording provenance for memory proposal {db_id}: {prov_err}. Deleting proposal.")
+                    proposals_db.delete_proposal(db_id)
+                    raise # Re-raise to fail the creation
+
+            if proposal.get("status") == "approved":
+                self._upsert_manager_knowledge_from_payload(
+                    payload=proposal,
+                    proposal_id=int(db_id),
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to add proposal to DB: {e}")
+            if db_id is not None:
+                proposals_db.delete_proposal(db_id) # Ensure cleanup if subsequent steps fail
+            proposal["id"] = -1
+            raise # Re-raise to indicate failure
+
+
+        # Auto-approve logic only if memory_manager is present and not already handled by provenance failure
+        if proposal["confidence_score"] >= threshold and self.memory_manager and proposal.get("status") == "pending":
             rid = await self._store_memory_record(proposal)
             if rid:
                 stored_record_id = rid
@@ -171,14 +325,9 @@ class MemoryService:
                 self._approved_index[self._norm_key(proposal["namespace"], proposal["key"])] = (
                     self._normalize_content(proposal["content"])
                 )
+                # Update DB with new status and stored_record_id
+                proposals_db.approve_proposal(db_id, rid, datetime.now().isoformat())
 
-        # Store in DB
-        try:
-            db_id = proposals_db.add_proposal(proposal)
-            proposal["id"] = db_id
-        except Exception as e:
-            logger.error(f"Failed to add proposal to DB: {e}")
-            proposal["id"] = -1
 
         return {
             "id": proposal.get("id"),
@@ -188,9 +337,7 @@ class MemoryService:
 
     async def approve_proposal(self, proposal_id: int, corrections: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Approve a proposal, potentially with corrections."""
-        # Find proposal
-        all_props = proposals_db.list_proposals(limit=1000)
-        p = next((x for x in all_props if x.get("id") == proposal_id), None)
+        p = proposals_db.get_proposal(proposal_id)
         
         if not p:
             raise ValueError("Proposal not found")
@@ -214,6 +361,8 @@ class MemoryService:
         metadata_json = get_field(p, "metadata_json", "{}")
         metadata = json.loads(metadata_json) if isinstance(metadata_json, str) else (metadata_json or {})
 
+        approved_at = datetime.now().isoformat()
+
         payload_dict = {
             "namespace": get_field(p, "namespace"),
             "key": get_field(p, "key"),
@@ -222,9 +371,13 @@ class MemoryService:
             "agent_id": get_field(p, "agent_id"),
             "document_id": get_field(p, "document_id"),
             "metadata": metadata,
-            "confidence_score": get_field(p, "confidence", 1.0), # mapped name in DB
-            "importance_score": get_field(p, "importance", 1.0), # mapped name in DB
+            "confidence_score": 1.0, # Human approval gives 100% confidence
+            "importance_score": get_field(p, "importance_score", 1.0),
         }
+
+        # Hard-mark as expert verified for future extraction anchoring
+        payload_dict["metadata"]["expert_verified"] = True
+        payload_dict["metadata"]["verified_at"] = approved_at
 
         # Apply corrections
         if corrections:
@@ -236,11 +389,14 @@ class MemoryService:
         rid = await self._store_memory_record(payload_dict)
         if not rid:
             raise ValueError("Failed to store memory record")
-        
-        approved_at = datetime.now().isoformat()
+
         
         # Update DB
         proposals_db.approve_proposal(proposal_id, rid, approved_at)
+        self._upsert_manager_knowledge_from_payload(
+            payload=payload_dict,
+            proposal_id=int(proposal_id),
+        )
         
         # Update index
         self._approved_index[self._norm_key(payload_dict["namespace"], payload_dict["key"])] = (
@@ -254,9 +410,7 @@ class MemoryService:
         }
 
     async def reject_proposal(self, proposal_id: int) -> Dict[str, Any]:
-        p = None
-        all_props = proposals_db.list_proposals(limit=1000)
-        p = next((x for x in all_props if x.get("id") == proposal_id), None)
+        p = proposals_db.get_proposal(proposal_id)
         
         if not p:
             raise ValueError("Proposal not found")
@@ -264,6 +418,28 @@ class MemoryService:
         rejected_at = datetime.now().isoformat()
         proposals_db.reject_proposal(proposal_id, rejected_at)
         return {"id": proposal_id, "status": "rejected"}
+
+    async def update_proposal(self, proposal_id: int, content: str, metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Update the content and metadata of a proposal in the database."""
+        return proposals_db.update_proposal(proposal_id, content, metadata)
+
+    async def delete_proposal(self, proposal_id: int) -> bool:
+        """Delete a proposal and any linked stored memory record."""
+        proposal = proposals_db.get_proposal(proposal_id)
+        if not proposal:
+            return False
+
+        stored_record_id = proposal.get("stored_record_id")
+        if stored_record_id and self.memory_manager:
+            try:
+                await self.memory_manager.delete(str(stored_record_id))
+            except Exception:
+                logger.exception(
+                    "Failed to delete linked memory record for proposal_id=%s",
+                    proposal_id,
+                )
+
+        return proposals_db.delete_proposal(proposal_id)
 
     async def correct_record(self, record_id: str, updates: Dict[str, Any]) -> bool:
         if not self.memory_manager:
@@ -304,13 +480,13 @@ class MemoryService:
             else:
                 try:
                     flags = p["flags_json"]
-                except:
-                    pass
+                except (KeyError, TypeError):
+                    flags = None
 
             if isinstance(flags, str):
                 try:
                     flags_list = json.loads(flags)
-                except:
+                except (json.JSONDecodeError, TypeError):
                     flags_list = []
             else:
                 flags_list = flags if isinstance(flags, list) else []
@@ -329,7 +505,7 @@ class MemoryService:
     async def get_stats(self) -> Dict[str, Any]:
         try:
             return proposals_db.stats()
-        except:
+        except Exception:
             items = proposals_db.list_proposals(limit=1000)
             by_status = collections.defaultdict(int)
             for p in items:

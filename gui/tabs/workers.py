@@ -6,6 +6,8 @@ This module contains worker threads and dialog classes used by the GUI tabs.
 
 import os
 import time
+import logging
+import json # New import
 from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
@@ -13,43 +15,36 @@ from PySide6.QtWidgets import QDialog, QLabel, QTextEdit, QVBoxLayout
 
 try:
     import requests
+    import requests.exceptions # New import
 except ImportError:
     requests = None  # type: ignore
 
 from ..services import api_client
+from ..core.path_config import resolve_local_model_path
+from ..utils import (
+    collect_folder_content,
+    extract_content_from_response,
+    read_text_file_if_supported,
+)
+
+logger = logging.getLogger(__name__)
 
 
-def extract_content_from_response(resp):
-    """Extract document content from process_document API response.
-    
-    Handles the actual API response structure:
-    {"data": {"processed_document": {"content": "..."}}}
-    """
-    data = resp.get("data", {})
-    if isinstance(data, dict):
-        # Try current structure: data.processed_document.content
-        if "processed_document" in data:
-            proc_doc = data["processed_document"]
-            if isinstance(proc_doc, dict):
-                return proc_doc.get("content") or proc_doc.get("text") or ""
-        
-        # Fallback to legacy structures
-        if "value" in data and isinstance(data["value"], dict):
-            data = data["value"]
-        return data.get("content") or data.get("text") or ""
-    return ""
 
 
 def _read_text_file_if_supported(file_path: str) -> str:
-    """Read raw text for plaintext-like files to avoid summary/transformation paths."""
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext not in {".txt", ".md", ".markdown", ".csv", ".json", ".log"}:
-        return ""
-    try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read()
-    except Exception:
-        return ""
+    """Backwards-compatible wrapper over shared GUI utility."""
+    return read_text_file_if_supported(file_path)
+
+
+def _collect_folder_content_utility(folder_path: str, is_interruption_requested_fn=None) -> str:
+    """Backwards-compatible wrapper over shared GUI utility."""
+    return collect_folder_content(
+        folder_path,
+        process_document_fn=api_client.process_document,
+        extract_fn=extract_content_from_response,
+        is_interruption_requested_fn=is_interruption_requested_fn,
+    )
 
 
 class UploadFileWorker(QThread):
@@ -91,12 +86,7 @@ class UploadFolderWorker(QThread):
             if not requests:
                 raise RuntimeError("requests not available")
             
-            # Use data from this folder only - E:\Organization_Folder\02_Working_Folder\02_Analysis\08_Interviews
-            # We can override the path here if needed, but better to trust the input
-            # However, prompt mentioned: "No fake data. Use data from this folder only - E:\Organization_Folder\..."
-            # If the user selected a different folder, we should probably warn or redirect,
-            # but strictly changing the code logic to ONLY accept that path is brittle.
-            # Assuming 'path' passed here IS the one the user selected.
+            # Use the exact folder selected by the user to keep behavior explicit.
 
             if not os.path.exists(self.path):
                 raise FileNotFoundError(f"Folder not found: {self.path}")
@@ -288,6 +278,7 @@ class SemanticAnalysisWorker(QThread):
         file_path,
         text_input,
         analysis_type,
+        folder_path: str = "",
         options: Optional[dict] = None,
     ):
         super().__init__()
@@ -295,21 +286,26 @@ class SemanticAnalysisWorker(QThread):
         self.file_path = file_path
         self.text_input = text_input
         self.analysis_type = analysis_type
+        self.folder_path = folder_path
         self.options = options or {}
 
     def run(self):  # noqa: C901
         """Execute semantic analysis via API or local clustering engine."""
         try:
-            print(f"[SemanticInfoWorker] Starting '{self.analysis_type}' analysis...")
+            logger.info(f"[SemanticInfoWorker] Starting '{self.analysis_type}' analysis...")
             if self.isInterruptionRequested():
                 return
             
             # Determine text to analyze
             content = self.text_input.strip()
             if not content and self.file_path:
-                print(f"[SemanticInfoWorker] Reading content from {self.file_path}...")
+                logger.info(f"[SemanticInfoWorker] Reading content from {self.file_path}...")
                 resp = api_client.process_document(self.file_path)
                 content = extract_content_from_response(resp)
+            
+            if not content and self.folder_path:
+                logger.info(f"[SemanticInfoWorker] Collecting content from folder: {self.folder_path}...")
+                content = _collect_folder_content_utility(self.folder_path, self.isInterruptionRequested)
             
             if not content:
                 raise RuntimeError("No content to analyze.")
@@ -319,15 +315,24 @@ class SemanticAnalysisWorker(QThread):
 
             # OPTION 1: High-Resolution Strategic Clustering (Formal Service)
             if self.analysis_type == "Strategic Clustering":
-                print("[SemanticInfoWorker] Launching formal ThematicDiscoveryService...")
+                logger.info("[SemanticInfoWorker] Launching formal ThematicDiscoveryService...")
                 try:
                     from services.thematic_discovery_service import ThematicDiscoveryService
                     import asyncio
                     
                     # Resolve manager and loop
                     manager = getattr(self.asyncio_thread, "agent_manager", None)
+                    if manager is None:
+                        try:
+                            from agents.production_agent_manager import get_production_agent_manager
+                            manager = get_production_agent_manager()
+                        except Exception as exc:
+                            logger.warning(
+                                "SemanticInfoWorker could not initialize production agent manager: %s",
+                                exc,
+                            )
+
                     loop = getattr(self.asyncio_thread, "loop", None)
-                    
                     if not loop:
                         raise RuntimeError("Asyncio loop not available in worker")
                         
@@ -345,39 +350,51 @@ class SemanticAnalysisWorker(QThread):
                     
                     self.result_ready.emit({"type": "strategic_discovery", "data": results})
                     return
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"[SemanticInfoWorker] ThematicDiscoveryService API connection error: {e}")
+                    raise
+                except json.JSONDecodeError as e:
+                    logger.error(f"[SemanticInfoWorker] ThematicDiscoveryService invalid API response: {e}")
+                    raise
                 except Exception as e:
-                    print(f"[SemanticInfoWorker] Discovery Service failed: {e}")
+                    logger.exception(f"[SemanticInfoWorker] Discovery Service failed: {e}")
                     raise
 
             # OPTION 2: Standard Semantic Analysis (API or Local Long-Summarizer)
             if self.analysis_type == "Summarization" and len(content) > 5000:
-                print(f"[SemanticInfoWorker] Document length {len(content)} exceeds 5k chars. Using local LED-LongSummarizer...")
+                logger.info(f"[SemanticInfoWorker] Document length {len(content)} exceeds 5k chars. Using local LED-LongSummarizer...")
                 try:
                     from transformers import pipeline as transformers_pipeline
-                    led_ref = r"E:\Project\smart_document_organizer-main\models\led-base-16384"
+                    led_ref = resolve_local_model_path(
+                        env_var="SMART_DOC_LED_MODEL_PATH",
+                        relative_path="models/led-base-16384",
+                    )
                     summarizer = transformers_pipeline("summarization", model=led_ref, tokenizer=led_ref)
                     # Process in a single large window (LED specialty)
                     summary = summarizer(content[:16000], max_length=500, min_length=100, do_sample=False)[0]["summary_text"]
                     self.result_ready.emit({"summary": summary, "engine": "local_led_longformer"})
                     return
-                except Exception as e:
-                    print(f"[SemanticInfoWorker] Local LED failed, falling back to API: {e}")
+                except Exception as e: # This exception could be specific to transformers pipeline
+                    logger.warning(f"[SemanticInfoWorker] Local LED failed, falling back to API: {e}")
 
             if not requests:
                 raise RuntimeError("requests not available for API analysis")
             
-            print(f"[SemanticInfoWorker] Analyzing {len(content)} chars via API...")
+            logger.info(f"[SemanticInfoWorker] Analyzing {len(content)} chars via API...")
             body = api_client.analyze_semantic(content, {
                 "analysis_type": self.analysis_type,
                 "options": self.options,
             })
             data = body.get("data") or body.get("details") or body
             self.result_ready.emit(data)
-            
-        except Exception as e:
-            print(f"[SemanticInfoWorker] Error: {e}")
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e:
             self.error_occurred.emit(str(e))
-
+        except Exception as e:
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")
     def _label_clusters_with_llm(self, clusters: dict) -> dict:
         """Use LLM to identify high-level themes for each cluster."""
         labeled_clusters = {}
@@ -427,7 +444,7 @@ class EntityExtractionWorker(QThread):
     def run(self):  # noqa: C901
         """Execute entity extraction via API."""
         try:
-            print("[EntityExtractionWorker] Starting extraction...")
+            logger.info("[EntityExtractionWorker] Starting extraction...")
             if self.isInterruptionRequested():
                 return
             if not requests:
@@ -435,7 +452,7 @@ class EntityExtractionWorker(QThread):
             # Determine text to extract from
             content = self.text_input.strip()
             if not content and self.file_path:
-                print(f"[EntityExtractionWorker] Reading content from file: {self.file_path}")
+                logger.info(f"[EntityExtractionWorker] Reading content from file: {self.file_path}")
                 # Prefer direct raw-text read for plaintext-like formats.
                 content = _read_text_file_if_supported(self.file_path)
                 if not content:
@@ -444,13 +461,13 @@ class EntityExtractionWorker(QThread):
                     content = extract_content_from_response(resp)
 
             if not content:
-                print("[EntityExtractionWorker] No content found.")
+                logger.info("[EntityExtractionWorker] No content found.")
                 raise RuntimeError("No content to analyze")
             if self.isInterruptionRequested():
                 return
             # Call entity extraction endpoint
             entity_types = self.options.get("entity_types")
-            print(f"[EntityExtractionWorker] Calling extract_entities (Types: {entity_types})...")
+            logger.info(f"[EntityExtractionWorker] Calling extract_entities (Types: {entity_types})...")
             if not entity_types and self.extraction_type and self.extraction_type != "All":
                 entity_types = [self.extraction_type]
 
@@ -567,9 +584,16 @@ class EntityExtractionWorker(QThread):
                     "raw_response": final_body,
                 }
             )
-        except Exception as e:
+        except (IOError, FileNotFoundError, PermissionError) as e:
+            self.error_occurred.emit(f"File access error: {e}")
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e:
             self.error_occurred.emit(str(e))
-
+        except Exception as e:
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")
 
 class EntityExtractionFolderWorker(QThread):
     """Worker thread for folder-based entity extraction operations."""
@@ -647,8 +671,15 @@ class EntityExtractionFolderWorker(QThread):
                     try:
                         resp = api_client.process_document(path)
                         content = extract_content_from_response(resp)
+                    except requests.exceptions.RequestException as exc:
+                        file_errors.append({"file": path, "error": f"API connection error: {exc}"})
+                        continue
+                    except json.JSONDecodeError as exc:
+                        file_errors.append({"file": path, "error": f"Invalid API response: {exc}"})
+                        continue
                     except Exception as exc:
-                        file_errors.append({"file": path, "error": str(exc)})
+                        logger.exception("Unexpected error processing document '%s': %s", path, exc)
+                        file_errors.append({"file": path, "error": f"Unexpected error: {exc}"})
                         continue
 
                 if not content.strip():
@@ -671,15 +702,27 @@ class EntityExtractionFolderWorker(QThread):
                 file_entities: list[dict] = []
                 file_relationships: list[dict] = []
                 for model_name in model_plan:
-                    body = api_client.extract_entities(
-                        content,
-                        entity_types=entity_types,
-                        extraction_type="ner",
-                        extra_options={
-                            "extraction_model": model_name,
-                            "provenance_requested": True,
-                        },
-                    )
+                    try:
+                        body = api_client.extract_entities(
+                            content,
+                            entity_types=entity_types,
+                            extraction_type="ner",
+                            extra_options={
+                                "extraction_model": model_name,
+                                "provenance_requested": True,
+                            },
+                        )
+                    except requests.exceptions.RequestException as exc:
+                        file_errors.append({"file": path, "error": f"API connection error ({model_name}): {exc}"})
+                        continue
+                    except json.JSONDecodeError as exc:
+                        file_errors.append({"file": path, "error": f"Invalid API response ({model_name}): {exc}"})
+                        continue
+                    except Exception as exc:
+                        logger.exception("Unexpected error extracting entities with model '%s' from '%s': %s", model_name, path, exc)
+                        file_errors.append({"file": path, "error": f"Unexpected error ({model_name}): {exc}"})
+                        continue
+                    
                     last_request_ts = time.monotonic()
                     data = body.get("data") if isinstance(body.get("data"), dict) else {}
                     per_stats = (
@@ -762,9 +805,17 @@ class EntityExtractionFolderWorker(QThread):
                     },
                 }
             )
-        except Exception as e:
+        except (FileNotFoundError, PermissionError, IOError) as e:
+            self.error_occurred.emit(f"File system error: {e}")
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e:
             self.error_occurred.emit(str(e))
-
+        except Exception as e:
+            logger.exception("An unexpected error occurred during folder extraction: %s", e)
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")
 
 class LegalReasoningWorker(QThread):
     """Worker thread for legal reasoning operations."""
@@ -801,39 +852,6 @@ class LegalReasoningWorker(QThread):
         }
         return mapping.get(str(reasoning_type or "").strip(), "comprehensive")
 
-    def _collect_folder_content(self, folder_path: str) -> str:
-        if not folder_path or not os.path.isdir(folder_path):
-            return ""
-        supported_exts = {
-            ".txt",
-            ".md",
-            ".pdf",
-            ".docx",
-            ".doc",
-            ".rtf",
-            ".json",
-            ".csv",
-            ".html",
-            ".htm",
-        }
-        chunks: list[str] = []
-        for root, _, files in os.walk(folder_path):
-            for name in sorted(files):
-                if self.isInterruptionRequested():
-                    return ""
-                _, ext = os.path.splitext(name)
-                if ext.lower() not in supported_exts:
-                    continue
-                path = os.path.join(root, name)
-                try:
-                    resp = api_client.process_document(path)
-                    content = extract_content_from_response(resp).strip()
-                    if content:
-                        chunks.append(f"--- FILE: {path} ---\n{content}")
-                except Exception:
-                    continue
-        return "\n\n".join(chunks)
-
     def run(self):  # noqa: C901
         """Execute legal reasoning via API."""
         try:
@@ -848,7 +866,7 @@ class LegalReasoningWorker(QThread):
                 resp = api_client.process_document(self.file_path)
                 content = extract_content_from_response(resp)
             if not content and self.folder_path:
-                content = self._collect_folder_content(self.folder_path)
+                content = _collect_folder_content_utility(self.folder_path, self.isInterruptionRequested)
 
             if not content:
                 raise RuntimeError("No content to analyze")
@@ -870,9 +888,17 @@ class LegalReasoningWorker(QThread):
                 details = body.get("details")
                 data = details if isinstance(details, dict) else {}
             self.result_ready.emit(data)
-        except Exception as e:
+        except (IOError, FileNotFoundError, PermissionError) as e:
+            self.error_occurred.emit(f"File access error: {e}")
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e:
             self.error_occurred.emit(str(e))
-
+        except Exception as e:
+            logger.exception("An unexpected error occurred during legal reasoning: %s", e)
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")
 
 class EmbeddingWorker(QThread):
     """Worker thread for embedding operations."""
@@ -887,6 +913,8 @@ class EmbeddingWorker(QThread):
         model_name,
         operation,
         options: Optional[dict] = None,
+        file_path: str = "",
+        folder_path: str = "",
     ):
         super().__init__()
         self.asyncio_thread = asyncio_thread
@@ -894,6 +922,8 @@ class EmbeddingWorker(QThread):
         self.model_name = model_name
         self.operation = operation
         self.options = options or {}
+        self.file_path = file_path
+        self.folder_path = folder_path
 
     def run(self):  # noqa: C901
         """Execute embedding generation via API with local model mapping."""
@@ -902,6 +932,21 @@ class EmbeddingWorker(QThread):
                 return
             if not requests:
                 raise RuntimeError("requests not available")
+
+            content = self.text.strip()
+            source = "text"
+            if not content and self.file_path:
+                resp = api_client.process_document(self.file_path)
+                content = extract_content_from_response(resp).strip()
+                source = "file"
+            if not content and self.folder_path:
+                content = _collect_folder_content_utility(
+                    self.folder_path,
+                    self.isInterruptionRequested,
+                ).strip()
+                source = "folder"
+            if not content:
+                raise RuntimeError("No content to embed")
             
             # Map UI labels to backend EmbeddingModel values
             mapping = {
@@ -914,15 +959,27 @@ class EmbeddingWorker(QThread):
             
             # Call embedding endpoint
             body = api_client.run_embedding_operation(
-                self.text,
+                content,
                 backend_model,
                 self.operation,
                 options=self.options,
             )
-            self.result_ready.emit(body.get("data") or {})
-        except Exception as e:
+            result = body.get("data") or {}
+            if isinstance(result, dict):
+                result.setdefault("content_source", source)
+                result.setdefault("input_characters", len(content))
+            self.result_ready.emit(result)
+        except (IOError, FileNotFoundError, PermissionError) as e:
+            self.error_occurred.emit(f"File access error: {e}")
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e:
             self.error_occurred.emit(str(e))
-
+        except Exception as e:
+            logger.exception("An unexpected error occurred during embedding operation: %s", e)
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")
 
 class DocumentOrganizationWorker(QThread):
     """Worker thread for document organization operations."""
@@ -958,9 +1015,17 @@ class DocumentOrganizationWorker(QThread):
             # Call document organization endpoint
             body = api_client.organize_document(content)
             self.result_ready.emit(body.get("data") or {})
-        except Exception as e:
+        except (IOError, FileNotFoundError, PermissionError) as e:
+            self.error_occurred.emit(f"File access error: {e}")
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e:
             self.error_occurred.emit(str(e))
-
+        except Exception as e:
+            logger.exception("An unexpected error occurred during document organization: %s", e)
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")
 
 class VectorIndexWorker(QThread):
     """Worker thread for vector indexing operations."""
@@ -995,9 +1060,17 @@ class VectorIndexWorker(QThread):
             # Call vector index endpoint
             body = api_client.index_to_vector(content)
             self.result_ready.emit(body.get("data") or {})
-        except Exception as e:
+        except (IOError, FileNotFoundError, PermissionError) as e:
+            self.error_occurred.emit(f"File access error: {e}")
+        except requests.exceptions.RequestException as e:
+            self.error_occurred.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            self.error_occurred.emit(f"Invalid API response: {e}")
+        except RuntimeError as e:
             self.error_occurred.emit(str(e))
-
+        except Exception as e:
+            logger.exception("An unexpected error occurred during vector indexing: %s", e)
+            self.error_occurred.emit(f"An unexpected error occurred: {e}")
 
 class KGFromFilesWorker(QThread):
     progress_update = Signal(int, str)
@@ -1020,9 +1093,21 @@ class KGFromFilesWorker(QThread):
                 # Placeholder for KG extraction logic
                 self.progress_update.emit(i, "done")
             self.finished_ok.emit("KG extraction completed")
-        except Exception as e:
+        except (IOError, FileNotFoundError, PermissionError) as e:
+            logger.error(f"[KGFromFilesWorker] File access error for {file_path}: {e}")
+            self.finished_err.emit(f"File access error: {e}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[KGFromFilesWorker] API connection error for {file_path}: {e}")
+            self.finished_err.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"[KGFromFilesWorker] Invalid API response for {file_path}: {e}")
+            self.finished_err.emit(f"Invalid API response: {e}")
+        except RuntimeError as e:
+            logger.error(f"[KGFromFilesWorker] Runtime error for {file_path}: {e}")
             self.finished_err.emit(str(e))
-
+        except Exception as e:
+            logger.exception(f"[KGFromFilesWorker] An unexpected error occurred for {file_path}: {e}")
+            self.finished_err.emit(f"An unexpected error occurred: {e}")
 
 class PipelineRunnerWorker(QThread):
     finished_ok = Signal(dict)
@@ -1036,7 +1121,7 @@ class PipelineRunnerWorker(QThread):
     def run(self):  # noqa: C901
         try:
             name = self.preset.get("name", "Unknown")
-            print(f"[PipelineRunnerWorker] Running pipeline '{name}' on '{self.path}'...")
+            logger.info(f"[PipelineRunnerWorker] Running pipeline '{name}' on '{self.path}'...")
             if self.isInterruptionRequested():
                 return
             if not requests:
@@ -1044,14 +1129,25 @@ class PipelineRunnerWorker(QThread):
             if not self.path.strip():
                 raise ValueError("No file provided for pipeline processing")
             
-            print("[PipelineRunnerWorker] Sending run request...")
+            logger.info("[PipelineRunnerWorker] Sending run request...")
             result = api_client.run_pipeline(self.preset, self.path)
-            print("[PipelineRunnerWorker] Pipeline completed successfully.")
+            logger.info("[PipelineRunnerWorker] Pipeline completed successfully.")
             self.finished_ok.emit(result)
-        except Exception as e:
-            print(f"[PipelineRunnerWorker] Error: {e}")
+        except ValueError as e:
+            logger.error(f"[PipelineRunnerWorker] Value error for {self.path}: {e}")
+            self.finished_err.emit(f"Value error: {e}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[PipelineRunnerWorker] API connection error for {self.path}: {e}")
+            self.finished_err.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"[PipelineRunnerWorker] Invalid API response for {self.path}: {e}")
+            self.finished_err.emit(f"Invalid API response: {e}")
+        except RuntimeError as e:
+            logger.error(f"[PipelineRunnerWorker] Runtime error for {self.path}: {e}")
             self.finished_err.emit(str(e))
-
+        except Exception as e:
+            logger.exception(f"[PipelineRunnerWorker] An unexpected error occurred for {self.path}: {e}")
+            self.finished_err.emit(f"An unexpected error occurred: {e}")
 
 class FetchOntologyWorker(QThread):
     finished_ok = Signal(list)
@@ -1062,16 +1158,25 @@ class FetchOntologyWorker(QThread):
 
     def run(self):
         try:
-            print("[FetchOntologyWorker] Starting...")
+            logger.info("[FetchOntologyWorker] Starting...")
             if not requests:
                 raise RuntimeError("requests not available")
             
-            print("[FetchOntologyWorker] Calling api_client.get_ontology_entities()...")
+            logger.info("[FetchOntologyWorker] Calling api_client.get_ontology_entities()...")
             result = api_client.get_ontology_entities()
             # result structure from routes/ontology.py: {"items": [{"label": ..., ...}], ...}
             items = result.get("items", [])
-            print(f"[FetchOntologyWorker] Got {len(items)} ontology items.")
+            logger.info(f"[FetchOntologyWorker] Got {len(items)} ontology items.")
             self.finished_ok.emit(items)
-        except Exception as e:
-            print(f"[FetchOntologyWorker] Error: {e}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[FetchOntologyWorker] API connection error: {e}")
+            self.finished_err.emit(f"API connection error: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"[FetchOntologyWorker] Invalid API response: {e}")
+            self.finished_err.emit(f"Invalid API response: {e}")
+        except RuntimeError as e:
+            logger.error(f"[FetchOntologyWorker] Runtime error: {e}")
             self.finished_err.emit(str(e))
+        except Exception as e:
+            logger.exception(f"[FetchOntologyWorker] An unexpected error occurred: {e}")
+            self.finished_err.emit(f"An unexpected error occurred: {e}")

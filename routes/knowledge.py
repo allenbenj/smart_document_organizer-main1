@@ -2,10 +2,13 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from services.dependencies import get_database_manager_strict_dep, resolve_typed_service
+from services.contracts.aedis_models import ProvenanceRecord
+from services.jurisdiction_service import jurisdiction_service
 from services.knowledge_service import KnowledgeService
+from services.provenance_service import get_provenance_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -47,14 +50,17 @@ class ProposalPayload(BaseModel):
 
 class DecisionPayload(BaseModel):
     id: int
+    provenance: Dict[str, Any] = Field(default_factory=dict)
 
 
 class KnowledgeItemPayload(BaseModel):
-    term: str
+    term: Optional[str] = None
+    content: Optional[str] = None
     category: Optional[str] = None
     canonical_value: Optional[str] = None
     ontology_entity_id: Optional[str] = None
     framework_type: Optional[str] = None
+    jurisdiction: Optional[str] = None
     components: Optional[Dict[str, Any]] = None
     legal_use_cases: Optional[List[Dict[str, Any]]] = None
     preferred_perspective: Optional[str] = None
@@ -67,12 +73,12 @@ class KnowledgeItemPayload(BaseModel):
     resolution_evidence: Optional[str] = None
     resolution_date: Optional[str] = None
     next_review_date: Optional[str] = None
-    related_frameworks: Optional[List[str]] = None
+    related_frameworks: Optional[List[Any]] = None
     aliases: Optional[List[str]] = None
     description: Optional[str] = None
     attributes: Optional[Dict[str, Any]] = None
     relations: Optional[List[Dict[str, Any]]] = None
-    sources: Optional[List[str]] = None
+    sources: Optional[List[Any]] = None
     notes: Optional[str] = None
     source: Optional[str] = None
     confidence: Optional[float] = 0.5
@@ -97,6 +103,7 @@ class VerifyKnowledgePayload(BaseModel):
     verified: bool = True
     verified_by: Optional[str] = None
     user_notes: Optional[str] = None
+    provenance: Dict[str, Any] = Field(default_factory=dict)
 
 
 class OntologyLinkPayload(BaseModel):
@@ -104,14 +111,76 @@ class OntologyLinkPayload(BaseModel):
 
 
 class KnowledgeItemUpdatePayload(BaseModel):
+    term: Optional[str] = None
+    content: Optional[str] = None
+    category: Optional[str] = None
     canonical_value: Optional[str] = None
     ontology_entity_id: Optional[str] = None
+    framework_type: Optional[str] = None
+    jurisdiction: Optional[str] = None
+    components: Optional[Dict[str, Any]] = None
+    legal_use_cases: Optional[List[Dict[str, Any]]] = None
+    preferred_perspective: Optional[str] = None
+    is_canonical: Optional[bool] = None
+    issue_category: Optional[str] = None
+    severity: Optional[str] = None
+    impact_description: Optional[str] = None
+    root_cause: Optional[List[Dict[str, Any]]] = None
+    fix_status: Optional[str] = None
+    resolution_evidence: Optional[str] = None
+    resolution_date: Optional[str] = None
+    next_review_date: Optional[str] = None
+    related_frameworks: Optional[List[Any]] = None
+    aliases: Optional[List[str]] = None
+    description: Optional[str] = None
+    attributes: Optional[Dict[str, Any]] = None
+    relations: Optional[List[Dict[str, Any]]] = None
+    sources: Optional[List[Any]] = None
+    source: Optional[str] = None
     confidence: Optional[float] = None
     status: Optional[str] = None
     verified: Optional[bool] = None
     verified_by: Optional[str] = None
     user_notes: Optional[str] = None
     notes: Optional[str] = None
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _require_curated_write_provenance(
+    *,
+    provenance: Dict[str, Any],
+    target_type: str,
+    target_id: str,
+) -> Optional[int]:
+    try:
+        record = ProvenanceRecord.model_validate(provenance)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"provenance_required_for_curated_write: {exc}",
+        ) from exc
+
+    try:
+        return get_provenance_service().record_provenance(
+            record,
+            target_type=target_type,
+            target_id=target_id,
+        )
+    except RuntimeError as exc:
+        # Degrade gracefully when provenance backing tables are unavailable.
+        # Payload is validated above, so curation can continue in validated-only mode.
+        logger.warning(
+            "Provenance persistence unavailable for %s:%s; proceeding with validated-only provenance. %s",
+            target_type,
+            target_id,
+            exc,
+        )
+        return None
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"provenance_required_for_curated_write: {exc}",
+        ) from exc
 
 
 # --- Dependency ---
@@ -254,9 +323,15 @@ async def list_proposals(service: KnowledgeService = Depends(get_knowledge_servi
 @router.post("/knowledge/proposals/approve")
 async def approve_proposal(payload: DecisionPayload, service: KnowledgeService = Depends(get_knowledge_service)) -> Dict[str, Any]:
     try:
+        provenance_id = _require_curated_write_provenance(
+            provenance=payload.provenance,
+            target_type="knowledge_proposal_approval",
+            target_id=str(payload.id),
+        )
         result = await service.approve_proposal(payload.id)
         if not result:
             raise HTTPException(status_code=404, detail="Proposal not found")
+        result["provenance_id"] = provenance_id
         return result
     except HTTPException:
         raise
@@ -285,12 +360,19 @@ async def upsert_manager_knowledge(
     db=Depends(get_database_manager_strict_dep),
 ) -> Dict[str, Any]:
     try:
+        term_value = (payload.term or payload.content or "").strip()
+        if not term_value:
+            raise HTTPException(status_code=422, detail="term or content is required")
         item_id = db.knowledge_upsert(
-            term=payload.term,
+            term=term_value,
             category=payload.category,
             canonical_value=payload.canonical_value,
             ontology_entity_id=payload.ontology_entity_id,
             framework_type=payload.framework_type,
+            jurisdiction=jurisdiction_service.resolve(
+                payload.jurisdiction,
+                metadata=payload.attributes,
+            ),
             components=payload.components,
             legal_use_cases=payload.legal_use_cases,
             preferred_perspective=payload.preferred_perspective,
@@ -398,6 +480,13 @@ async def verify_manager_knowledge(
     db=Depends(get_database_manager_strict_dep),
 ) -> Dict[str, Any]:
     try:
+        provenance_id: Optional[int] = None
+        if payload.verified:
+            provenance_id = _require_curated_write_provenance(
+                provenance=payload.provenance,
+                target_type="manager_knowledge_verification",
+                target_id=str(knowledge_id),
+            )
         ok = db.knowledge_set_verification(
             knowledge_id,
             verified=payload.verified,
@@ -406,7 +495,10 @@ async def verify_manager_knowledge(
         )
         if not ok:
             raise HTTPException(status_code=404, detail="Knowledge item not found")
-        return {"success": True, "verified": payload.verified}
+        out: Dict[str, Any] = {"success": True, "verified": payload.verified}
+        if provenance_id is not None:
+            out["provenance_id"] = provenance_id
+        return out
     except HTTPException:
         raise
     except Exception as e:
@@ -499,10 +591,49 @@ async def update_manager_knowledge_item(
     db=Depends(get_database_manager_strict_dep),
 ) -> Dict[str, Any]:
     try:
+        status_value = str(payload.status or "").strip().lower()
+        requires_provenance = bool(payload.verified) or status_value in {
+            "verified",
+            "curated",
+            "approved",
+        }
+        provenance_id: Optional[int] = None
+        if requires_provenance:
+            provenance_id = _require_curated_write_provenance(
+                provenance=payload.provenance,
+                target_type="manager_knowledge_curation",
+                target_id=str(knowledge_id),
+            )
         ok = db.knowledge_update_item(
             knowledge_id,
+            term=(payload.term if payload.term is not None else payload.content),
+            category=payload.category,
             canonical_value=payload.canonical_value,
             ontology_entity_id=payload.ontology_entity_id,
+            framework_type=payload.framework_type,
+            jurisdiction=jurisdiction_service.resolve(
+                payload.jurisdiction,
+                metadata=payload.attributes,
+            ),
+            components=payload.components,
+            legal_use_cases=payload.legal_use_cases,
+            preferred_perspective=payload.preferred_perspective,
+            is_canonical=payload.is_canonical,
+            issue_category=payload.issue_category,
+            severity=payload.severity,
+            impact_description=payload.impact_description,
+            root_cause=payload.root_cause,
+            fix_status=payload.fix_status,
+            resolution_evidence=payload.resolution_evidence,
+            resolution_date=payload.resolution_date,
+            next_review_date=payload.next_review_date,
+            related_frameworks=payload.related_frameworks,
+            aliases=payload.aliases,
+            description=payload.description,
+            attributes=payload.attributes,
+            relations=payload.relations,
+            sources=payload.sources,
+            source=payload.source,
             confidence=payload.confidence,
             status=payload.status,
             verified=payload.verified,
@@ -513,7 +644,10 @@ async def update_manager_knowledge_item(
         if not ok:
             raise HTTPException(status_code=404, detail="Knowledge item not found or no fields to update")
         item = db.knowledge_get_item(knowledge_id)
-        return {"success": True, "item": item}
+        out: Dict[str, Any] = {"success": True, "item": item}
+        if provenance_id is not None:
+            out["provenance_id"] = provenance_id
+        return out
     except HTTPException:
         raise
     except Exception as e:
@@ -551,11 +685,12 @@ async def export_manager_knowledge(
 
             buf = io.StringIO()
             w = csv.writer(buf)
-            w.writerow(["id", "term", "category", "canonical_value", "ontology_entity_id", "verified", "confidence", "status", "verified_by", "user_notes"])
+            w.writerow(["id", "term", "content", "category", "canonical_value", "ontology_entity_id", "verified", "confidence", "status", "verified_by", "user_notes"])
             for it in items:
                 w.writerow([
                     it.get("id"),
                     it.get("term"),
+                    it.get("content") or it.get("term"),
                     it.get("category"),
                     it.get("canonical_value"),
                     it.get("ontology_entity_id"),

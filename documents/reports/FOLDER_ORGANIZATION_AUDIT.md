@@ -11,8 +11,7 @@
 
 ### Actions Completed (2026-02-16)
 1. ✅ **Archived orphaned database**: `agents/legal/organizer.db` (12KB) → `archive/databases_backup_20260216/`
-2. ✅ **Merged documentation folders**: All 17 files from `docs/` → `documents/` subdirectories
-3. ✅ **Deleted empty folder**: `docs/` folder removed
+2. ✅ **Merged documentation folders**: All 17 files from `docs/` → `documents/` subdirectories4. ✅ **Archived obsolete setup guides**: installation & quick-start docs moved to `documents/archive/guides/`3. ✅ **Deleted empty folder**: `docs/` folder removed
 4. ✅ **Created clarity READMEs**: Added README.md to `pipelines/`, `models/`, `databases/`
 5. ✅ **Created new subdirectories**: `documents/workflows/`, `documents/status/`
 
@@ -132,8 +131,8 @@ documents/
 ├── guides/ (8 files)
 │   ├── GUI_DEMONSTRATION.md
 │   ├── gui_api_key_workflow.md
-│   ├── INSTALLATION_GUIDE.md
-│   ├── QUICK_START_GUIDE.md
+│   ├── INSTALLATION_GUIDE.md               → moved to documents/archive/guides/
+│   ├── QUICK_START_GUIDE.md               → moved to documents/archive/guides/
 │   ├── sqlite_cheat_sheet.md
 │   ├── WEB_GUI_V2_LAUNCH.md
 │   └── WORKFLOW_WEBHOOKS.md

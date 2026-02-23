@@ -8,7 +8,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
@@ -444,19 +444,19 @@ class BugTrackerPanel(QWidget):
             QMessageBox.critical(self, "Error", f"Failed to export report: {e}")
 
 
-class DiagnosticsTab(QWidget):
+from gui.core.base_tab import BaseTab
+
+class DiagnosticsTab(BaseTab):
     """Main diagnostics tab with logs and bug tracking."""
     
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, asyncio_thread: Optional[Any] = None, parent=None):
+        super().__init__("Diagnostics", asyncio_thread, parent)
         self.init_ui()
         
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        
+    def setup_ui(self):
         # Title
         title = QLabel("<h2>🔍 System Diagnostics</h2>")
-        layout.addWidget(title)
+        self.main_layout.addWidget(title)
         
         # Description
         desc = QLabel(
@@ -464,7 +464,7 @@ class DiagnosticsTab(QWidget):
             "Use this tab to troubleshoot startup failures and document issues."
         )
         desc.setWordWrap(True)
-        layout.addWidget(desc)
+        self.main_layout.addWidget(desc)
         
         # Splitter for logs and bugs
         splitter = QSplitter(Qt.Vertical)
@@ -484,4 +484,4 @@ class DiagnosticsTab(QWidget):
         splitter.addWidget(bug_group)
         
         splitter.setSizes([400, 400])
-        layout.addWidget(splitter)
+        self.main_layout.addWidget(splitter)
