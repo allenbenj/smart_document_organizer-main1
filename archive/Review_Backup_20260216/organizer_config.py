@@ -58,7 +58,8 @@ class OrganizerConfig:
 def load_config_from_env() -> DeepSeekConfig:
     """Load DeepSeek config from environment variables."""
     return DeepSeekConfig(
-        api_key=os.environ.get("DEEPSEEK_API_KEY", "sk-b3510c65abbb45a89e5ea100698c54fd"),
-        base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1"),
-        model=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        api_key=os.environ.get("DEEPSEEK_API_KEY", ""),
+        base_url=os.environ.get("DEEPSEEK_BASE_URL", ""),
+        model=os.environ.get("DEEPSEEK_MODEL", "")
     )
+
