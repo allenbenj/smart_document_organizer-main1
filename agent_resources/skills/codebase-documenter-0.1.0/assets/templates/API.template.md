@@ -46,7 +46,7 @@ curl -X POST https://api.example.com/v1/auth/login \
 **Response:**
 ```json
 {
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token": "...",
   "expiresAt": "2024-12-31T23:59:59Z"
 }
 ```
