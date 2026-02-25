@@ -14,7 +14,7 @@ if __name__ == "__main__":
     console.print("Using 2M context window for full document analysis\n")
 
     # Grok API configuration
-    GROK_API_KEY = "xai-6mAVN4baeVItMqXsgTclktNjTVjO2LdI6vBEeXh2MH1wgdm9EPWVcAHNRC7R9k1Xy9SzNqueJ9o9NztY"
+    GROK_API_KEY = 
 
     organizer = GrokOrganizer(
         api_key=GROK_API_KEY,
@@ -39,3 +39,4 @@ if __name__ == "__main__":
         console.print(f"[red]Error: {e}[/red]")
         import traceback
         traceback.print_exc()
+
