@@ -1,8 +1,0 @@
-category,issue,severity,status,owner,acceptance
-router_import,agents.orchestration.message_bus missing for pipeline router,high,open,assistant,pipeline router included without import warning
-service_registration,enhanced_vector_store not registered warning,medium,open,assistant,startup without optional service unavailable warning
-service_registration,enhanced_persistence_manager not registered warning,medium,open,assistant,startup without optional service unavailable warning
-deprecation,string-key lookup memory_manager/config_manager/unified_memory_manager warnings,medium,open,assistant,no deprecated lookup warnings on startup
-dependency,chromadb unavailable vector disabled warning,medium,open,assistant,vector capability posture explicit and non-warning in core profile
-dependency,document processor optional libs missing warning noise,low,open,assistant,capability report replaces warning spam
-observability,startup lacks single structured compliance report endpoint,high,done,assistant,/api/startup/report returns complete report
