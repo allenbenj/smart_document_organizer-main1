@@ -128,7 +128,7 @@ Determine:
 1. Which folder from the list is most appropriate
 2. Your reasoning
 3. Confidence level (0-100)
-4. Optional: A better filename if current one is unclear"""
+4. Optional: A better filename if the current one is unclear.
 
     try:
         response = client.beta.chat.completions.parse(
@@ -154,7 +154,7 @@ Determine:
 
 
 def move_file(source: Path, categorization: FileCategorization, base_path: Path):
-    """Move file to target location."""
+    "Move file to target location."""
 
     target_dir = base_path / categorization.target_folder
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -202,7 +202,7 @@ def main():
     file_limit = int(sys.argv[1]) if len(sys.argv) > 1 else 50
     auto_delete = "--delete" in sys.argv
 
-    api_key = os.getenv("GROK_API_KEY", "xai-6mAVN4baeVItMqXsgTclktNjTVjO2LdI6vBEeXh2MH1wgdm9EPWVcAHNRC7R9k1Xy9SzNqueJ9o9NztY")
+    api_key = os.getenv("GROK_API_KEY", ")
     client = OpenAI(api_key=api_key, base_url="https://api.x.ai/v1")
 
     # Scan available folders
@@ -323,3 +323,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
