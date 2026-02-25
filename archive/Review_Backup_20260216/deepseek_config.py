@@ -33,7 +33,7 @@ from file_organizer.models.base import ModelConfig, ModelType
 
 
 # Default API key (set yours here if environment variable doesn't work)
-DEFAULT_DEEPSEEK_API_KEY = "sk-b3510c65abbb45a89e5ea100698c54fd"
+DEFAULT_DEEPSEEK_API_KEY = 
 
 
 def get_deepseek_config(
@@ -186,3 +186,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\nError: {e}")
         sys.exit(1)
+
