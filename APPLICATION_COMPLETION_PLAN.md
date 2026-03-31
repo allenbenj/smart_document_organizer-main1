@@ -1,5 +1,6 @@
 # Application Completion Plan
 ## Date: March 31, 2026
+## Last Updated: March 31, 2026 — deep code-scan pass integrated
 
 This plan replaces assumption-based completion claims with an evidence-based path to application readiness.
 
@@ -18,10 +19,27 @@ This plan replaces assumption-based completion claims with an evidence-based pat
 - Public documentation is out of sync with the actual application architecture. The README still describes a “Python-only desktop runtime (no web stack)” and tells users to run `python main.py`, while the codebase uses `Start.py`, `launch.py`, and a FastAPI backend.
 
 ### Known implementation gaps found in code
-- `services/search_service.py` contains a hybrid vector search placeholder and does not merge semantic/vector results yet.
-- `config/extraction_patterns.py` is still a placeholder implementation and returns empty entity/relationship results.
-- `agents/processors/document_processor.py` advertises `.doc`, `.xls`, and `.ppt` handling in the handler map, but those paths intentionally raise `NotImplementedError` and require conversion.
-- There are still UI follow-up TODOs such as settings/dialog routing and preview wiring.
+
+Severity classification applied after full code-scan (2026-03-31):
+
+#### P0 — Production Blockers (cause silent wrong behavior or hard runtime failure)
+
+- **`config/extraction_patterns.py`** — `PatternLoader` is a complete no-op. `extract_entities_from_text()` and `extract_relationships_from_text()` both return `[]` unconditionally. YAML loading is documented as TODO and was never implemented. Every extraction pipeline that delegates to this class silently produces empty results.
+- **`agents/extractors/document_utils.py`** — `LegalDocumentClassifier.classify()` unconditionally raises `RuntimeError` with the message "no runtime fallback implementation". No concrete subclass or fallback is registered anywhere in the codebase. Any pipeline invoking classification without an external override will hard-fail at runtime.
+- **`services/search_service.py`** — The vector hybrid merge block is a `pass` (line 43 TODO). When a vector store is wired, search calls it but immediately discards every result. Semantic search silently returns zero vector-augmented hits while appearing to execute normally.
+
+#### P1 — Feature Incomplete (degrade user experience, do not crash core paths)
+
+- **`agents/processors/document_processor.py`** — `.doc`, `.xls`, and `.ppt` are registered in the dispatch table but their handlers (`_process_docx` for `.doc`, `_process_excel` for `.xls`, `_process_powerpoint` for `.ppt`) raise `NotImplementedError`. All three conversion libraries (`python-docx`, `openpyxl`, `python-pptx`) are already declared in `requirements.txt`.
+- **`gui/ui/system_tray_icon.py`** — `open_settings()` (line 311) shows a `QMessageBox` placeholder reading "Settings dialog not yet implemented". No settings dialog class exists anywhere in the codebase.
+- **`gui/ui/global_search_dialog.py`** — The result action "open in document preview" is listed as a TODO (line 634). `gui/ui/document_preview_widget.py` exists but is not wired to the search dialog's result selection path.
+- **`agents/legal/precedent_analyzer.py`** — Temporal precedent analysis block contains a placeholder comment. The method structure is present but logic is not implemented.
+
+#### P2 — Documentation Drift (stale references, orphaned TODO comments)
+
+- **`agents/AGENTS_MAP.md` and `agents/ARCHITECTURE_MAP.md`** — All file path links reference `backend/src/agents/...` which does not exist in the current repository. Actual paths are `agents/processors/`, `agents/legal/`, `agents/extractors/`, etc. Every cross-reference in these maps is broken.
+- **`agents/base/core_integration.py`** — Line 65 carries a TODO stating that `EnhancedPersistence` was never resolved. The placeholder `AgentTask` class is documented as temporary. `UnifiedMemoryManager` is already available and could be wired directly.
+- **`README.md`** — Still describes a "Python-only desktop runtime (no web stack)" and instructs users to run `python main.py`. The actual architecture is a PySide6 GUI backed by a FastAPI service; the entry points are `launch.py` and `Start.py`.
 
 ## Completion Definition
 
@@ -103,6 +121,7 @@ Only one phase should be active at a time.
 #### Scope
 - Close or explicitly contract the user-visible gaps that are currently half-implemented.
 - Prioritize incomplete paths that can mislead users today.
+- Address all P0 and P1 items identified in the code-scan gap inventory above.
 
 #### Non-goals
 - Brand-new major subsystems
@@ -111,46 +130,73 @@ Only one phase should be active at a time.
 #### Risks
 - Users hit placeholder behavior in search and extraction.
 - File formats appear supported but fail late at runtime.
+- P0 gaps cause silent data loss (empty extraction results) that is hard to detect without inspection.
 
-#### Implementation plan
-- Either implement hybrid vector merge in `services/search_service.py` or remove the implied capability from exposed contracts.
-- Either implement real pattern loading/extraction in `config/extraction_patterns.py` or mark it internal/inactive until complete.
-- Make unsupported legacy formats fail early and clearly at the UI/API contract level instead of appearing supported in handler maps.
-- Resolve the highest-value GUI TODOs that block expected navigation or preview behavior.
+#### Implementation plan — ordered by severity
+
+**P0 work items (must complete before marking phase done):**
+
+1. `config/extraction_patterns.py` — Implement `PatternLoader.load_patterns()` using `pyyaml`. Wire the loaded patterns into `extract_entities_from_text()` and `extract_relationships_from_text()` using the existing `PATTERNS` dict as the baseline fallback. The YAML file path should default to `config/patterns.yaml` and be configurable via `ConfigurationManager`.
+2. `agents/extractors/document_utils.py` — Implement a concrete rule-based `LegalDocumentClassifier` fallback using keyword/regex heuristics against document text. This fallback must not raise; it may return a low-confidence result. Register it as the default so pipelines do not hard-fail.
+3. `services/search_service.py` — Implement the vector hybrid merge block. Execute `vector_store.search()` in parallel with the keyword query, then merge and re-rank results by score before returning `SearchResponse`. The merge must not silently discard vector results.
+
+**P1 work items:**
+
+4. `agents/processors/document_processor.py` — Implement `_process_docx()` for `.doc` using `python-docx` with a format-detection guard, `_process_excel()` for `.xls`/`.xlsx` using `openpyxl`, and `_process_powerpoint()` for `.ppt`/`.pptx` using `python-pptx`. Unsupported sub-variants should raise with a clear format message, not `NotImplementedError`.
+5. `gui/ui/system_tray_icon.py` — Create `gui/ui/settings_dialog.py` containing a `SettingsDialog` that exposes backend URL, API key, and LLM provider fields. Wire `open_settings()` to launch it modally. Persist values via `ConfigurationManager`.
+6. `gui/ui/global_search_dialog.py` — Wire `open_selected_document()` to pass the selected file path to `DocumentPreviewWidget` (already in `gui/ui/`). The preview widget should open inline in the dialog's right pane.
+7. `agents/legal/precedent_analyzer.py` — Implement the temporal analysis block or replace the placeholder comment with an explicit `raise NotImplementedError` inside an abstract method so the quality scanner flags it correctly.
+
+**P2 work items (required before Phase 4):**
+
+8. `agents/AGENTS_MAP.md` and `agents/ARCHITECTURE_MAP.md` — Replace all `backend/src/...` path references with the correct repo-relative paths (`agents/processors/`, `agents/legal/`, `agents/extractors/`, `agents/base/`, `core/container/`).
+9. `agents/base/core_integration.py` — Resolve the TODO on line 65. Either wire `UnifiedMemoryManager` directly in place of the orphaned `EnhancedPersistence` reference or remove the placeholder class and update call sites.
 
 #### Verification requirements
-- Contract tests for unsupported-format behavior
-- Tests for search behavior matching the documented capability set
-- Tests for extraction fallback behavior
+- `PatternLoader` returns non-empty entity results for a known test text string.
+- `LegalDocumentClassifier.classify()` returns a dict with at least `type` and `confidence` keys for any non-empty input; no `RuntimeError` raised.
+- Search API with a vector store wired returns results from both keyword and vector paths in the same response.
+- Processing a `.docx`, `.xlsx`, and `.pptx` file via `DocumentProcessor` succeeds without `NotImplementedError`.
+- Settings dialog opens, persists a value, and the persisted value is readable from `ConfigurationManager`.
+- All `AGENTS_MAP.md` file links resolve to files that exist in the repository.
+- Contract tests for unsupported-format behavior.
+- `tests/quality/test_no_runtime_stubs.py` scanner passes with no new violations.
 
 #### Done criteria
 - No placeholder behavior remains exposed as a finished feature.
 - Unsupported paths are explicit, documented, and handled gracefully.
+- All P0 items have passing tests.
+- All P1 items are either implemented with tests or explicitly scoped out with a contract-level error message.
 
 ### Phase 4: Release Readiness and Operational Sign-off
 #### Scope
 - Final readiness pass across docs, startup, verification, and user workflow proof.
+- Confirm all P2 documentation drift items are resolved.
 
 #### Non-goals
 - Net-new functionality
 
 #### Risks
 - The application is still difficult to evaluate externally even if internally improved.
+- P2 documentation drift items left unresolved will confuse contributors and tool-assisted navigation.
 
 #### Implementation plan
-- Create a short release checklist.
-- Record one reproducible end-to-end manual scenario.
-- Produce a concise known-limitations document.
+- Create a short release checklist covering: install, backend start, GUI start, core workflow smoke, known limitations.
+- Record one reproducible end-to-end manual scenario covering: document ingest → entity extraction → search → legal reasoning → knowledge graph view.
+- Produce a concise known-limitations document that explicitly lists: unsupported legacy Office sub-formats, NLP model download requirement, WSL backend path configuration for Windows users.
+- Confirm `agents/AGENTS_MAP.md` and `agents/ARCHITECTURE_MAP.md` are accurate and match the actual codebase.
 - Freeze scope and address only release-blocking defects.
 
 #### Verification requirements
 - Full required verification suite passes.
 - Manual scenario is executed successfully from a clean starting state.
 - Known limitations are reviewed and accepted.
+- `agents/AGENTS_MAP.md` links verified to resolve against the actual file tree.
 
 #### Done criteria
 - The application can be installed, launched, exercised, and verified without undocumented tribal knowledge.
 - Completion claims are backed by test evidence and one reproducible workflow.
+- No broken file references in architecture documentation.
 
 ## Immediate Next Phase
 
@@ -163,6 +209,7 @@ Reason:
 
 ## Evidence Snapshot Used For This Plan
 
+### Original evidence (plan creation)
 - `README.md` still claims a desktop-only runtime and points to `python main.py`.
 - `launch.py` is the current launcher entry point and references backend synchronization behavior.
 - `Start.py` is the backend application entry point and currently depends on FastAPI at import time.
@@ -170,3 +217,17 @@ Reason:
 - `config/extraction_patterns.py` still contains placeholder extraction behavior.
 - `agents/processors/document_processor.py` still maps legacy formats that intentionally raise `NotImplementedError`.
 - The repository currently contains 100 test files, but test execution is blocked in this environment by missing dependencies.
+
+### Additional evidence — deep code-scan (2026-03-31)
+- `config/extraction_patterns.py` `PatternLoader`: confirmed `extract_entities_from_text` and `extract_relationships_from_text` return `[]` unconditionally; YAML loading is absent.
+- `agents/extractors/document_utils.py` `LegalDocumentClassifier.classify()`: confirmed unconditional `RuntimeError`; no concrete subclass or registration mechanism exists in the codebase.
+- `services/search_service.py` line 43: confirmed the vector hybrid block is `pass`; vector results are obtained but immediately discarded before the response is built.
+- `agents/processors/document_processor.py` lines 710, 820, 864: confirmed `NotImplementedError` at the end of `_process_docx`, `_process_excel`, `_process_powerpoint` methods; all three dep libraries are in `requirements.txt` but unused.
+- `gui/ui/system_tray_icon.py` line 311: confirmed `open_settings()` shows a `QMessageBox` stub; no `SettingsDialog` class exists anywhere in `gui/`.
+- `gui/ui/global_search_dialog.py` line 634: confirmed `open_selected_document` TODO comment; `document_preview_widget.py` exists in `gui/ui/` but is not imported by the search dialog.
+- `agents/AGENTS_MAP.md` and `agents/ARCHITECTURE_MAP.md`: confirmed all file path links use `backend/src/...` prefix which does not correspond to any path in the current repo layout.
+- `agents/base/core_integration.py` line 65: confirmed orphaned TODO; `EnhancedPersistence` is referenced but never defined or imported anywhere.
+- `gui/gui_dashboard.py`: confirmed deprecated, now a compatibility shim to `professional_manager.py`; safe for eventual removal.
+- `app/bootstrap/routers.py` and `app/bootstrap/lifecycle.py`: confirmed fully implemented; all API routes are mounted and TaskMaster scheduler loop is operational.
+- `mem_db/migrations/phases/`: confirmed three migration phases (`p1`–`p3`) with both `up` and `down` SQL scripts present.
+- `diagnostics/`: startup report, bug tracker, runtime policy guard, import analyzer — all confirmed implemented with no placeholders.
