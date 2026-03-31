@@ -1,6 +1,6 @@
 # Application Completion Plan
 ## Date: March 31, 2026
-## Last Updated: March 31, 2026 — deep code-scan pass integrated
+## Last Updated: March 31, 2026 — Phase 1 + Phase 3 execution pass complete
 
 This plan replaces assumption-based completion claims with an evidence-based path to application readiness.
 
@@ -24,22 +24,22 @@ Severity classification applied after full code-scan (2026-03-31):
 
 #### P0 — Production Blockers (cause silent wrong behavior or hard runtime failure)
 
-- **`config/extraction_patterns.py`** — `PatternLoader` is a complete no-op. `extract_entities_from_text()` and `extract_relationships_from_text()` both return `[]` unconditionally. YAML loading is documented as TODO and was never implemented. Every extraction pipeline that delegates to this class silently produces empty results.
-- **`agents/extractors/document_utils.py`** — `LegalDocumentClassifier.classify()` unconditionally raises `RuntimeError` with the message "no runtime fallback implementation". No concrete subclass or fallback is registered anywhere in the codebase. Any pipeline invoking classification without an external override will hard-fail at runtime.
-- **`services/search_service.py`** — The vector hybrid merge block is a `pass` (line 43 TODO). When a vector store is wired, search calls it but immediately discards every result. Semantic search silently returns zero vector-augmented hits while appearing to execute normally.
+- **`config/extraction_patterns.py`** — ~~`PatternLoader` is a complete no-op.~~ **RESOLVED:** Fully implemented with 8 regex patterns, YAML loading, compiled patterns, and real extraction functions.
+- **`agents/extractors/document_utils.py`** — ~~`LegalDocumentClassifier.classify()` unconditionally raises `RuntimeError`.~~ **RESOLVED:** Rule-based classifier with 8 document type rules. Never raises.
+- **`services/search_service.py`** — ~~The vector hybrid merge block is a `pass`.~~ **RESOLVED:** Full vector hybrid merge with reciprocal-rank scoring and graceful fallback.
 
 #### P1 — Feature Incomplete (degrade user experience, do not crash core paths)
 
-- **`agents/processors/document_processor.py`** — `.doc`, `.xls`, and `.ppt` are registered in the dispatch table but their handlers (`_process_docx` for `.doc`, `_process_excel` for `.xls`, `_process_powerpoint` for `.ppt`) raise `NotImplementedError`. All three conversion libraries (`python-docx`, `openpyxl`, `python-pptx`) are already declared in `requirements.txt`.
-- **`gui/ui/system_tray_icon.py`** — `open_settings()` (line 311) shows a `QMessageBox` placeholder reading "Settings dialog not yet implemented". No settings dialog class exists anywhere in the codebase.
-- **`gui/ui/global_search_dialog.py`** — The result action "open in document preview" is listed as a TODO (line 634). `gui/ui/document_preview_widget.py` exists but is not wired to the search dialog's result selection path.
-- **`agents/legal/precedent_analyzer.py`** — Temporal precedent analysis block contains a placeholder comment. The method structure is present but logic is not implemented.
+- **`agents/processors/document_processor.py`** — ~~`.doc`, `.xls`, `.ppt` handlers raise `NotImplementedError`.~~ **RESOLVED:** Graceful metadata-only fallback for legacy formats.
+- **`gui/ui/system_tray_icon.py`** — ~~`open_settings()` shows a placeholder message.~~ **RESOLVED:** `SettingsDialog` created and wired.
+- **`gui/ui/global_search_dialog.py`** — ~~Preview not wired.~~ **RESOLVED:** Inline preview already functional via `load_preview()` + `QTextBrowser`.
+- **`agents/legal/precedent_analyzer.py`** — ~~Temporal analysis is a placeholder.~~ **RESOLVED:** Signal-word analysis scans ±300 chars for overruled/distinguished/questioned/followed.
 
 #### P2 — Documentation Drift (stale references, orphaned TODO comments)
 
-- **`agents/AGENTS_MAP.md` and `agents/ARCHITECTURE_MAP.md`** — All file path links reference `backend/src/agents/...` which does not exist in the current repository. Actual paths are `agents/processors/`, `agents/legal/`, `agents/extractors/`, etc. Every cross-reference in these maps is broken.
-- **`agents/base/core_integration.py`** — Line 65 carries a TODO stating that `EnhancedPersistence` was never resolved. The placeholder `AgentTask` class is documented as temporary. `UnifiedMemoryManager` is already available and could be wired directly.
-- **`README.md`** — Still describes a "Python-only desktop runtime (no web stack)" and instructs users to run `python main.py`. The actual architecture is a PySide6 GUI backed by a FastAPI service; the entry points are `launch.py` and `Start.py`.
+- **`agents/AGENTS_MAP.md` and `agents/ARCHITECTURE_MAP.md`** — ~~All paths reference `backend/src/agents/...`.~~ **RESOLVED:** All `backend/src/` prefixes stripped.
+- **`agents/base/core_integration.py`** — ~~Orphaned TODO on line 65.~~ **RESOLVED:** Comment updated. Adapter classes are implemented and wrapping real implementations.
+- **`README.md`** — Still describes a "Python-only desktop runtime (no web stack)" and instructs users to run `python main.py`. The actual architecture is a PySide6 GUI backed by a FastAPI service; the entry points are `launch.py` and `Start.py`. **→ RESOLVED: README fully rewritten.**
 
 ## Completion Definition
 
@@ -197,6 +197,50 @@ Only one phase should be active at a time.
 - The application can be installed, launched, exercised, and verified without undocumented tribal knowledge.
 - Completion claims are backed by test evidence and one reproducible workflow.
 - No broken file references in architecture documentation.
+
+---
+
+## Execution Log
+
+### Phase 1 — COMPLETE
+
+| Item | Status | Notes |
+|------|--------|-------|
+| Update `README.md` | ✅ Done | Complete rewrite: corrected entry points (`Start.py`, `launch.py`), documented dependency tiers, env vars, project layout, known limitations. |
+| Audit status documents | ✅ Done | `Codex_Readme.md` confirmed as process framework (no changes needed). |
+
+### Phase 3 — Feature Contract Hardening — COMPLETE
+
+#### P0 — Production Blockers
+
+| # | Target | Status | Summary |
+|---|--------|--------|---------|
+| 1 | `config/extraction_patterns.py` | ✅ Done | Complete rewrite: 8 built-in regex patterns, `PatternLoader` with YAML loading via pyyaml, compiled regex, real `extract_entities_from_text()` and `extract_relationships_from_text()` with sentence-based co-occurrence logic. Falls back to built-in patterns when YAML absent. |
+| 2 | `agents/extractors/document_utils.py` | ✅ Done | Complete rewrite: `LegalDocumentClassifier` now has 8 classification rules with keyword+filename matching. Returns `{type, confidence, matched_keywords, method}`. Confidence scaled 0.1–0.85. Never raises. |
+| 3 | `services/search_service.py` | ✅ Done | Implemented vector hybrid merge: embeds query text, calls `vector_store.search()`, merges results via reciprocal-rank scoring (0.6 keyword + 0.4 vector), deduplicates by document id. Falls back gracefully if vector store or embedding model unavailable. |
+
+#### P1 — Feature Incomplete
+
+| # | Target | Status | Summary |
+|---|--------|--------|---------|
+| 4 | `agents/processors/document_processor.py` | ✅ Done | Replaced `NotImplementedError` for `.doc`, `.xls`, `.ppt` with graceful fallbacks that log a warning and return metadata-only results (`legacy_doc_metadata_only`, etc.). No crash; pipeline continues. |
+| 5 | `gui/ui/settings_dialog.py` | ✅ Done | Created `SettingsDialog` with tabs for General, Agents, Vector/Embedding, Memory. All settings backed by `ConfigurationManager` get/set. Wired `open_settings()` in `system_tray_icon.py` to launch the dialog modally. |
+| 6 | `gui/ui/global_search_dialog.py` | ✅ N/A | Inline preview already implemented via `load_preview()` + `QTextBrowser`. The dialog reads file content and renders HTML preview on selection. `DocumentPreviewWidget` is a heavier widget better suited for tabs, not popups. No change needed. |
+| 7 | `agents/legal/precedent_analyzer.py` | ✅ Done | Implemented signal-word temporal analysis in `_determine_temporal_status()`. Scans ±300 chars around citation for overruled/distinguished/questioned/followed keywords. Returns status string used in `PrecedentMatch.temporal_status`. |
+
+#### P2 — Documentation Drift
+
+| # | Target | Status | Summary |
+|---|--------|--------|---------|
+| 8 | `agents/AGENTS_MAP.md` and `agents/ARCHITECTURE_MAP.md` | ✅ Done | Stripped all `backend/src/` prefixes. Paths now correctly reference `agents/processors/`, `agents/legal/`, etc. |
+| 9 | `agents/base/core_integration.py` | ✅ Done | Replaced orphaned TODO comment on line 65 with accurate description. The adapter classes (`EnhancedVectorStore`, `EnhancedPersistenceManager`) are implemented and wrapping actual implementations. |
+
+### Remaining Work
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 2: Verification Baseline Recovery | Not started | Requires provisioned environment with all dependencies to run pytest. |
+| Phase 4: Release Readiness | Not started | Blocked on Phase 2 completion. |
 
 ## Immediate Next Phase
 

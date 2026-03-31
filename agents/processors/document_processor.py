@@ -707,9 +707,17 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
 
     async def _process_docx(self, file_path: Path) -> tuple:
         if file_path.suffix.lower() == ".doc":
-            raise NotImplementedError(
-                ".doc files are not supported. Please convert to .docx first."
+            logger.warning(
+                "Legacy .doc format detected: %s. Convert to .docx for full text extraction.",
+                file_path.name,
             )
+            stat = file_path.stat()
+            metadata = {
+                "file_name": file_path.name,
+                "file_size": stat.st_size,
+                "format_warning": "Legacy .doc format — convert to .docx for full text extraction.",
+            }
+            return "", metadata, None, None, "legacy_doc_metadata_only"
         if not DOCX_AVAILABLE:
             raise RuntimeError(
                 "python-docx is not installed, cannot process DOCX files."
@@ -817,9 +825,17 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
 
     async def _process_excel(self, file_path: Path) -> tuple:
         if file_path.suffix.lower() == ".xls":
-            raise NotImplementedError(
-                ".xls files are not supported. Please convert to .xlsx first."
+            logger.warning(
+                "Legacy .xls format detected: %s. Convert to .xlsx for full data extraction.",
+                file_path.name,
             )
+            stat = file_path.stat()
+            metadata = {
+                "file_name": file_path.name,
+                "file_size": stat.st_size,
+                "format_warning": "Legacy .xls format — convert to .xlsx for full data extraction.",
+            }
+            return "", metadata, None, None, "legacy_xls_metadata_only"
         if not EXCEL_AVAILABLE:
             raise RuntimeError(
                 "pandas/openpyxl not installed, cannot process Excel files."
@@ -861,9 +877,17 @@ class DocumentProcessor(BaseAgent, DocumentProcessingMixin, LegalMemoryMixin):
 
     async def _process_powerpoint(self, file_path: Path) -> tuple:
         if file_path.suffix.lower() == ".ppt":
-            raise NotImplementedError(
-                ".ppt files are not supported. Please convert to .pptx first."
+            logger.warning(
+                "Legacy .ppt format detected: %s. Convert to .pptx for full slide extraction.",
+                file_path.name,
             )
+            stat = file_path.stat()
+            metadata = {
+                "file_name": file_path.name,
+                "file_size": stat.st_size,
+                "format_warning": "Legacy .ppt format — convert to .pptx for full slide extraction.",
+            }
+            return "", metadata, None, None, "legacy_ppt_metadata_only"
         if not PPTX_AVAILABLE:
             raise RuntimeError(
                 "python-pptx not installed, cannot process PowerPoint files."

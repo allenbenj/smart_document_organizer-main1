@@ -817,7 +817,9 @@ class LegalPrecedentAnalyzer(BaseAgent, LegalMemoryMixin):
                         citation=citation,
                         similarity_score=overall_similarity,
                         authority_weight=authority_weight,
-                        temporal_status=self._determine_temporal_status(citation),
+                    temporal_status=self._determine_temporal_status(
+                        citation, context_text
+                    ),
                         precedent_type=citation.authority_level,
                         factual_similarity=factual_sim,
                         legal_similarity=legal_sim,
@@ -904,14 +906,77 @@ class LegalPrecedentAnalyzer(BaseAgent, LegalMemoryMixin):
 
         return base_weight
 
-    def _determine_temporal_status(self, citation: ExtractedCitation) -> str:
-        """Determine temporal status of precedent"""
+    def _determine_temporal_status(
+        self, citation: ExtractedCitation, context_text: str = ""
+    ) -> str:
+        """Determine temporal status of a precedent by analysing signal words
+        in the surrounding text.
 
-        # Placeholder for temporal analysis
-        # Would check if case has been overruled, distinguished, etc.
-        # This would require integration with legal databases
+        Returns one of: ``current``, ``overruled``, ``distinguished``,
+        ``questioned``, ``followed``.
+        """
 
-        return "current"  # Assume current unless we have evidence otherwise
+        # Build a window of text around the citation for signal-word analysis.
+        window_size = 300  # chars each side
+        start = max(0, citation.start_pos - window_size)
+        end = min(len(context_text), citation.end_pos + window_size)
+        window = context_text[start:end].lower() if context_text else ""
+
+        # Signal-word lists ordered by severity; first match wins.
+        _SIGNALS = [
+            (
+                "overruled",
+                [
+                    "overruled",
+                    "overrule",
+                    "no longer good law",
+                    "abrogated",
+                    "reversed",
+                    "vacated",
+                ],
+            ),
+            (
+                "distinguished",
+                [
+                    "distinguished",
+                    "distinguishable",
+                    "not applicable",
+                    "inapposite",
+                    "factually distinct",
+                ],
+            ),
+            (
+                "questioned",
+                [
+                    "questioned",
+                    "called into question",
+                    "criticised",
+                    "criticized",
+                    "doubted",
+                    "but see",
+                    "contra",
+                ],
+            ),
+            (
+                "followed",
+                [
+                    "followed",
+                    "affirmed",
+                    "reaffirmed",
+                    "adopted",
+                    "applied",
+                    "relying on",
+                    "consistent with",
+                ],
+            ),
+        ]
+
+        for status, keywords in _SIGNALS:
+            for kw in keywords:
+                if kw in window:
+                    return status
+
+        return "current"
 
     def _calculate_authority_distribution(
         self, matches: List[PrecedentMatch]

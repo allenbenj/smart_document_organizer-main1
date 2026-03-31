@@ -61,8 +61,8 @@ class AgentTask:
         self.metadata = metadata or {}
 
 
-# Placeholder imports for modules that don't exist yet
-# TODO: Implement or find actual implementations for these
+# Adapter classes for integration layer expectations
+# These wrap the actual implementations (e.g. UnifiedVectorStore).
 class EnhancedVectorStore:
     """Adapter around UnifiedVectorStore for integration-layer expectations."""
 

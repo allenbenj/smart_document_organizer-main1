@@ -312,12 +312,25 @@ class DocumentOrganizerTrayIcon(QSystemTrayIcon):
         """Open settings dialog."""
         if self.main_window:
             self.show_main_window()
-            # TODO: Open settings dialog
-            QMessageBox.information(
-                self.main_window,
-                "Settings",
-                "Settings dialog not yet implemented.\n\nComing soon!"
-            )
+            config = getattr(self.main_window, "config_manager", None)
+            if config is None:
+                QMessageBox.warning(
+                    self.main_window,
+                    "Settings",
+                    "Configuration manager is not available.",
+                )
+                return
+            try:
+                from gui.ui.settings_dialog import SettingsDialog
+
+                dlg = SettingsDialog(config, parent=self.main_window)
+                dlg.exec()
+            except Exception as exc:
+                QMessageBox.warning(
+                    self.main_window,
+                    "Settings",
+                    f"Could not open settings dialog:\n{exc}",
+                )
     
     def show_about(self):
         """Show about dialog."""
